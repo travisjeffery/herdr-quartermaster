@@ -18,7 +18,7 @@ const usage = `quartermaster — one coordinator, a worktree and agent per bead,
 qm is a short alias: qm context is quartermaster context.
 
 Usage:
-  quartermaster coordinator [--agent claude|codex]     open (or focus) the coordinator agent
+  quartermaster coordinator [--agent K]                open (or focus) the coordinator agent
   quartermaster dispatch <bead> [--agent K] [--focus]  start a worker on a bead in its own worktree
   quartermaster focus [<bead>] [--agent K]             focus the bead's worker, else dispatch it
                                                        (no bead: read it from the clipboard)
@@ -39,6 +39,8 @@ Usage:
   quartermaster configure [--repo PATH]                first-time setup: config, ~/.local/bin link, agent view
   quartermaster unconfigure                            stop the ticker, remove the view and sidebar tokens
   quartermaster version
+
+K is the agent kind: claude, codex or muse; dispatch and focus also take auto.
 `
 
 func main() {
@@ -104,7 +106,7 @@ func run(args []string) error {
 	h := newHerdr()
 	cmd, rest := args[0], args[1:]
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	kind := fs.String("agent", "", "agent kind: claude or codex")
+	kind := fs.String("agent", "", "agent kind: claude, codex, muse or auto")
 	focus := fs.Bool("focus", false, "focus the new workspace")
 	repoFlag := fs.String("repo", "", "configure: the repository quartermaster works in, written to config.toml if it has none")
 	force := fs.Bool("force", false, "resolve even if the bead is open or its agent is working")
@@ -126,7 +128,7 @@ func run(args []string) error {
 		fmt.Println(msg)
 	case "dispatch":
 		if len(pos) != 1 {
-			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex] [--focus]")
+			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex|muse] [--focus]")
 		}
 		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Focus: *focus})
 		if err != nil {

@@ -6,7 +6,7 @@ You talk to one coordinator. It turns what you want into
 [beads](https://github.com/steveyegge/beads), starts a worker for each one in
 its own git worktree, and keeps checking on them for you, so you're only pulled
 in when someone needs a decision. It's a [Herdr](https://herdr.dev) plugin: the
-workers are ordinary Claude Code or Codex sessions in Herdr panes, and their
+workers are ordinary Claude Code, Codex or Muse Code sessions in Herdr panes, and their
 state shows in Herdr's sidebar.
 
 ## Why
@@ -61,8 +61,8 @@ nudges the coordinator; the coordinator reads the inbox through
    creates beads for the work (`bd create`, with parents and dependencies), and
    proposes threads. It waits for your go-ahead.
 2. **The coordinator dispatches.** `quartermaster dispatch <bead>` claims the bead,
-   creates a worktree on `<branch_prefix><bead>-<slug>`, starts Claude or Codex
-   named after the bead, and sends the **brief**: the bead id and title, the
+   creates a worktree on `<branch_prefix><bead>-<slug>`, starts Claude, Codex or
+   Muse named after the bead, and sends the **brief**: the bead id and title, the
    worktree and branch, the Linear key if there is one, how to report, and
    your `instructions.md`. If the agent opens on a startup prompt (folder
    trust), the brief goes to the **outbox** and you're notified; the ticker
@@ -201,8 +201,8 @@ once per head commit; otherwise the board shows
 - **Bot reviews** (Codex, CodeRabbit and other GitHub Apps) are told apart from
   human ones. Both go to the worker; only a human review notifies you.
 - **Resume.** Herdr restarts don't relaunch agents. `quartermaster resume` restarts
-  each claimed bead's agent in its worktree with `claude --continue` or
-  `codex resume --last`, as whichever agent claimed it. `quartermaster context`
+  each claimed bead's agent in its worktree with `claude --continue`,
+  `codex resume --last` or `muse resume --last`, as whichever agent claimed it. `quartermaster context`
   lists resumable threads, stale claims (in progress, no agent, worktree or
   PR, untouched 7 days) and other claims separately.
 - **Several repos.** Beads labelled `repo:<name>` work in that repo from
@@ -215,7 +215,8 @@ once per head commit; otherwise the board shows
   missing the key.
 - **Choosing the agent.** `worker_agent = "auto"` picks Codex only when both
   agents' usage readings are under 6 hours old and Codex has more left;
-  otherwise Claude.
+  otherwise Claude. It never picks Muse, which records no usage reading to
+  compare; ask for Muse with `--agent muse` or `worker_agent = "muse"`.
 - **Sweep** lists linked worktrees whose PR merged, whose bead is closed, or
   that git reports prunable. `--yes` removes only the ones that are clean,
   fully pushed, have no agent in them and whose bead isn't still active. It
@@ -334,7 +335,7 @@ failure that needs a look. You copy it and press your focus-clipboard key
 (`quartermaster.focus-clipboard`), and a worker starts on it without going through
 the coordinator. Anything with a bead can
 be started from the clipboard or from the board (`prefix+j`, then `c` for
-Claude or `x` for Codex).
+Claude, `x` for Codex or `m` for Muse).
 
 **15:30: things land.** #411 is approved and merged. Its row shows **merged**,
 and the ticker tells the worker, which checks that the rule actually loaded and
@@ -353,8 +354,8 @@ state, question, PR and lesson is in beads, and the next morning starts with
 the same `quartermaster context`.
 
 The board (`prefix+j`) lists threads by state plus the beads you've marked
-`next` and other ready beads: `↵` focus or start, `c`/`x` start with Claude or
-Codex, `n` toggle `next`, `y` copy the id, `p` copy a thread's pending
+`next` and other ready beads: `↵` focus or start, `c`/`x`/`m` start with Claude,
+Codex or Muse, `n` toggle `next`, `y` copy the id, `p` copy a thread's pending
 `RUN:` command, `/` filter, `r` refresh, `q` quit. `/` narrows the rows as
 you type, matching bead id, title, agent, state, PR number or repo and Linear
 key (every word, any case); `↵` keeps the filter and goes back to the keys
@@ -395,8 +396,26 @@ Once it's installed (see below), the first ten minutes:
 
 Herdr 0.9.1+, [`bd`](https://github.com/steveyegge/beads) with a custom
 `needs_me` status (`bd config set status.custom needs_me`), `gh` logged in, and
-Claude Code and/or Codex. Linux or macOS, on amd64 or arm64. Go is only needed
-to build from source.
+any of Claude Code, Codex and Muse Code. Linux or macOS, on amd64 or arm64. Go
+is only needed to build from source.
+
+### Muse Code workers
+
+Herdr 0.9.1 starts and tracks Muse itself (`--kind muse`), and Muse reports
+its own working, idle and blocked states to Herdr, so nothing extra is
+installed for it. Two things differ from Claude and Codex:
+
+- **Its sandbox hides what a worker needs.** Muse's default shell sandbox
+  runs commands without your environment, so `bd` can't see `BEADS_DIR`, and
+  `gh` comes back unauthenticated. Until you've configured
+  Muse's sandbox to allow them, a Muse worker can't keep its bead current or
+  open a PR. Starting Muse with `--disable-sandbox` is the blunt fix; that is
+  your call, and quartermaster doesn't make it for you.
+- **It reads `AGENTS.md`, not `CLAUDE.md` or Claude's hooks.** It falls back to
+  `CLAUDE.md` only when a project has no `AGENTS.md`, and it has hooks of its
+  own, so a `bd prime` SessionStart hook set up for Claude Code doesn't run in
+  it. The brief still names the bead and how to report; put anything else a
+  worker must know in `AGENTS.md`. The coordinator's folder gets both files.
 
 ## Install
 
@@ -448,8 +467,8 @@ type = "plugin_action"
 command = "quartermaster.coordinator"
 ```
 
-`quartermaster.focus-clipboard` (Claude) and `quartermaster.focus-clipboard-codex` focus
-or start the bead whose id is on the clipboard, if you want keys for those too.
+`quartermaster.focus-clipboard` (Claude), `quartermaster.focus-clipboard-codex` and
+`quartermaster.focus-clipboard-muse` focus or start the bead whose id is on the clipboard, if you want keys for those too.
 
 ### Upgrading from flatcircle, kelpie or shepherd
 
@@ -483,7 +502,7 @@ too, so unlink the old plugin, link or install this one, and rename
 ```toml
 repo = "~/src/myproject"
 branch_prefix = "tj/"     # worker branches are <prefix><bead>-<slug>
-worker_agent = "claude"   # "codex", or "auto": whichever has more quota left
+worker_agent = "claude"   # "codex", "muse", or "auto": Claude or Codex, whichever has more quota left
 coordinator_agent = "claude"
 tick_seconds = 15         # how often the ticker checks threads
 gh_seconds = 60           # how often it checks PRs
@@ -546,6 +565,6 @@ configured repository falls back to `repo` and shows as a warning in
 | `quartermaster unconfigure` | Stop the ticker and remove the agent view and sidebar tokens. |
 | `quartermaster version` | Print the version. |
 
-`K` is `claude`, `codex` or `auto`.
+`K` is `claude`, `codex`, `muse` or `auto`.
 
 `qm` is a short alias for `quartermaster`: `qm context` is `quartermaster context`.

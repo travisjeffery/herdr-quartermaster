@@ -168,3 +168,32 @@ func TestResumeKindResolvesAuto(t *testing.T) {
 		t.Fatalf("the claimer's kind wins over auto, got %q", k)
 	}
 }
+
+func TestMuseResumesItsLastSession(t *testing.T) {
+	if !validKinds["muse"] {
+		t.Fatal("muse is not a valid kind")
+	}
+	if got := strings.Join(resumeArgs["muse"], " "); got != "resume --last" {
+		t.Fatalf("muse resume args = %q", got)
+	}
+	if k := resumeKind(resumeCfg, Bead{Assignee: "muse"}, ""); k != "muse" {
+		t.Fatalf("a muse-claimed bead resumes as %q", k)
+	}
+}
+
+func TestEveryKindResumes(t *testing.T) {
+	for _, k := range kinds {
+		if _, ok := resumeArgs[k]; !ok {
+			t.Errorf("%s has no resume args", k)
+		}
+	}
+}
+
+func TestKindList(t *testing.T) {
+	if got := kindList(); got != "claude, codex or muse" {
+		t.Errorf("kindList() = %q", got)
+	}
+	if got := kindList("auto"); got != "claude, codex, muse or auto" {
+		t.Errorf(`kindList("auto") = %q`, got)
+	}
+}

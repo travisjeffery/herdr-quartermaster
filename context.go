@@ -201,7 +201,7 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
 - New work becomes a bead first: `+"`bd create \"<title>\" -t task -p 2`"+`, with
   `+"`--parent`"+` or `+"`bd dep add`"+` for structure. Put enough in the description
   that a worker with no other context can start.
-- `+"`quartermaster dispatch <bead> [--agent claude|codex]`"+` starts a worker; it claims the
+- `+"`quartermaster dispatch <bead> [--agent claude|codex|muse]`"+` starts a worker; it claims the
   bead and briefs the agent. One bead per thread.
 - Talk to a worker with `+"`herdr agent prompt <agent-name> \"...\"`"+` (agent name = bead
   id with dots as dashes). Read it with `+"`herdr agent read <name> --source recent-unwrapped --lines 120`"+`.

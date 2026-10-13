@@ -427,7 +427,7 @@ func runBoard(cfg Config) error {
 			}
 		case "r":
 			reload()
-		case "\r", "c", "x":
+		case "\r", "c", "x", "m":
 			r := sel()
 			if r == nil {
 				continue
@@ -442,6 +442,8 @@ func runBoard(cfg Config) error {
 				kind = "claude"
 			case "x":
 				kind = "codex"
+			case "m":
+				kind = "muse"
 			}
 			status = "starting " + r.bead.ID + "…"
 			drawBoard(rows, cur, status, filter, nil)
@@ -569,7 +571,7 @@ func renderBoard(rows []boardRow, cur int, status string, filter boardFilter, de
 		}
 	}
 	fmt.Fprintf(&s, "\x1b[%d;1H%s%s%s", hgt-1, ansiRed, fit(statusFor(rows, cur, status), w-1), ansiReset)
-	hint := "↵ focus/start  space detail  c claude  x codex  n next  y copy  p copy command  / filter  r refresh  q quit"
+	hint := "↵ focus/start  space detail  c claude  x codex  m muse  n next  y copy  p copy command  / filter  r refresh  q quit"
 	switch {
 	case filter.typing:
 		hint = "type to filter  ↵ keep  esc clear  ⌫ edit"

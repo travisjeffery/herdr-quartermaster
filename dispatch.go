@@ -11,7 +11,23 @@ import (
 	"time"
 )
 
-var validKinds = map[string]bool{"claude": true, "codex": true}
+// kinds are the agents quartermaster starts, by their Herdr kind, which is
+// also the executable and the actor a worker claims its bead as.
+var kinds = []string{"claude", "codex", "muse"}
+
+var validKinds = func() map[string]bool {
+	m := map[string]bool{}
+	for _, k := range kinds {
+		m[k] = true
+	}
+	return m
+}()
+
+// kindList names the kinds for messages: "claude, codex or muse".
+func kindList(extra ...string) string {
+	all := append(slices.Clone(kinds), extra...)
+	return strings.Join(all[:len(all)-1], ", ") + " or " + all[len(all)-1]
+}
 
 // brief is the first prompt a worker gets. It stays short: the bead holds the
 // task, bd prime (SessionStart hook) holds the workflow and memories.
@@ -67,7 +83,7 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 		kind = autoAgent(time.Now())
 	}
 	if !validKinds[kind] {
-		return "", fmt.Errorf("unknown agent kind %q (claude, codex or auto)", kind)
+		return "", fmt.Errorf("unknown agent kind %q (%s)", kind, kindList("auto"))
 	}
 	bd := Beads{actor: kind}
 	b, err := bd.Show(id)
@@ -216,7 +232,7 @@ func openCoordinator(cfg Config, h Herdr, kind string) (string, error) {
 		kind = cfg.CoordinatorAgent
 	}
 	if !validKinds[kind] {
-		return "", fmt.Errorf("unknown agent kind %q", kind)
+		return "", fmt.Errorf("unknown agent kind %q (%s)", kind, kindList())
 	}
 	home := coordinatorHome()
 	if err := os.MkdirAll(home, 0o755); err != nil {
