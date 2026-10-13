@@ -38,7 +38,8 @@ func headroom(r *quotaReading, now time.Time) (float64, bool) {
 }
 
 // pickAgent is worker_agent = "auto": codex only when both readings are
-// usable and codex has strictly more left.
+// usable and codex has strictly more left. It never picks muse, which leaves
+// no usage reading to compare.
 func pickAgent(claude, codex *quotaReading, now time.Time) string {
 	cl, ok1 := headroom(claude, now)
 	cx, ok2 := headroom(codex, now)

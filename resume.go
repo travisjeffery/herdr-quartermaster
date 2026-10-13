@@ -13,6 +13,7 @@ import (
 var resumeArgs = map[string][]string{
 	"claude": {"--continue"},
 	"codex":  {"resume", "--last"},
+	"muse":   {"resume", "--last"},
 }
 
 type worktreeLister func(repo string) ([]Worktree, error)
@@ -175,7 +176,7 @@ func unattended(cfg Config, h Herdr, prs map[string]PR) ([]Resumable, []Bead, er
 
 func resume(cfg Config, h Herdr, ids []string, kind string) ([]string, error) {
 	if kind != "" && !validKinds[kind] {
-		return nil, fmt.Errorf("unknown agent kind %q (claude or codex)", kind)
+		return nil, fmt.Errorf("unknown agent kind %q (%s)", kind, kindList())
 	}
 	res, _, err := unattended(cfg, h, loadState().PRs)
 	if err != nil {
@@ -203,7 +204,7 @@ func resume(cfg Config, h Herdr, ids []string, kind string) ([]string, error) {
 
 func resumeOne(cfg Config, h Herdr, r Resumable, kind string) (string, error) {
 	if !validKinds[kind] {
-		return "", fmt.Errorf("unknown agent kind %q (claude or codex)", kind)
+		return "", fmt.Errorf("unknown agent kind %q (%s)", kind, kindList())
 	}
 	id, name := r.Bead.ID, agentName(r.Bead.ID)
 	var pane string
