@@ -409,7 +409,8 @@ installed for it. Two things differ from Claude and Codex:
   runs commands without your environment, so `bd` can't see `BEADS_DIR`, and
   `gh` comes back unauthenticated, so a sandboxed Muse worker can't keep its
   bead current or open a PR. quartermaster therefore starts Muse with
-  `--disable-sandbox` unless `[agents.muse] args` says otherwise (see
+  `--disable-sandbox` and the `:auto-review` permission profile unless
+  `[agents.muse] args` says otherwise, and exports `BEADS_DIR` in its pane (see
   Configuration).
 - **It reads `AGENTS.md`, not `CLAUDE.md` or Claude's hooks.** It falls back to
   `CLAUDE.md` only when a project has no `AGENTS.md`, and it has hooks of its
@@ -521,15 +522,21 @@ verify_max = 20           # GitHub calls a pass may make beyond its probes
 gh_min_remaining = 1000   # skip a pass below this many GraphQL points left
 
 [agents.muse]             # per-kind args for the agent's own CLI, on dispatch, resume and the coordinator
-args = ["--disable-sandbox"]
+args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts
-it, ahead of any resume subcommand (`muse --disable-sandbox resume --last`).
-Muse defaults to `--disable-sandbox`: its sandbox scrubs the environment
-(`BEADS_DIR`) and blocks `gh`'s credentials, so a sandboxed worker can't use
-`bd` or open a PR. Set `args = []` to start it sandboxed. Other kinds start
-with no extra args.
+it, ahead of any resume subcommand (`muse --disable-sandbox ... resume --last`),
+and replace that kind's defaults. Muse defaults to the args above:
+`--disable-sandbox` because its sandbox scrubs the environment and blocks
+`gh`'s credentials, so a sandboxed worker can't use `bd` or open a PR; and the
+`:auto-review` permission profile, which keeps Muse's approval judge but lets
+it decide instead of waiting on a human nobody is watching. Set `args = []`
+for Muse's own defaults. Other kinds start with no extra args.
+
+Before starting any agent, quartermaster exports `BEADS_ACTOR` (the kind) and
+`BEADS_DIR` (`beads_dir`) in its pane, so `bd` finds the database from a
+worktree. Claude and Codex can set these in their own configs; Muse can't.
 
 The ticker always follows `herdr_socket` (herdr's default server unless set),
 not the server that happened to start it: every herdr server that loads the

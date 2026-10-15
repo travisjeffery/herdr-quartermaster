@@ -222,6 +222,12 @@ func (h Herdr) TabRename(tab, label string) error {
 	return err
 }
 
+// Run types a command into a pane's shell and presses Enter.
+func (h Herdr) Run(pane, command string) error {
+	_, err := h.call(10*time.Second, "pane", "run", pane, command)
+	return err
+}
+
 // AgentStart starts an agent in a pane; agentArgs go to the agent's own CLI.
 func (h Herdr) AgentStart(name, kind, pane string, agentArgs ...string) error {
 	args := []string{"agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "30000"}
