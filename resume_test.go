@@ -197,3 +197,42 @@ func TestKindList(t *testing.T) {
 		t.Errorf(`kindList("auto") = %q`, got)
 	}
 }
+
+func TestAgentArgs(t *testing.T) {
+	var cfg Config
+	if got := strings.Join(cfg.agentArgs("muse"), " "); got != "--disable-sandbox" {
+		t.Errorf("muse default args = %q", got)
+	}
+	if got := strings.Join(cfg.agentArgs("muse", resumeArgs["muse"]...), " "); got != "--disable-sandbox resume --last" {
+		t.Errorf("muse resume args = %q", got)
+	}
+	if got := cfg.agentArgs("claude"); len(got) != 0 {
+		t.Errorf("claude has no default args, got %q", got)
+	}
+	cfg.Agents = map[string]AgentConfig{"muse": {Args: []string{}}, "codex": {Args: []string{"-m", "x"}}}
+	if got := cfg.agentArgs("muse"); len(got) != 0 {
+		t.Errorf("an empty [agents.muse] args clears the default, got %q", got)
+	}
+	if got := strings.Join(cfg.agentArgs("codex", resumeArgs["codex"]...), " "); got != "-m x resume --last" {
+		t.Errorf("codex args = %q", got)
+	}
+}
+
+func TestAgentArgsFromConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QUARTERMASTER_CONFIG_DIR", dir)
+	conf := "repo = \"/r\"\n[agents.muse]\nargs = [\"--disable-sandbox\", \"--sandbox-network\", \"enabled\"]\n[agents.claude]\nargs = [\"--model\", \"opus\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(conf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.agentArgs("muse"), " "); got != "--disable-sandbox --sandbox-network enabled" {
+		t.Errorf("muse args = %q", got)
+	}
+	if got := strings.Join(cfg.agentArgs("claude", "--continue"), " "); got != "--model opus --continue" {
+		t.Errorf("claude args = %q", got)
+	}
+}

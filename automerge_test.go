@@ -92,3 +92,11 @@ func TestReadyPromptWithAutoMerge(t *testing.T) {
 		t.Fatalf("kept a ready prompt for an old head: %+v", got)
 	}
 }
+
+func TestBriefStartsWithBdPrime(t *testing.T) {
+	s := brief(bead(StatusInProgress), "tj/x", "/w/x", "", "")
+	prime, show := strings.Index(s, "`bd prime`"), strings.Index(s, "`bd show ")
+	if prime < 0 || show < 0 || prime > show {
+		t.Fatalf("the brief should ask for bd prime before bd show:\n%s", s)
+	}
+}
