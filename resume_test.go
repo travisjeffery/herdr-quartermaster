@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -200,10 +201,10 @@ func TestKindList(t *testing.T) {
 
 func TestAgentArgs(t *testing.T) {
 	var cfg Config
-	if got := strings.Join(cfg.agentArgs("muse"), " "); got != "--disable-sandbox" {
+	if got := strings.Join(cfg.agentArgs("muse"), " "); got != "--disable-sandbox --permission-profile :auto-review" {
 		t.Errorf("muse default args = %q", got)
 	}
-	if got := strings.Join(cfg.agentArgs("muse", resumeArgs["muse"]...), " "); got != "--disable-sandbox resume --last" {
+	if got := strings.Join(cfg.agentArgs("muse", resumeArgs["muse"]...), " "); got != "--disable-sandbox --permission-profile :auto-review resume --last" {
 		t.Errorf("muse resume args = %q", got)
 	}
 	if got := cfg.agentArgs("claude"); len(got) != 0 {
@@ -234,5 +235,17 @@ func TestAgentArgsFromConfigFile(t *testing.T) {
 	}
 	if got := strings.Join(cfg.agentArgs("claude", "--continue"), " "); got != "--model opus --continue" {
 		t.Errorf("claude args = %q", got)
+	}
+}
+
+func TestAgentEnvExportsBeadsDirAndActor(t *testing.T) {
+	cfg := Config{BeadsDir: "/home/me/it's/.beads"}
+	want := `export BEADS_ACTOR='muse' BEADS_DIR='/home/me/it'\''s/.beads'`
+	if got := cfg.agentEnv("muse"); got != want {
+		t.Fatalf("agentEnv = %s, want %s", got, want)
+	}
+	out, err := exec.Command("sh", "-c", want+`; printf '%s|%s' "$BEADS_ACTOR" "$BEADS_DIR"`).Output()
+	if err != nil || string(out) != "muse|/home/me/it's/.beads" {
+		t.Fatalf("the shell read it as %q (%v)", out, err)
 	}
 }

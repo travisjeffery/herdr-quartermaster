@@ -114,6 +114,7 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	tab := opened.PaneID[:strings.LastIndex(opened.PaneID, ":")] + ":t1"
 	_ = h.TabRename(tab, shortTitle(b.Title, 34))
 	text := brief(b, branch, opened.Path, linearKey(b, cfg.LinearPrefixes), readInstructions())
+	_ = h.Run(opened.PaneID, cfg.agentEnv(kind))
 	if err := h.AgentStart(name, kind, opened.PaneID, cfg.agentArgs(kind)...); err != nil {
 		// A new worktree often opens on the agent's folder-trust prompt. The
 		// ticker delivers the brief once someone answers it.
@@ -252,6 +253,7 @@ func openCoordinator(cfg Config, h Herdr, kind string) (string, error) {
 	}
 	_ = tickerStart(cfg)
 	first := "Run `quartermaster context` and give me a short status: what needs me, what's in review, what's ready to start."
+	_ = h.Run(opened.PaneID, cfg.agentEnv(kind))
 	if err := h.AgentStart(cfg.CoordinatorName, kind, opened.PaneID, cfg.agentArgs(kind)...); err != nil {
 		if !strings.Contains(err.Error(), "agent_not_ready") {
 			return "", err

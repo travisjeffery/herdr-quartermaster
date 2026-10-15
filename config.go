@@ -71,10 +71,27 @@ type AgentConfig struct {
 
 // defaultAgentArgs apply to a kind with no [agents.<kind>] table. Muse's
 // sandbox scrubs the environment (BEADS_DIR) and blocks gh's credentials, so
-// a sandboxed Muse worker can't use bd or open a PR.
+// a sandboxed Muse worker can't use bd or open a PR. Its :auto-review profile
+// keeps the approval judge but lets the judge, not a human, decide, so an
+// unattended worker doesn't wait on a prompt nobody is watching.
 var defaultAgentArgs = map[string][]string{
-	"muse": {"--disable-sandbox"},
+	"muse": {"--disable-sandbox", "--permission-profile", ":auto-review"},
 }
+
+// agentEnv is the shell command that exports what bd needs into an agent's
+// pane before it starts: BEADS_DIR, so bd finds the shared database from a
+// worktree, and BEADS_ACTOR, so the agent acts as its kind. Claude and Codex
+// also set these in their own configs; Muse has nowhere to, and its hooks and
+// unsandboxed shell inherit the pane's environment.
+func (c Config) agentEnv(kind string) string {
+	cmd := "export BEADS_ACTOR=" + shellQuote(kind)
+	if c.BeadsDir != "" {
+		cmd += " BEADS_DIR=" + shellQuote(c.BeadsDir)
+	}
+	return cmd
+}
+
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // agentArgs is what a kind starts with: its configured args (else the
 // default), then extra, such as a resume subcommand. Configured args go first
