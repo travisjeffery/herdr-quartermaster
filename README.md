@@ -407,14 +407,15 @@ installed for it. Two things differ from Claude and Codex:
 
 - **Its sandbox hides what a worker needs.** Muse's default shell sandbox
   runs commands without your environment, so `bd` can't see `BEADS_DIR`, and
-  `gh` comes back unauthenticated. Until you've configured
-  Muse's sandbox to allow them, a Muse worker can't keep its bead current or
-  open a PR. Starting Muse with `--disable-sandbox` is the blunt fix; that is
-  your call, and quartermaster doesn't make it for you.
+  `gh` comes back unauthenticated, so a sandboxed Muse worker can't keep its
+  bead current or open a PR. quartermaster therefore starts Muse with
+  `--disable-sandbox` unless `[agents.muse] args` says otherwise (see
+  Configuration).
 - **It reads `AGENTS.md`, not `CLAUDE.md` or Claude's hooks.** It falls back to
   `CLAUDE.md` only when a project has no `AGENTS.md`, and it has hooks of its
   own, so a `bd prime` SessionStart hook set up for Claude Code doesn't run in
-  it. The brief still names the bead and how to report; put anything else a
+  it. The brief tells every worker to run `bd prime` first unless a session
+  hook already loaded it, then names the bead and how to report; put anything else a
   worker must know in `AGENTS.md`. The coordinator's folder gets both files.
 
 ## Install
@@ -518,7 +519,17 @@ stale_days = 3            # a bead untouched this long is checked
 auto_close = false        # close beads on strong evidence; off, they are only flagged
 verify_max = 20           # GitHub calls a pass may make beyond its probes
 gh_min_remaining = 1000   # skip a pass below this many GraphQL points left
+
+[agents.muse]             # per-kind args for the agent's own CLI, on dispatch, resume and the coordinator
+args = ["--disable-sandbox"]
 ```
+
+`[agents.<kind>] args` go to that agent's CLI every time quartermaster starts
+it, ahead of any resume subcommand (`muse --disable-sandbox resume --last`).
+Muse defaults to `--disable-sandbox`: its sandbox scrubs the environment
+(`BEADS_DIR`) and blocks `gh`'s credentials, so a sandboxed worker can't use
+`bd` or open a PR. Set `args = []` to start it sandboxed. Other kinds start
+with no extra args.
 
 The ticker always follows `herdr_socket` (herdr's default server unless set),
 not the server that happened to start it: every herdr server that loads the

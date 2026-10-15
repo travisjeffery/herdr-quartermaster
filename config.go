@@ -58,6 +58,33 @@ type Config struct {
 	// Repos are named repositories a bead selects with a repo:<name> label;
 	// Repo is the default.
 	Repos map[string]string `toml:"repos"`
+
+	// Agents holds per-kind settings ([agents.muse]), for workers and the
+	// coordinator alike.
+	Agents map[string]AgentConfig `toml:"agents"`
+}
+
+type AgentConfig struct {
+	// Args go to the agent's own CLI on every start, dispatch and resume.
+	Args []string `toml:"args"`
+}
+
+// defaultAgentArgs apply to a kind with no [agents.<kind>] table. Muse's
+// sandbox scrubs the environment (BEADS_DIR) and blocks gh's credentials, so
+// a sandboxed Muse worker can't use bd or open a PR.
+var defaultAgentArgs = map[string][]string{
+	"muse": {"--disable-sandbox"},
+}
+
+// agentArgs is what a kind starts with: its configured args (else the
+// default), then extra, such as a resume subcommand. Configured args go first
+// because codex takes its root options before a subcommand.
+func (c Config) agentArgs(kind string, extra ...string) []string {
+	args := defaultAgentArgs[kind]
+	if a, ok := c.Agents[kind]; ok {
+		args = a.Args
+	}
+	return append(slices.Clone(args), extra...)
 }
 
 func defaultConfig() Config {

@@ -30,11 +30,14 @@ func kindList(extra ...string) string {
 }
 
 // brief is the first prompt a worker gets. It stays short: the bead holds the
-// task, bd prime (SessionStart hook) holds the workflow and memories.
+// task, bd prime holds the workflow and memories. Claude and Codex get bd prime
+// from a SessionStart hook; an agent without one is told to run it, and an
+// agent with one isn't asked to load its large output twice.
 func brief(b Bead, branch, path, linear, instructions string) string {
 	var s strings.Builder
 	fmt.Fprintf(&s, "You are the quartermaster worker for bead %s: %s\n", b.ID, b.Title)
-	fmt.Fprintf(&s, "It is already claimed for you. Worktree %s on branch %s. Start with `bd show %s`.\n\n", path, branch, b.ID)
+	fmt.Fprintf(&s, "It is already claimed for you. Worktree %s on branch %s.\n", path, branch)
+	fmt.Fprintf(&s, "Start with `bd prime` unless its output (\"Beads Workflow Context\") is already in your context from a session hook, then `bd show %s`.\n\n", b.ID)
 	s.WriteString(`How this thread reports (the quartermaster ticker and coordinator read these, not your chat):
 - Keep the bead current with ` + "`bd note`" + `: findings, decisions, blockers.
 - When you open a PR, ` + "`bd note " + b.ID + " \"PR: <url>\"`" + ` so the ticker follows it. It will prompt you when checks fail, review feedback lands, or it merges.
@@ -111,7 +114,7 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	tab := opened.PaneID[:strings.LastIndex(opened.PaneID, ":")] + ":t1"
 	_ = h.TabRename(tab, shortTitle(b.Title, 34))
 	text := brief(b, branch, opened.Path, linearKey(b, cfg.LinearPrefixes), readInstructions())
-	if err := h.AgentStart(name, kind, opened.PaneID); err != nil {
+	if err := h.AgentStart(name, kind, opened.PaneID, cfg.agentArgs(kind)...); err != nil {
 		// A new worktree often opens on the agent's folder-trust prompt. The
 		// ticker delivers the brief once someone answers it.
 		if !strings.Contains(err.Error(), "agent_not_ready") {
@@ -249,7 +252,7 @@ func openCoordinator(cfg Config, h Herdr, kind string) (string, error) {
 	}
 	_ = tickerStart(cfg)
 	first := "Run `quartermaster context` and give me a short status: what needs me, what's in review, what's ready to start."
-	if err := h.AgentStart(cfg.CoordinatorName, kind, opened.PaneID); err != nil {
+	if err := h.AgentStart(cfg.CoordinatorName, kind, opened.PaneID, cfg.agentArgs(kind)...); err != nil {
 		if !strings.Contains(err.Error(), "agent_not_ready") {
 			return "", err
 		}
