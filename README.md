@@ -422,7 +422,7 @@ installed for it. Two things differ from Claude and Codex:
 ## Install
 
 ```sh
-herdr plugin install travisjeffery/herdr-quartermaster --ref v0.5.2
+herdr plugin install travisjeffery/herdr-quartermaster --ref v0.5.3
 ```
 
 Herdr downloads the prebuilt binary for your machine and checks it against the

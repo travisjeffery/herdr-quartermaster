@@ -1,6 +1,6 @@
 id = "quartermaster"
 name = "Quartermaster"
-version = "0.5.2"
+version = "0.5.3"
 min_herdr_version = "0.9.1"
 description = "One coordinator, a worktree and agent per bead, beads as the only record."
 platforms = ["linux", "macos"]
