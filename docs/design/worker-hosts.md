@@ -148,6 +148,7 @@ labels = ["go-heavy"]
 repos = { backend = "~/src/backend", herdr-quartermaster = "~/src/herdr-quartermaster" }
 worktrees = "~/worktrees"
 image = "ghcr.io/<owner>/qm-worker:2026.10.1"   # pinned per host; see image rollout
+runtime = "podman"            # rootless Podman on remote hosts; "docker" on local until it moves (§13.1)
 enabled = true
 ```
 
@@ -227,7 +228,7 @@ the host's SSH:
 
 - **Recommended:** bind-mount the container's Herdr config/socket directory to
   the host user's `~/.config/herdr` and install a tiny `herdr` wrapper on the
-  host that `exec`s into the container (`docker exec -i qm-worker herdr "$@"`).
+  host that `exec`s into the container (`podman exec -i qm-worker herdr "$@"`).
   Herdr's forwarding runs the remote `herdr` binary over SSH, so a wrapper is
   enough; the host never installs Herdr itself. (Phase 0 confirms forwarding
   uses the remote CLI and not a raw socket path; if it uses the socket path,
@@ -254,7 +255,7 @@ and an `Agent.Host` field filled by whoever listed it. Changes by caller:
 | `dispatch` | `WorktreeCreate` on local repo path | `onMachine(h).WorktreeCreate(hostRepoPath, …)` with `~/…` paths; `TabRename`, `Run(agentEnv)`, `AgentStart`, `Prompt` on the same client; duplicate-agent check scans **all** hosts |
 | outbox | `outbox/<agent>.md` | `outbox/<host>/<agent>.md`, delivered when that host's agent is ready |
 | `resume` | `claude --continue` in local worktree | same, on the bead's `host:` |
-| `resolve` | herdr worktree remove + local `git branch -D` | herdr remove via `--machine`; branch deletion via `ssh <host> docker exec qm-worker git -C … branch -D` (a `hostExec` helper); `merged()` keeps using `gh` from the local checkout (same GitHub repo) |
+| `resolve` | herdr worktree remove + local `git branch -D` | herdr remove via `--machine`; branch deletion via `ssh <host> podman exec qm-worker git -C … branch -D` (a `hostExec` helper); `merged()` keeps using `gh` from the local checkout (same GitHub repo) |
 | `sweep` | local `git status` per worktree | runs per host through `hostExec`; output grouped by host |
 | `verify` | local `git grep`, `git fetch` | unchanged: verify only needs the default branch, which `local` has |
 
@@ -332,9 +333,56 @@ disk and its credentials.
 
 | | Verdict | Why |
 |---|---|---|
-| **Docker / Podman (OCI image)** | **Use this** | Same image on every host and in CI; registry distribution; volumes for state; both machines have Docker today. Prefer **rootless** mode (rootless Docker or Podman) on remote hosts; `local` can start on its existing Docker |
+| **OCI image, rootless Podman on remote hosts** | **Use this** | Same image on every host and in CI; registry distribution; volumes for state. Remote hosts run it under rootless Podman (below); `local` keeps its existing Docker until a later phase (§13.1). The image is runtime-neutral |
 | systemd-nspawn | No | Present on both hosts, but no registry/build story: you'd build a rootfs yourself and ship tarballs; weaker tooling for volumes and updates; root-run by default |
 | Nix (flake / home-manager) | Not now | Reproducible toolchains and arguably a better fit for pinning, but it installs onto the host (the thing we're avoiding), doesn't isolate workers from the host, and the agent CLIs are npm packages that update weekly, which fights Nix purity. A good way to *build* the image later (`dockerTools.buildLayeredImage`), not a substitute for it |
+
+### Running it: rootless Podman and Quadlet
+
+On a remote host the worker container is a **Quadlet** user unit, so systemd
+starts it at boot (lingering is on), restarts it, and updates it:
+
+```ini
+# ~/.config/containers/systemd/qm-worker.container
+[Unit]
+Description=quartermaster worker
+
+[Container]
+ContainerName=qm-worker
+Image=ghcr.io/<owner>/qm-worker:2026.10.1
+AutoUpdate=registry
+UserNS=keep-id:uid=1000,gid=1000
+Volume=qm-src:%h/src
+Volume=qm-worktrees:%h/worktrees
+Volume=qm-cache:%h/.cache
+Volume=qm-claude:%h/.claude
+Volume=qm-codex:%h/.codex
+Volume=qm-herdr:%h/.config/herdr
+Volume=%h/.config/qm-worker/secrets:/run/qm-secrets:ro,Z
+# Docker-API socket for tests that start containers (hosts labelled docker, §10)
+Volume=%t/podman/podman.sock:/run/docker.sock
+Environment=DOCKER_HOST=unix:///run/docker.sock
+PodmanArgs=--memory=12g
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+- `--userns=keep-id` maps the host user to the container's uid 1000, so files
+  on volumes and bind mounts stay owned by the host user with no remapping,
+  and the container starts directly as the worker user (the entrypoint's
+  non-root path).
+- `AutoUpdate=registry` plus `podman auto-update` gives the rollout below a
+  single command; the unit pins a dated tag, so "update" means changing the
+  tag in the unit, never following `latest`.
+- `podman.socket` (a user unit) serves the Docker API for tests that start
+  containers (§10).
+- Registry login is per host and runtime-only: `podman login ghcr.io` with a
+  read-only package token (or `gh auth token` from a host-scoped login), kept
+  in the user's `auth.json`, never in the image.
 
 ### Contents
 
@@ -388,7 +436,8 @@ version is explicit and bumping one is a one-line PR:
    - wait for active workers to be idle (or `--now`, which accepts losing
      their in-flight turn: worktrees and sessions are on volumes, so
      `resume` restarts them);
-   - `docker pull` by digest, recreate the container with the same volumes;
+   - change the tag in the host's Quadlet unit, `systemctl --user daemon-reload`
+     and `podman auto-update` (pull by digest, recreate with the same volumes);
    - wait for `herdr status` to answer, re-run health checks;
    - `quartermaster resume --host server` restarts that host's agents
      (`claude --continue` etc.; their histories are on the volume);
@@ -402,7 +451,7 @@ state or credentials, an update is a container recreate, never a migration.
 
 | | One long-lived container per host, many panes (**recommended**) | One container per worker |
 |---|---|---|
-| Fit with Herdr | Natural: one Herdr server per host, one machine profile | Herdr server per container → one machine profile per worker, or panes that `docker exec` into per-worker containers |
+| Fit with Herdr | Natural: one Herdr server per host, one machine profile | Herdr server per container → one machine profile per worker, or panes that `podman exec` into per-worker containers |
 | Overhead | One set of daemons; shared GOCACHE/module cache | Per-worker Herdr, gopls caches, duplicated memory |
 | Isolation | Workers share a container (as they share a desktop today) | Workers isolated from each other |
 | Lifecycle | Update = recreate one container | Create/destroy per dispatch; more moving parts in quartermaster |
@@ -452,7 +501,7 @@ Injected at container start, from a per-host directory on the host
 |---|---|---|---|
 | GitHub (`gh`, git push) | yes: fine-grained token, repos in the host's `repos`, contents + PRs + actions read | user's normal `gh` login | `GH_TOKEN` file; 90-day expiry; renewing = replace the file and restart the container |
 | Git commit signing | **per-host SSH signing key**, registered on GitHub as a signing key named for the host | existing key | key file mounted; revoke one host by removing its key on GitHub |
-| Agent CLI logins (Claude, Codex, Muse OAuth) | per host, stored in `qm-agents` | existing | logged in once per host interactively (`docker exec -it qm-worker claude /login`, `codex login --device-auth`); persist on the volume; revoke from each vendor's sessions page |
+| Agent CLI logins (Claude, Codex, Muse OAuth) | per host, stored in `qm-agents` | existing | logged in once per host interactively (`podman exec -it qm-worker claude /login`, `codex login --device-auth`); persist on the volume; revoke from each vendor's sessions page |
 | Beads proxy key | yes, can only run `bd` (§5) | n/a | key file; remove the `authorized_keys` line to revoke |
 | Linear / Slack / other MCP | claude.ai-hosted connectors follow the Claude login; anything needing a local token: none on remote by default | as today | add per need, as a mounted file |
 | AWS | only on hosts labelled `aws`: short-lived viewer/developer credentials from the desktop's broker (§9.1); no AWS secrets stored on the host | SSO profiles, admin break-glass | admin is never brokered; revoke a host by removing its broker key |
@@ -569,11 +618,11 @@ rules check run via Docker, testcontainers). Options:
 | | Security | Notes |
 |---|---|---|
 | Mount the host's **rootful** Docker socket | Equivalent to root on the host: defeats the sandbox | Don't |
-| **Rootless** Docker/Podman socket of the host user, mounted into the container (sibling containers) | Containers run as the host user; a worker can start containers with the user's privileges and mount what the user can read | Recommended when needed; the host label `docker` marks it, and secrets dir must not be readable by containers started this way (mount it as a separate path the socket's user can't reach, or accept) |
+| **Rootless Podman socket** of the host user (`podman.socket`, Docker API), mounted into the container as `/run/docker.sock` with `DOCKER_HOST` set (sibling containers) | Containers run as the host user; a worker can start containers with the user's privileges and mount what the user can read | **Use this** where needed; the host label `docker` marks it. The `docker` CLI and testcontainers talk to it unchanged (testcontainers may need `TESTCONTAINERS_RYUK_DISABLED=true` or the socket override; phase 0 checks). The secrets directory is readable by such containers; accept, or keep `docker` off hosts holding broker keys |
 | Podman-in-container (nested, rootless) | Best isolation; no host socket | Needs `/dev/fuse`, subuid ranges in the container, and is slower; worth trying for the image as a later improvement |
 
-`server` needs `/etc/subuid`/`/etc/subgid` entries for rootless mode (a root
-step the user does once; §11).
+`server` needs `/etc/subuid`/`/etc/subgid` entries for rootless Podman (a
+root step the user does once; §18).
 
 **Cluster / VPN access.** The Cloudflare WARP client is on `local` only.
 Workers that need private network access (kube, internal MCP servers)
@@ -599,7 +648,7 @@ Upside versus "install everything on the host":
   same sandbox.
 
 Residual risks to accept knowingly: the bd proxy gives full read/write on all
-beads (the same as any worker today); a worker with the rootless Docker socket
+beads (the same as any worker today); a worker with the rootless Podman socket
 can act as the host user; the GitHub token lets a worker push to every repo
 in its scope.
 
@@ -637,6 +686,28 @@ the coordinator and ticker stay in the desktop's own Herdr. Then:
 
 This is a later phase; it's opt-in so nothing about today's desktop workflow
 changes until it's proven on `server`.
+
+### 13.1 Moving the desktop to Podman (later)
+
+Not now: only after `server` works end to end. Then, as its own phase:
+
+1. **Inventory** what uses Docker on the desktop: repository tests that start
+   containers (a Prometheus rules check run through `docker run`,
+   testcontainers suites), local image builds (`docker build`/`buildx`,
+   multi-arch), any compose files or kind clusters, credential helpers in
+   `~/.docker/config.json` (registry logins, `docker-credential-*`), scripts
+   and Makefiles that call `docker`, and the `docker` group membership.
+2. **Compatibility:** install Podman alongside Docker; enable the user
+   `podman.socket` and point `DOCKER_HOST` at it per shell to run each
+   inventoried workload against Podman first; then switch with the
+   `podman-docker` shim (a `docker` command backed by Podman) and a global
+   `DOCKER_HOST`. Buildx-specific flags and kind need individual checks.
+3. **Cut over** with Docker installed but disabled
+   (`systemctl disable --now docker.service docker.socket`), the worker
+   container moved to a Quadlet unit like `server`'s.
+4. **Rollback:** re-enable `docker.service`/`docker.socket`, unset
+   `DOCKER_HOST`, remove `podman-docker`; images and volumes of each runtime are
+   separate, so nothing is lost either way.
 
 ## 14. Views
 
@@ -704,21 +775,21 @@ re-running converges. Steps that need the user stop with the exact command
 | # | Step | Check | Apply | Who |
 |---|---|---|---|---|
 | 1 | SSH from `local` | `ssh -o BatchMode=yes <ssh> true` | — | **you** (key in the host's `authorized_keys`) |
-| 2 | Container runtime, rootless | `docker info` (rootless) or `podman info` | print the commands | **you** (root: install, `usermod --add-subuids/--add-subgids`, `loginctl enable-linger`) |
+| 2 | Rootless Podman | `podman info` reports rootless; `systemctl --user is-active podman.socket` | enable `podman.socket` (user unit) | **you** for the root part: install `podman passt`, `usermod --add-subuids/--add-subgids`, `loginctl enable-linger`, disable any rootful `docker.service`/`docker.socket` |
 | 3 | Host directories | `~/.config/qm-worker/{secrets,volumes}` exist, 0700 | `mkdir -p`, `chmod` | auto |
-| 4 | Registry access | `docker pull <image>` | `docker login ghcr.io` with a read-only package token | **you** (create token) |
+| 4 | Registry access | `podman pull <image>` | `podman login ghcr.io` with a per-host read-only (`read:packages`) token, runtime only | **you** (create token) |
 | 5 | Secrets present | files exist | print what to create | **you**: GitHub fine-grained token; generate the signing key (`ssh-keygen` on the host) and add it to GitHub as a signing key |
 | 6 | Beads proxy | `bd` via shim answers `bd show <id>` | generate `qm-beads` key on host, append forced-command line to `local`'s `authorized_keys`, pin `local`'s host key | auto (it edits `local`'s `authorized_keys`: you confirm once) |
-| 7 | Container | running, image digest matches | `docker run -d --name qm-worker --restart unless-stopped` with volumes, secrets, memory limit, the user's uid | auto |
+| 7 | Container | `systemctl --user is-active qm-worker`, image digest matches | write the Quadlet unit (§6), `systemctl --user daemon-reload && systemctl --user start qm-worker` | auto |
 | 8 | Herdr wrapper on host + machine profile on `local` | `herdr --machine <name> agent list` | install wrapper; `herdr machine add --label <name> <ssh>` | auto (Herdr prompts if a server is incompatible: answer no) |
 | 9 | Repos | each `repos` entry cloned, `origin` reachable | `gh repo clone` inside the container | auto |
-| 10 | Agent logins | `claude`/`codex` auth status | print `docker exec -it qm-worker claude /login` etc. | **you** (OAuth, once per host) |
+| 10 | Agent logins | `claude`/`codex` auth status | print `podman exec -it qm-worker claude /login` etc. | **you** (OAuth, once per host) |
 | 10a | AWS broker (hosts labelled `aws` only) | `qm-aws-creds viewer` returns credentials; `aws sts get-caller-identity --profile viewer` shows the viewer role | generate `aws-broker` key on host; append `command="quartermaster aws-broker --host <name>",restrict` line to `local`'s `authorized_keys`; add the host to `[aws_broker.hosts]` | auto (you confirm the `authorized_keys` line once) |
 | 11 | Toolchains warm | `mise install` for each repo; `go mod download` | run them | auto |
 | 12 | Smoke | dispatch a no-op bead with `--host <name>`, check it notes and closes | — | auto |
 
-`server.local` today needs, from you: steps 2 (enable Docker rootless or
-install Podman, subuid/subgid, linger), 4, 5 and 10. Everything else is the
+`server.local` today needs, from you: steps 2 (install Podman, subuid/subgid,
+disable the rootful Docker units; linger is already on), 4, 5 and 10. Everything else is the
 script.
 
 ## Phases and effort
@@ -737,20 +808,24 @@ stack.
 | 6. Bootstrap | `host bootstrap` checklist, docs | 1 | steps 2, 4, 5, 10 on `server` (~30–45 min) |
 | 7. AWS credential broker | `quartermaster aws-broker` (per-host allowlist, hard admin deny, role check, lifetime cap, request log, fail closed), `qm-aws-creds` and AWS config in the image, `QM_BEAD` in the pane env, kubeconfig via `aws eks get-token`, tests | 1–1.5 | permission-set session durations (or a trust-policy change for chaining); `aws sso login` on the desktop |
 | 8. Optional | `local-c` container on the desktop; nested Podman; WARP sidecar; IAM Roles Anywhere | 1–2 | — |
+| 9. Desktop on Podman (after `server` works end to end) | Docker-usage inventory, Podman side by side via `DOCKER_HOST`, `podman-docker` cut-over, rollback (§13.1) | 1–1.5 | approve the cut-over |
 
 Total for phases 0–7: about **9–11.5 agent-days**.
 
 ## Decisions
 
-Made 2026-10-15; each took the recommended option except 4, revised the same
-day.
+Made 2026-10-15; each took the recommended option except 2 and 4, revised
+the same day.
 
 1. **Beads transport**: a forced-command SSH proxy to the desktop (§5,
    option A). A Dolt sql-server stays the fallback if latency or lock
    contention shows up.
-2. **Container runtime on remote hosts**: rootless Docker. It's already
-   installed on `server`; enabling it needs a one-time root step for
-   subuid/subgid and lingering.
+2. **Container runtime on remote hosts**: rootless Podman with
+   `--userns=keep-id`, the worker container as a Quadlet user unit updated
+   with `podman auto-update`, and the user `podman.socket` for tests that use
+   the Docker API (§6, §10). Needs a one-time root step for the packages and
+   subuid/subgid. The desktop may move to Podman later as its own phase
+   (§13.1). (First decided as rootless Docker; revised.)
 3. **Commit signing on remote hosts**: a per-host SSH signing key,
    registered on GitHub as a signing key named for the host.
 4. **AWS on remote hosts**: through a desktop credential broker (§9.1).
