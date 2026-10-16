@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""A stand-in coding agent for the demo recording (scripts/demo/record.sh).
+
+Installed as `claude` and `codex` on the demo's PATH, so quartermaster and
+Herdr start it like a real agent. It reports its own state to Herdr and
+answers from a script: no model, no network, no real prompts. In the
+coordinator's folder it is the coordinator and runs the real `quartermaster`
+commands, summing up what they print; anywhere else it is a worker on the
+bead its branch names and prints canned progress.
+
+Until $QM_DEMO/recording exists (the setup) workers answer in a word and the
+coordinator's screen is wiped by any prompt, as by "/clear", so the recording
+starts on a fresh session.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import termios
+import time
+import tty
+
+KIND = os.path.basename(sys.argv[0])
+PANE = os.environ.get("HERDR_PANE_ID", "")
+DEMO = os.environ.get("QM_DEMO", "")
+COORD = os.path.basename(os.getcwd()) == "coordinator"
+
+DIM, BOLD, RESET = "\x1b[2m", "\x1b[1m", "\x1b[0m"
+GREEN, BLUE, MAGENTA, GREY = "\x1b[32m", "\x1b[34m", "\x1b[35m", "\x1b[90m"
+
+
+def recording():
+    return DEMO and os.path.exists(os.path.join(DEMO, "recording"))
+
+
+def pause(s):
+    if recording():
+        time.sleep(s)
+
+
+def width():
+    return shutil.get_terminal_size((80, 24)).columns
+
+
+def out(s=""):
+    sys.stdout.write(s.replace("\n", "\r\n") + "\r\n")
+    sys.stdout.flush()
+
+
+def wrap(text, w):
+    lines, line = [], ""
+    for word in text.split(" "):
+        if line and len(line) + 1 + len(word) > w:
+            lines.append(line)
+            line = word
+        else:
+            line = f"{line} {word}" if line else word
+    return lines + [line]
+
+
+def stream(text, mark=f"{MAGENTA}●{RESET} "):
+    """Prints a reply a few words at a time, wrapped to the pane."""
+    for i, line in enumerate(wrap(text, width() - 3)):
+        sys.stdout.write(mark if i == 0 else "  ")
+        for j, word in enumerate(line.split(" ")):
+            sys.stdout.write(("" if j == 0 else " ") + word)
+            sys.stdout.flush()
+            pause(0.03)
+        out()
+
+
+def report(state):
+    subprocess.run(
+        ["hcall", "pane.report_agent",
+         json.dumps({"pane_id": PANE, "source": "demo", "agent": KIND, "state": state})],
+        capture_output=True)
+
+
+def run(cmd):
+    p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    return (p.stdout + p.stderr).rstrip("\n")
+
+
+def tool(cmd, lines, keep=6):
+    """Shows a command the agent ran and the head of its output."""
+    out(f"{GREEN}●{RESET} {BOLD}Bash{RESET}({cmd})")
+    # Agent kinds read as "a worker": the demo shows no product's name.
+    lines = [re.sub(r"\b(claude|codex|muse)\b", "a worker", l) for l in lines if l.strip()]
+    w = width() - 6
+    for i, l in enumerate(lines[:keep]):
+        l = l if len(l) <= w else l[:w - 1] + "…"
+        out(f"  {GREY}{'⎿ ' if i == 0 else '  '} {l}{RESET}")
+        pause(0.04)
+    if len(lines) > keep:
+        out(f"  {GREY}   … +{len(lines) - keep} lines{RESET}")
+
+
+def section(text, name):
+    """The lines of a `quartermaster context` section, without its heading."""
+    m = re.search(r"^## " + re.escape(name) + r".*?\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    lines = m.group(1).splitlines() if m else []
+    return [l for l in lines if l.strip() and l.strip() not in ("(none)", "(empty)")]
+
+
+def threads(ctx):
+    """(id, state, title, question) for each thread line of the context."""
+    found, lines = [], section(ctx, "Threads")
+    for i, l in enumerate(lines):
+        if not l.startswith("- "):
+            continue
+        parts = l[2:].split(" · ")
+        if len(parts) < 4:
+            continue
+        q = ""
+        if i + 1 < len(lines) and lines[i + 1].strip().startswith("question:"):
+            q = lines[i + 1].strip()[len("question:"):].strip()
+        found.append((parts[0], " · ".join(parts[1:-2]), parts[-1], q))
+    return found
+
+
+def summary(ctx):
+    """What needs the user, what's in review and what to start, from the context."""
+    ts = threads(ctx)
+    said = []
+    for t in ts:
+        if t[1].startswith("needs you"):
+            q = re.sub(r"^Question:\s*", "", t[3]).split("?")[0] + "?" if t[3] else t[2] + "."
+            said.append(f"{t[0]} needs you: {q[0].lower() + q[1:]}")
+    for t in ts:
+        if t[1].startswith("checks failing"):
+            check = re.search(r"\((.*)\)", t[1])
+            said.append(f"{t[0]}'s {check.group(1) if check else 'checks'} check is failing; its worker is on it.")
+    review = [t[0] for t in ts if t[1].startswith("review")]
+    if review:
+        said.append(f"In review: {', '.join(review)}.")
+    nxt = section(ctx, "Selected next")
+    m = re.match(r"- (\S+) P\d \S+: (.*)", nxt[0]) if nxt else None
+    if m:
+        said.append(f"Next up is {m.group(1)}: {m.group(2)}. Start it?")
+    return " ".join(said)
+
+
+def brief_thread(line):
+    """A thread line of the context without its agent column."""
+    parts = line[2:].split(" · ")
+    if len(parts) < 4:
+        return line
+    return "- " + " · ".join(parts[:-2] + parts[-1:])
+
+
+proposed = None
+
+
+def coordinator(prompt):
+    global proposed
+    if prompt.startswith("[quartermaster ticker"):
+        ctx = run("quartermaster context")
+        inbox = section(ctx, "Inbox")
+        tool("quartermaster context", inbox, keep=3)
+        pause(0.5)
+        for l in inbox:
+            m = re.match(r"- \S+ (\S+) \[(\w+)\] (.*)", l)
+            if not m:
+                continue
+            if m.group(2) == "ready_to_merge":
+                pr = re.search(r"#(\d+)", m.group(3))
+                stream(f"{m.group(1)} is ready to merge: PR #{pr.group(1) if pr else '?'} is approved "
+                       f"and every check passed. Merge it?")
+            elif m.group(2) == "needs_you":
+                stream(f"{m.group(1)} needs you: {m.group(3)}")
+            elif m.group(2) == "finished":
+                stream(f"{m.group(1)} finished a turn; nothing needs you there.")
+        run("quartermaster inbox done")
+        return
+    if re.search(r"what'?s going on|status|quartermaster context", prompt, re.I):
+        ctx = run("quartermaster context")
+        lines = section(ctx, "Inbox") + [brief_thread(l) for l in section(ctx, "Threads") if l.startswith("- ")]
+        tool("quartermaster context", lines, keep=7)
+        pause(0.5)
+        nxt = section(ctx, "Selected next")
+        m = re.match(r"- (\S+)", nxt[0]) if nxt else None
+        proposed = m.group(1) if m else None
+        stream(summary(ctx))
+        run("quartermaster inbox done")
+        return
+    m = re.search(r"\b(notes-\w+)\b", prompt)
+    bead = m.group(1) if m else proposed
+    if bead and re.search(r"\b(go|yes|start|ok)\b", prompt, re.I):
+        res = run(f"quartermaster dispatch {bead}")
+        tool(f"quartermaster dispatch {bead}", res.splitlines())
+        pause(0.3)
+        stream(f"Started a worker on {bead} in its own worktree. I'll tell you when it needs you.")
+        return
+    stream("Noted.")
+
+
+# Canned progress for the worker started on camera.
+WORK = {
+    "notes-c4j": [
+        ("tool", "bd show notes-c4j", ["notes-c4j · Paginate the search endpoint"]),
+        ("say", "Search returns every match at once. Adding cursor pagination."),
+        ("edit", "internal/search/handler.go", "+41 −7"),
+        ("edit", "internal/search/handler_test.go", "+68"),
+        ("tool", "go test ./internal/search/...", ["ok  notes/internal/search  0.42s"]),
+        ("say", "Tests pass. Opening a draft PR."),
+    ],
+}
+
+
+def worker(prompt, first):
+    m = re.search(r"(notes-\w+)", run("git branch --show-current"))
+    bead = m.group(1) if m else "the bead"
+    if prompt.startswith("[quartermaster"):
+        if "ready to merge" in prompt or "approved" in prompt:
+            stream("PR approved and green. Leaving the merge to you.")
+        else:
+            stream("On it.")
+        return
+    steps = WORK.get(bead) if first and recording() else None
+    if not steps:
+        stream(f"On it: {bead}." if first else "Noted.")
+        return
+    for kind, *rest in steps:
+        if kind == "tool":
+            tool(rest[0], rest[1])
+        elif kind == "edit":
+            out(f"{GREEN}●{RESET} {BOLD}Update{RESET}({rest[0]})")
+            out(f"  {GREY}⎿  {rest[1]}{RESET}")
+        else:
+            stream(rest[0])
+        pause(0.9)
+
+
+def banner():
+    # A fresh screen, as a full-screen agent CLI starts on, over the pane's
+    # setup commands.
+    sys.stdout.write("\x1b[H\x1b[2J\x1b[3J")
+    if COORD:
+        out(f"{BLUE}◆{RESET} {BOLD}coordinator{RESET} {DIM}· quartermaster{RESET}")
+    else:
+        m = re.search(r"(notes-\w+)", run("git branch --show-current"))
+        out(f"{BLUE}◆{RESET} {BOLD}worker{RESET} {DIM}· {m.group(1) if m else ''}{RESET}")
+    out()
+
+
+def prompt_line():
+    sys.stdout.write(f"{GREY}❯{RESET} ")
+    sys.stdout.flush()
+
+
+def main():
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    tty.setraw(fd)
+    try:
+        banner()
+        report("idle")
+        prompt_line()
+        buf, first = "", True
+        while True:
+            chunk = os.read(fd, 4096).decode(errors="replace")
+            chunk = chunk.replace("\x1b[200~", "").replace("\x1b[201~", "")
+            if chunk == "\x03":
+                return
+            text, submit = chunk, chunk.endswith("\r")
+            if submit:
+                text = text[:-1]
+            if len(chunk) == 1 and not submit:
+                # A typed key: echo it.
+                if chunk in "\x7f\b":
+                    if buf:
+                        buf = buf[:-1]
+                        sys.stdout.write("\b \b")
+                elif chunk >= " ":
+                    buf += chunk
+                    sys.stdout.write(chunk)
+            elif text:
+                # Injected text (herdr agent prompt): show its first line.
+                buf += text
+                lines = text.strip().splitlines() or [""]
+                more = f" {GREY}[+{len(lines) - 1} lines]{RESET}" if len(lines) > 1 else ""
+                # Short enough to fit a narrow pane watching this one.
+                room = min(width() - 16, 26)
+                shown = lines[0] if len(lines[0]) <= room else lines[0][:room - 1] + "…"
+                sys.stdout.write(shown + more)
+            sys.stdout.flush()
+            if not submit:
+                continue
+            prompt, buf = buf.strip(), ""
+            if prompt == "/clear" or (COORD and not recording()):
+                banner()
+                prompt_line()
+                continue
+            out()
+            if not prompt:
+                prompt_line()
+                continue
+            report("working")
+            pause(0.4)
+            if COORD:
+                coordinator(prompt)
+            else:
+                worker(prompt, first)
+            first = False
+            out()
+            report("idle")
+            prompt_line()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+if __name__ == "__main__":
+    main()
