@@ -1,7 +1,7 @@
 # Worker hosts: running workers on more than one machine
 
-Status: **proposal**, not implemented. Nothing here changes behavior until the
-phases below land.
+Status: **accepted** (2026-10-15), not yet implemented. Nothing here changes
+behavior until the phases below land. The decisions are recorded at the end.
 
 ## Summary
 
@@ -641,17 +641,21 @@ stack.
 
 Total for phases 0–6: about **8–10 agent-days**.
 
-## Decisions needed before implementation
+## Decisions
 
-1. **Beads transport**: forced-command SSH proxy (recommended) or migrate
-   the desktop DB to a Dolt sql-server now.
-2. **Container runtime on remote hosts**: rootless Docker (Docker is already
-   installed on `server`) or Podman. Either needs a root step for subuid.
-3. **Commit signing on remote hosts**: a per-host signing key on GitHub
-   (recommended) or unsigned commits from remote hosts.
-4. **AWS on remote hosts**: none (recommended to start) or read-only SSO for
-   hosts labelled `aws`.
-5. **Default scheduling**: `manual` first (remote only with `--host` or a
-   `host:` label), switching to `auto` after a week, or `auto` from the start.
-6. **Where the image recipe lives**: the dotfiles repo (recommended, it owns
-   what's baked in) or this repo.
+Made 2026-10-15; each took the recommended option.
+
+1. **Beads transport**: a forced-command SSH proxy to the desktop (§5,
+   option A). A Dolt sql-server stays the fallback if latency or lock
+   contention shows up.
+2. **Container runtime on remote hosts**: rootless Docker. It's already
+   installed on `server`; enabling it needs a one-time root step for
+   subuid/subgid and lingering.
+3. **Commit signing on remote hosts**: a per-host SSH signing key,
+   registered on GitHub as a signing key named for the host.
+4. **AWS on remote hosts**: none. AWS work keeps the `aws` label and runs on
+   `local`.
+5. **Scheduling**: `schedule = "manual"` first (remote only with `--host` or a
+   `host:` label); `auto` comes after remote workers have run for a while.
+6. **Image recipe**: lives in the dotfiles repo, next to the dotfiles it
+   bakes in.
