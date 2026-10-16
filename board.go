@@ -69,6 +69,14 @@ func loadBoard(cfg Config) ([]boardRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	next, _ := Beads{}.Next()
+	ready, _ := Beads{}.Ready()
+	return boardRows(cfg, st, threads, next, ready), nil
+}
+
+// boardRows lays out the threads, the beads labelled next and the other ready
+// beads as the board's rows.
+func boardRows(cfg Config, st TickerState, threads []Thread, next, ready []Bead) []boardRow {
 	sort.SliceStable(threads, func(i, j int) bool {
 		gi, gj := classify(threads[i]), classify(threads[j])
 		if gi != gj {
@@ -91,7 +99,6 @@ func loadBoard(cfg Config) ([]boardRow, error) {
 		r.search = searchText("threads", th.Bead.ID, th.Bead.Title, agent, r.line, pr, th.Linear)
 		rows = append(rows, r)
 	}
-	next, _ := Beads{}.Next()
 	rows = append(rows, boardRow{header: "next"})
 	seen := map[string]bool{}
 	for _, b := range next {
@@ -100,7 +107,6 @@ func loadBoard(cfg Config) ([]boardRow, error) {
 		rows = append(rows, boardRow{bead: b, line: line, color: ansiCyan, search: searchText("next", b.ID, b.Title, line),
 			prs: linkedPRs(st, b), linear: linearKey(b, cfg.LinearPrefixes)})
 	}
-	ready, _ := Beads{}.Ready()
 	rows = append(rows, boardRow{header: "ready"})
 	n := 0
 	for _, b := range ready {
@@ -112,7 +118,7 @@ func loadBoard(cfg Config) ([]boardRow, error) {
 		rows = append(rows, boardRow{bead: b, line: line, color: ansiDim, search: searchText("ready", b.ID, b.Title, line),
 			prs: linkedPRs(st, b), linear: linearKey(b, cfg.LinearPrefixes)})
 	}
-	return rows, nil
+	return rows
 }
 
 // filterRows keeps the rows whose search text contains every word of query,

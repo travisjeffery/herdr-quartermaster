@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="986" viewBox="0 0 880 986">
+<rect width="880" height="986" rx="10" fill="#1a1b26"/>
+<path d="M0 10a10 10 0 0 1 10-10h860 a10 10 0 0 1 10 10v24h-880z" fill="#16161e"/>
+<circle cx="20" cy="17" r="6" fill="#ff5f57"/>
+<circle cx="40" cy="17" r="6" fill="#febc2e"/>
+<circle cx="60" cy="17" r="6" fill="#28c840"/>
+<text x="440" y="21.5" fill="#565f89" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle">quartermaster board</text>
+<g font-family="'JetBrains Mono', 'JetBrainsMono Nerd Font', ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">
+<text x="20" y="64.4" fill="#c0caf5" font-weight="bold" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">threads</text>
+<rect x="20" y="70" width="840" height="20" fill="#c0caf5"/>
+<text x="20" y="84.4" fill="#1a1b26" textLength="840" lengthAdjust="spacingAndGlyphs">  notes-7qk        needs you · PR #50 · APP-14       Add rate limiting to the API                   </text>
+<text x="20" y="104.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-m3d</text>
+<text x="179.6" y="104.4" fill="#f7768e" textLength="193.20000000000002" lengthAdjust="spacingAndGlyphs">needs you · run command</text>
+<text x="456.8" y="104.4" fill="#c0caf5" textLength="310.8" lengthAdjust="spacingAndGlyphs"> Rotate the staging database password</text>
+<text x="20" y="124.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-2fz</text>
+<text x="179.6" y="124.4" fill="#e0af68" textLength="193.20000000000002" lengthAdjust="spacingAndGlyphs">merged · PR #42 · APP-9</text>
+<text x="456.8" y="124.4" fill="#c0caf5" textLength="210" lengthAdjust="spacingAndGlyphs"> Fix the flaky login test</text>
+<text x="20" y="144.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-9wc</text>
+<text x="179.6" y="144.4" fill="#9ece6a" textLength="277.2" lengthAdjust="spacingAndGlyphs">ready to merge · PR #45 approved…</text>
+<text x="456.8" y="144.4" fill="#c0caf5" textLength="285.6" lengthAdjust="spacingAndGlyphs"> Upgrade the Postgres driver to v5</text>
+<text x="20" y="164.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-r8t</text>
+<text x="179.6" y="164.4" fill="#e0af68" textLength="126" lengthAdjust="spacingAndGlyphs">review · PR #47</text>
+<text x="456.8" y="164.4" fill="#c0caf5" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs"> Write the v2 migration guide</text>
+<text x="20" y="184.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-x5n</text>
+<text x="179.6" y="184.4" fill="#e0af68" textLength="277.2" lengthAdjust="spacingAndGlyphs">rolling out · PR #39 · Deploy pr…</text>
+<text x="456.8" y="184.4" fill="#c0caf5" textLength="310.8" lengthAdjust="spacingAndGlyphs"> Move image uploads to object storage</text>
+<text x="20" y="204.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-h6p</text>
+<text x="179.6" y="204.4" fill="#f7768e" textLength="277.2" lengthAdjust="spacingAndGlyphs">checks failing · PR #48 (e2e (fi…</text>
+<text x="456.8" y="204.4" fill="#c0caf5" textLength="268.8" lengthAdjust="spacingAndGlyphs"> Dark mode for the settings page</text>
+<text x="20" y="224.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-b7v</text>
+<text x="179.6" y="224.4" fill="#565f89" textLength="33.6" lengthAdjust="spacingAndGlyphs">idle</text>
+<text x="456.8" y="224.4" fill="#c0caf5" textLength="268.8" lengthAdjust="spacingAndGlyphs"> Translate the onboarding emails</text>
+<text x="20" y="244.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-c4j</text>
+<text x="179.6" y="244.4" fill="#9ece6a" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">working</text>
+<text x="456.8" y="244.4" fill="#c0caf5" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs"> Paginate the search endpoint</text>
+<text x="20" y="264.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-u2e</text>
+<text x="179.6" y="264.4" fill="#9ece6a" textLength="260.40000000000003" lengthAdjust="spacingAndGlyphs">working · PR #49 checks running</text>
+<text x="456.8" y="264.4" fill="#c0caf5" textLength="277.2" lengthAdjust="spacingAndGlyphs"> Cache rendered Markdown previews</text>
+<text x="20" y="284.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-k9s</text>
+<text x="179.6" y="284.4" fill="#565f89" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">blocked</text>
+<text x="456.8" y="284.4" fill="#c0caf5" textLength="294" lengthAdjust="spacingAndGlyphs"> Single sign-on for the admin panel</text>
+<text x="20" y="304.4" fill="#c0caf5" font-weight="bold" textLength="33.6" lengthAdjust="spacingAndGlyphs">next</text>
+<text x="20" y="324.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-d1f</text>
+<text x="179.6" y="324.4" fill="#7dcfff" textLength="84" lengthAdjust="spacingAndGlyphs">P1 feature</text>
+<text x="456.8" y="324.4" fill="#c0caf5" textLength="193.20000000000002" lengthAdjust="spacingAndGlyphs"> CSV export for reports</text>
+<text x="20" y="344.4" fill="#565f89" textLength="840" lengthAdjust="spacingAndGlyphs">────────────────────────────────────────────────────────────────────────────────────────────────────</text>
+<text x="20" y="364.4" fill="#7dcfff" textLength="378" lengthAdjust="spacingAndGlyphs">notes-7qk · needs_me · P1 · task · labels api</text>
+<text x="20" y="384.4" fill="#c0caf5" font-weight="bold" textLength="235.20000000000002" lengthAdjust="spacingAndGlyphs">Add rate limiting to the API</text>
+<text x="20" y="404.4" fill="#f7768e" textLength="226.8" lengthAdjust="spacingAndGlyphs">needs you · PR #50 · APP-14</text>
+<text x="20" y="444.4" fill="#c0caf5" font-weight="bold" textLength="92.4" lengthAdjust="spacingAndGlyphs">Description</text>
+<text x="20" y="464.4" fill="#c0caf5" textLength="823.2" lengthAdjust="spacingAndGlyphs">  One noisy client can slow the API down for everyone. Add a limiter in front of /api that answers</text>
+<text x="20" y="484.4" fill="#c0caf5" textLength="403.20000000000005" lengthAdjust="spacingAndGlyphs">  429 with Retry-After, and document the limits.</text>
+<text x="20" y="524.4" fill="#c0caf5" font-weight="bold" textLength="193.20000000000002" lengthAdjust="spacingAndGlyphs">Latest note (3 earlier)</text>
+<text x="20" y="544.4" fill="#c0caf5" textLength="831.6" lengthAdjust="spacingAndGlyphs">  Question: limit per API key or per client IP? (a) per key, 100 req/min, anonymous calls share one</text>
+<text x="20" y="564.4" fill="#c0caf5" textLength="537.6" lengthAdjust="spacingAndGlyphs">  bucket (b) per IP, 60 req/min (c) both, whichever trips first.</text>
+<text x="20" y="604.4" fill="#c0caf5" font-weight="bold" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs">PRs</text>
+<text x="20" y="624.4" fill="#c0caf5" textLength="470.40000000000003" lengthAdjust="spacingAndGlyphs">  acme/notes#50 · open · draft · clean · checks 2 passed</text>
+<text x="20" y="644.4" fill="#565f89" textLength="336" lengthAdjust="spacingAndGlyphs">    APP-14: Add rate limiting to the API</text>
+<text x="20" y="684.4" fill="#c0caf5" font-weight="bold" textLength="50.400000000000006" lengthAdjust="spacingAndGlyphs">Linear</text>
+<text x="20" y="704.4" fill="#c0caf5" textLength="67.2" lengthAdjust="spacingAndGlyphs">  APP-14</text>
+<text x="20" y="744.4" fill="#c0caf5" font-weight="bold" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs">Agent notes-7qk · claude idle</text>
+<text x="20" y="764.4" fill="#565f89" textLength="672" lengthAdjust="spacingAndGlyphs">  ● The limiter is in internal/ratelimit (token bucket, 14 tests), and the draft</text>
+<text x="20" y="784.4" fill="#565f89" textLength="638.4" lengthAdjust="spacingAndGlyphs">    PR is up. Before I wire it into the router I need one decision from you:</text>
+<text x="20" y="804.4" fill="#565f89" textLength="663.6" lengthAdjust="spacingAndGlyphs">    should the limit be per API key, per client IP, or both? Noted on the bead.</text>
+<text x="20" y="824.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs">  ❯</text>
+<text x="20" y="864.4" fill="#c0caf5" font-weight="bold" textLength="75.60000000000001" lengthAdjust="spacingAndGlyphs">Inbox (1)</text>
+<text x="20" y="884.4" fill="#c0caf5" textLength="638.4" lengthAdjust="spacingAndGlyphs">  13:56 [needs_you] notes-7qk needs you: limit per API key or per client IP?</text>
+<text x="20" y="964.4" fill="#565f89" textLength="697.2" lengthAdjust="spacingAndGlyphs">j/k move  J/K scroll  o open PR  l Linear  s bd show  ↵ focus/start  esc/space back</text>
+</g>
+</svg>

@@ -9,6 +9,13 @@ in when someone needs a decision. It's a [Herdr](https://herdr.dev) plugin: the
 workers are ordinary Claude Code, Codex or Muse Code sessions in Herdr panes, and their
 state shows in Herdr's sidebar.
 
+![The quartermaster board: threads grouped by state (needs you, merged, ready to merge, review, rolling out, checks failing, idle, working, blocked), then the beads selected next and the rest of the ready ones](docs/images/board.png)
+
+<sub>The board, with made-up demo data. Space opens a thread's detail: [the
+bead, its question, PR, Linear issue and the end of its agent's
+screen](docs/images/board-detail.png). `scripts/demo/screenshots.sh`
+regenerates both.</sub>
+
 ## Why
 
 - **One place to coordinate from.** A single coordinator session plans, splits
