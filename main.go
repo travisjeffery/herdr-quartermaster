@@ -38,6 +38,8 @@ Usage:
   quartermaster tick                                   one ticker pass in the foreground
   quartermaster configure [--repo PATH]                first-time setup: config, ~/.local/bin link, agent view
   quartermaster unconfigure                            stop the ticker, remove the view and sidebar tokens
+  quartermaster bd-proxy --host NAME [--bd PATH]       authorized_keys forced command: run a worker host's
+                                                       bd request (SSH_ORIGINAL_COMMAND) on this machine's beads
   quartermaster version
 
 K is the agent kind: claude, codex or muse; dispatch and focus also take auto.
@@ -94,6 +96,15 @@ func run(args []string) error {
 	case "help", "--help", "-h":
 		fmt.Print(usage)
 		return nil
+	}
+	// bd-proxy is sshd's forced command: no directory migration and nothing
+	// but bd's own output on stdout.
+	if args[0] == "bd-proxy" {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		return bdProxy(cfg, args[1:])
 	}
 	for _, msg := range migrateDirs() {
 		fmt.Fprintln(os.Stderr, "quartermaster:", msg)

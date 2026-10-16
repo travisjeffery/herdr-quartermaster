@@ -296,7 +296,7 @@ which serializes writers with a file lock. Options:
 
 | Option | How | Pros | Cons |
 |---|---|---|---|
-| **A. Forced-command SSH proxy** (recommended) | On each host, `bd` is a shim: `ssh -T -i ~/.ssh/qm-beads qm-beads@desktop.local -- "$@"`. On the desktop, the key is in `authorized_keys` with `command="quartermaster bd-proxy",restrict`. `bd-proxy` parses `SSH_ORIGINAL_COMMAND`, refuses anything that isn't a `bd` subcommand on an allowlist, pins `BEADS_DIR`, passes `--actor`, and execs `bd`. | No migration; same lock and semantics as local agents; one copy; nothing new to run on the desktop; the key can only run bd | Desktop must be reachable from hosts; ~50–150 ms per call on a LAN (ControlMaster helps); desktop asleep = no bd |
+| **A. Forced-command SSH proxy** (recommended) | On each host, `bd` is a shim: `ssh -T -i ~/.config/qm-worker/beads-key -- desktop.local <quoted args>`. On the desktop, the key is in `authorized_keys` with `command="quartermaster bd-proxy --host <name>",restrict`. `bd-proxy` parses `SSH_ORIGINAL_COMMAND`, refuses anything that isn't a `bd` subcommand on an allowlist, pins `BEADS_DIR`, passes `--actor`, and execs `bd`. | No migration; same lock and semantics as local agents; one copy; nothing new to run on the desktop; the key can only run bd | Desktop must be reachable from hosts; ~50–150 ms per call on a LAN (ControlMaster helps); desktop asleep = no bd |
 | B. Dolt sql-server on the desktop | Migrate the desktop DB to server mode; hosts reach it through an SSH reverse tunnel with bd's (experimental) `--proxied-server-external-host` | Native bd on every host; concurrent writers without a file lock | Migrates the live DB every local agent uses; a supervised server to keep up; the flags are marked experimental; SQL access = whole DB (same scope as A in practice) |
 | C. `bd serve` HTTP API | Desktop runs `bd serve` with a token file; hosts call it | Designed for automation clients, token rotation built in | Agents use the `bd` CLI and hooks, not HTTP; a CLI-over-HTTP shim would have to be written |
 | D. Dolt remote sync (`bd sync`, S3) | Each host has a copy, syncs periodically | Works offline | Two sources of truth; claims race; known merge failures with the current remote. **Rejected.** |
@@ -312,8 +312,18 @@ Details for A:
   close create label dep remember memories comments …`, not `dolt`, `sync`,
   `init`, `flatten`, `gc`, `config set`), with stdin passed through for
   `--body-file -`.
-- The shim sets `BEADS_ACTOR` from the pane (as `agentEnv` does today) and
-  passes it as `--actor`; the proxy prefixes nothing else.
+- The shim sends `BEADS_ACTOR` from the pane (as `agentEnv` does today) as
+  `--actor`; a request without one acts as the host's name. The proxy
+  prefixes nothing else.
+- Implemented (phase 2): `bdproxy.go` and `scripts/bd-shim`. The shim
+  single-quotes each argument (ssh joins them with spaces); the proxy splits
+  them with no shell, refuses unquoted shell syntax, refuses `--db`,
+  `--database`, `-C/--directory`, `--global`, `--dolt-auto-commit` and the
+  profile flags anywhere before `--`, scrubs `BEADS_*` from the environment,
+  and execs `bd` so stdin and the exit code pass through. Each request is one
+  line in the state dir's `bd-proxy.log` (host, actor, subcommand, verdict;
+  never the arguments). The shim's ControlPath is its own (`qm-beads-%C`): a
+  master connection opened with another key would not run the forced command.
 - SSH multiplexing (`ControlMaster auto`, `ControlPersist 10m`) in the
   container's SSH config keeps calls cheap; Claude's SessionStart `bd prime`
   hook then costs one round trip.

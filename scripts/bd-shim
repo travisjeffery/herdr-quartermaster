@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# bd on a worker host: runs bd on the desktop through its forced-command
+# Beads key (quartermaster bd-proxy; docs/design/worker-hosts.md §5). The
+# worker image installs this as /usr/local/bin/bd.
+#
+#   QM_BEADS_TARGET  ssh destination of the desktop (default: desktop.local)
+#   QM_BEADS_KEY     the host's Beads key (default: ~/.config/qm-worker/beads-key)
+#   BEADS_ACTOR      sent as --actor; without it the desktop logs the host name
+#
+# ssh joins its arguments with spaces and the desktop splits them again, so
+# each argument goes single-quoted: bd-proxy understands the quoting, never
+# runs a shell, and refuses unquoted shell syntax. Stdin and the exit code
+# pass through; a connection is shared for 10 minutes so each bd call costs
+# one round trip.
+set -u
+
+target=${QM_BEADS_TARGET:-desktop.local}
+key=${QM_BEADS_KEY:-$HOME/.config/qm-worker/beads-key}
+sockets=${XDG_RUNTIME_DIR:-$HOME/.ssh}
+
+if [ ! -r "$key" ]; then
+  echo "bd: no Beads key at $key; this host is not bootstrapped for Beads" >&2
+  exit 1
+fi
+
+args=()
+[ -n "${BEADS_ACTOR:-}" ] && args+=("'--actor'" "'${BEADS_ACTOR//\'/\'\\\'\'}'")
+for a in "$@"; do
+  args+=("'${a//\'/\'\\\'\'}'")
+done
+
+# The ControlPath is the shim's own: a master opened with another key would
+# not run the forced command. IdentitiesOnly keeps the agent's keys out.
+exec ssh -T \
+  -o BatchMode=yes \
+  -o IdentitiesOnly=yes \
+  -o IdentityFile="$key" \
+  -o ControlMaster=auto \
+  -o ControlPath="$sockets/qm-beads-%C" \
+  -o ControlPersist=10m \
+  -o ServerAliveInterval=15 \
+  -o ServerAliveCountMax=3 \
+  -- "$target" "${args[@]}"
