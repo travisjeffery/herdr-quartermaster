@@ -27,10 +27,11 @@ import (
 // straight through. The host name comes from the key line, never the request.
 
 // bdProxyCommands are the bd subcommands a worker may run: reading and
-// updating issues, notes, labels, dependencies and memories. Everything else
+// updating issues, notes, labels, dependencies and memories, and the agent
+// hooks (prime, codex-hook). Everything else
 // (dolt, sync, init, config, flatten, gc, sql, delete, edit, ...) is refused.
 var bdProxyCommands = []string{
-	"assign", "blocked", "children", "close", "comment", "comments", "count",
+	"assign", "blocked", "children", "close", "codex-hook", "comment", "comments", "count",
 	"create", "defer", "dep", "duplicate", "forget", "graph", "heartbeat",
 	"help", "history", "label", "link", "list", "memories", "note", "ping",
 	"prime", "priority", "q", "query", "ready", "recall", "remember", "reopen",

@@ -49,6 +49,7 @@ func TestPlanBDAllowsWorkerCommands(t *testing.T) {
 		{[]string{"--actor", "a", "--actor", "b", "prime"}, []string{"--actor", "b", "prime"}, "b"},
 		// After "--" a word is an argument, not a flag.
 		{[]string{"note", "b-1", "--", "--db", "-C"}, []string{"--actor", "server", "note", "b-1", "--", "--db", "-C"}, "server"},
+		{[]string{"codex-hook", "SessionStart"}, []string{"--actor", "server", "codex-hook", "SessionStart"}, "server"},
 		{[]string{"create", "t", "--body-file", "-"}, []string{"--actor", "server", "create", "t", "--body-file", "-"}, "server"},
 	} {
 		req, err := planBD("server", tc.words)
