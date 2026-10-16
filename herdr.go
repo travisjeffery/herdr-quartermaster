@@ -25,6 +25,9 @@ type Agent struct {
 	WorkspaceID string `json:"workspace_id"`
 	Cwd         string `json:"cwd"`
 	Seq         int64  `json:"state_change_seq"`
+	// Host is the quartermaster host whose herdr server listed the agent.
+	// Names and pane ids are only unique per server.
+	Host string `json:"-"`
 }
 
 type Herdr struct {
@@ -32,6 +35,10 @@ type Herdr struct {
 	// socket, when set, pins every call to that server instead of the one in
 	// the environment.
 	socket string
+	// machine, when set, forwards every call to that herdr machine over SSH
+	// (herdr --machine <label> ...); host is the quartermaster host it is.
+	machine string
+	host    string
 }
 
 func newHerdr() Herdr {
@@ -46,6 +53,25 @@ func newHerdr() Herdr {
 func (h Herdr) on(socket string) Herdr {
 	h.socket = socket
 	return h
+}
+
+// onMachine returns h forwarding every call to the herdr server on a saved
+// machine. Herdr never falls back to local, so a call either reaches that
+// server or fails. An empty label is the local server.
+func (h Herdr) onMachine(label string) Herdr {
+	h.machine = label
+	return h
+}
+
+// hostName is the host this client talks to.
+func (h Herdr) hostName() string {
+	if h.host != "" {
+		return h.host
+	}
+	if h.machine != "" {
+		return h.machine
+	}
+	return localHost
 }
 
 // pinSocket rewrites env so herdr targets socket. HERDR_SESSION goes too: herdr
@@ -65,14 +91,22 @@ func pinSocket(env []string, socket string) []string {
 func (h Herdr) output(timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, h.bin, args...)
+	argv := args
+	if h.machine != "" {
+		argv = append([]string{"--machine", h.machine}, args...)
+	}
+	cmd := exec.CommandContext(ctx, h.bin, argv...)
 	if h.socket != "" {
 		cmd.Env = pinSocket(os.Environ(), h.socket)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("herdr %s: %v: %s", strings.Join(args[:min(2, len(args))], " "), err, strings.TrimSpace(stderr.String()))
+		where := ""
+		if h.machine != "" {
+			where = " on " + h.hostName()
+		}
+		return nil, fmt.Errorf("herdr %s%s: %v: %s", strings.Join(args[:min(2, len(args))], " "), where, err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
 }
@@ -106,7 +140,13 @@ func (h Herdr) Agents() ([]Agent, error) {
 	var out struct {
 		Agents []Agent `json:"agents"`
 	}
-	return out.Agents, json.Unmarshal(res, &out)
+	if err := json.Unmarshal(res, &out); err != nil {
+		return nil, err
+	}
+	for i := range out.Agents {
+		out.Agents[i].Host = h.hostName()
+	}
+	return out.Agents, nil
 }
 
 type Opened struct {

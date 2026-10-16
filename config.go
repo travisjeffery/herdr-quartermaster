@@ -59,6 +59,19 @@ type Config struct {
 	// Repo is the default.
 	Repos map[string]string `toml:"repos"`
 
+	// Schedule is how dispatch picks a host when none is given; only
+	// "manual" (local unless --host or a host: label) exists so far.
+	Schedule string `toml:"schedule"`
+	// Hosts are the machines workers run on ([hosts.<name>]); local is
+	// implicit.
+	Hosts map[string]HostConfig `toml:"hosts"`
+	// RepoNeeds are host labels every bead in a repo needs, by repo name.
+	RepoNeeds map[string][]string `toml:"repo_needs"`
+	// Slot derivation defaults for every host; see Config.slots.
+	CoresPerWorker  int `toml:"cores_per_worker"`
+	RAMPerWorkerGiB int `toml:"ram_per_worker_gib"`
+	ReserveGiB      int `toml:"reserve_gib"`
+
 	// Agents holds per-kind settings ([agents.muse]), for workers and the
 	// coordinator alike.
 	Agents map[string]AgentConfig `toml:"agents"`
@@ -83,9 +96,14 @@ var defaultAgentArgs = map[string][]string{
 // worktree, and BEADS_ACTOR, so the agent acts as its kind. Claude and Codex
 // also set these in their own configs; Muse has nowhere to, and its hooks and
 // unsandboxed shell inherit the pane's environment.
-func (c Config) agentEnv(kind string) string {
+//
+// On a remote host BEADS_DIR stays out: bd there is a shim to the desktop's
+// bd-proxy, which pins the database itself.
+func (c Config) agentEnv(kind string) string { return c.agentEnvOn(localHost, kind) }
+
+func (c Config) agentEnvOn(host, kind string) string {
 	cmd := "export BEADS_ACTOR=" + shellQuote(kind)
-	if c.BeadsDir != "" {
+	if c.BeadsDir != "" && host == localHost {
 		cmd += " BEADS_DIR=" + shellQuote(c.BeadsDir)
 	}
 	return cmd
@@ -260,6 +278,9 @@ func loadConfig() (Config, error) {
 	cfg.HerdrSocket = expandHome(cfg.HerdrSocket)
 	for name, path := range cfg.Repos {
 		cfg.Repos[name] = expandHome(path)
+	}
+	if err := cfg.validateHosts(); err != nil {
+		return cfg, err
 	}
 	if cfg.Repo == "" {
 		return cfg, errNoRepo

@@ -20,6 +20,9 @@ qm is a short alias: qm context is quartermaster context.
 Usage:
   quartermaster coordinator [--agent K]                open (or focus) the coordinator agent
   quartermaster dispatch <bead> [--agent K] [--focus]  start a worker on a bead in its own worktree
+                [--host H] [--force]                   on host H (default: the bead's host: label, else
+                                                       local); --force ignores the bead's needs: labels
+  quartermaster host list                              the worker hosts: machine, slots, labels, repos
   quartermaster focus [<bead>] [--agent K]             focus the bead's worker, else dispatch it
                                                        (no bead: read it from the clipboard)
   quartermaster context                                the coordinator's per-turn digest
@@ -120,7 +123,8 @@ func run(args []string) error {
 	kind := fs.String("agent", "", "agent kind: claude, codex, muse or auto")
 	focus := fs.Bool("focus", false, "focus the new workspace")
 	repoFlag := fs.String("repo", "", "configure: the repository quartermaster works in, written to config.toml if it has none")
-	force := fs.Bool("force", false, "resolve even if the bead is open or its agent is working")
+	force := fs.Bool("force", false, "resolve even if the bead is open or its agent is working; dispatch to a host lacking a needed label")
+	hostFlag := fs.String("host", "", "dispatch: the worker host to run on")
 	sinceFlag := fs.String("since", "24h", "report window: Nh, Nd or YYYY-MM-DD")
 	yes := fs.Bool("yes", false, "sweep: remove the clean candidates; verify: act on the verdicts")
 	days := fs.Int("days", 7, "stale: untouched for at least this many days")
@@ -139,13 +143,18 @@ func run(args []string) error {
 		fmt.Println(msg)
 	case "dispatch":
 		if len(pos) != 1 {
-			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex|muse] [--focus]")
+			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex|muse] [--focus] [--host H] [--force]")
 		}
-		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Focus: *focus})
+		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Focus: *focus, Host: *hostFlag, Force: *force})
 		if err != nil {
 			return err
 		}
 		fmt.Println(msg)
+	case "host":
+		if len(pos) != 1 || pos[0] != "list" {
+			return fmt.Errorf("usage: quartermaster host list")
+		}
+		fmt.Print(hostList(cfg))
 	case "focus":
 		id := ""
 		if len(pos) > 0 {
