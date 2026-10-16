@@ -8,7 +8,7 @@
 <g font-family="'JetBrains Mono', 'JetBrainsMono Nerd Font', ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">
 <text x="20" y="64.4" fill="#c0caf5" font-weight="bold" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">threads</text>
 <rect x="20" y="70" width="840" height="20" fill="#c0caf5"/>
-<text x="20" y="84.4" fill="#1a1b26" textLength="840" lengthAdjust="spacingAndGlyphs">  notes-7qk        needs you · PR #50 · APP-14       Add rate limiting to the API                   </text>
+<text x="20" y="84.4" fill="#1a1b26" textLength="680.4" lengthAdjust="spacingAndGlyphs">  notes-7qk        needs you · PR #50 · APP-14       Add rate limiting to the API</text>
 <text x="20" y="104.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-m3d</text>
 <text x="179.6" y="104.4" fill="#f7768e" textLength="193.20000000000002" lengthAdjust="spacingAndGlyphs">needs you · run command</text>
 <text x="456.8" y="104.4" fill="#c0caf5" textLength="310.8" lengthAdjust="spacingAndGlyphs"> Rotate the staging database password</text>

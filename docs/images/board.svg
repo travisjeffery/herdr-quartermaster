@@ -11,7 +11,7 @@
 <text x="179.6" y="84.4" fill="#f7768e" textLength="226.8" lengthAdjust="spacingAndGlyphs">needs you · PR #50 · APP-14</text>
 <text x="456.8" y="84.4" fill="#c0caf5" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs"> Add rate limiting to the API</text>
 <rect x="20" y="90" width="840" height="20" fill="#c0caf5"/>
-<text x="20" y="104.4" fill="#1a1b26" textLength="840" lengthAdjust="spacingAndGlyphs">  notes-m3d        needs you · run command           Rotate the staging database password           </text>
+<text x="20" y="104.4" fill="#1a1b26" textLength="747.6" lengthAdjust="spacingAndGlyphs">  notes-m3d        needs you · run command           Rotate the staging database password</text>
 <text x="20" y="124.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-2fz</text>
 <text x="179.6" y="124.4" fill="#e0af68" textLength="193.20000000000002" lengthAdjust="spacingAndGlyphs">merged · PR #42 · APP-9</text>
 <text x="456.8" y="124.4" fill="#c0caf5" textLength="210" lengthAdjust="spacingAndGlyphs"> Fix the flaky login test</text>

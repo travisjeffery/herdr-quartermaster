@@ -9,12 +9,12 @@ in when someone needs a decision. It's a [Herdr](https://herdr.dev) plugin: the
 workers are ordinary Claude Code, Codex or Muse Code sessions in Herdr panes, and their
 state shows in Herdr's sidebar.
 
-![The quartermaster board: threads grouped by state (needs you, merged, ready to merge, review, rolling out, checks failing, idle, working, blocked), then the beads selected next and the rest of the ready ones](docs/images/board.png)
+![quartermaster in Herdr: you ask the coordinator what's going on; it runs quartermaster context, says what needs you and proposes the next bead; you say go and it dispatches a worker, whose screen appears beside it, with every thread's state in the sidebar](docs/images/quartermaster.png)
 
-<sub>The board, with made-up demo data. Space opens a thread's detail: [the
-bead, its question, PR, Linear issue and the end of its agent's
-screen](docs/images/board-detail.png). `scripts/demo/screenshots.sh`
-regenerates both.</sub>
+<sub>The coordinator in a Herdr workspace, with two workers' screens beside it
+and every thread's state in the sidebar. Made-up demo data and stand-in
+agents; [the board](docs/images/board.png) and [a thread's
+detail](docs/images/board-detail.png) look like this.</sub>
 
 ## Why
 
@@ -34,6 +34,20 @@ regenerates both.</sub>
   once. That's what lets you run many threads without them stepping on each
   other, and what lets any session, including the coordinator after a restart,
   pick up exactly where things are.
+
+## See it work
+
+![quartermaster in Herdr: the coordinator answers what's going on and dispatches a worker, the board filters threads and opens one's detail, then the ticker sees a PR approved and the coordinator says it is ready to merge](docs/images/quartermaster-demo.gif)
+
+<sub>30 seconds, also as [MP4](docs/images/quartermaster-demo.mp4): you ask
+the coordinator what's going on, it reads `quartermaster context` and proposes
+a bead, you say go and it dispatches a worker; the board filters to what's in
+review; then a PR is approved, the ticker flips its thread to ready to merge
+and nudges the coordinator, which tells you. Recorded in a scratch Herdr
+session on made-up data. The agents are stand-ins that answer from a script
+(no model runs) and `gh` answers from a file; quartermaster, Herdr and bd are
+real. Waits for an agent to start and for the ticker's next GitHub pass are
+cut. `scripts/demo/record.sh` records it again.</sub>
 
 ## How it works
 

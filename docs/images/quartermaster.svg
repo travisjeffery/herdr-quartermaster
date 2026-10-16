@@ -1,0 +1,309 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1148.8" height="786" viewBox="0 0 1148.8 786">
+<rect width="1148.8" height="786" rx="10" fill="#1a1b26"/>
+<path d="M0 10a10 10 0 0 1 10-10h1128.8 a10 10 0 0 1 10 10v24h-1148.8z" fill="#16161e"/>
+<circle cx="20" cy="17" r="6" fill="#ff5f57"/>
+<circle cx="40" cy="17" r="6" fill="#febc2e"/>
+<circle cx="60" cy="17" r="6" fill="#28c840"/>
+<text x="574.4" y="21.5" fill="#565f89" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle">herdr</text>
+<g font-family="'JetBrains Mono', 'JetBrainsMono Nerd Font', ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">
+<text x="20" y="64.4" fill="#565f89" font-weight="bold" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs"> spaces</text>
+<text x="213.20000000000002" y="64.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<rect x="221.60000000000002" y="50" width="67.2" height="20" fill="#7aa2f7"/>
+<text x="221.60000000000002" y="64.4" fill="#1a1b26" textLength="33.6" lengthAdjust="spacingAndGlyphs">   1</text>
+<rect x="288.8" y="50" width="8.4" height="20" fill="#1a1b26"/>
+<rect x="297.2" y="50" width="25.200000000000003" height="20" fill="#1a1b26"/>
+<text x="297.2" y="64.4" fill="#697196" textLength="16.8" lengthAdjust="spacingAndGlyphs"> +</text>
+<text x="213.20000000000002" y="84.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="84.4" fill="#7aa2f7" textLength="546" lengthAdjust="spacingAndGlyphs">┌───────────────────────────────────────────────────────────────┐</text>
+<text x="767.6" y="84.4" fill="#565f89" textLength="361.2" lengthAdjust="spacingAndGlyphs">┌─────────────────────────────────────────┐</text>
+<text x="28.4" y="104.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">·</text>
+<text x="45.2" y="104.4" fill="#a9b1d6" textLength="42" lengthAdjust="spacingAndGlyphs">notes</text>
+<text x="204.8" y="104.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▾</text>
+<text x="213.20000000000002" y="104.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="104.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="104.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">◆</text>
+<text x="246.8" y="104.4" fill="#c0caf5" font-weight="bold" textLength="92.4" lengthAdjust="spacingAndGlyphs">coordinator</text>
+<text x="347.6" y="104.4" fill="#565f89" textLength="126" lengthAdjust="spacingAndGlyphs">· quartermaster</text>
+<text x="759.2" y="104.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="104.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="104.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">◆</text>
+<text x="792.8000000000001" y="104.4" fill="#c0caf5" font-weight="bold" textLength="50.400000000000006" lengthAdjust="spacingAndGlyphs">worker</text>
+<text x="851.6" y="104.4" fill="#565f89" textLength="92.4" lengthAdjust="spacingAndGlyphs">· notes-9wc</text>
+<text x="1120.4" y="104.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="20" y="124.4" fill="#565f89" textLength="42" lengthAdjust="spacingAndGlyphs">   ├─</text>
+<text x="70.4" y="124.4" fill="#7dcfff" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="87.2" y="124.4" fill="#a9b1d6" textLength="75.60000000000001" lengthAdjust="spacingAndGlyphs">notes-7qk</text>
+<text x="213.20000000000002" y="124.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="124.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="124.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="124.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="124.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="20" y="144.4" fill="#565f89" textLength="42" lengthAdjust="spacingAndGlyphs">   ├─</text>
+<text x="70.4" y="144.4" fill="#7dcfff" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="87.2" y="144.4" fill="#a9b1d6" textLength="75.60000000000001" lengthAdjust="spacingAndGlyphs">notes-9wc</text>
+<text x="213.20000000000002" y="144.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="144.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="144.4" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs">❯</text>
+<text x="238.4" y="144.4" fill="#c0caf5" textLength="142.8" lengthAdjust="spacingAndGlyphs"> what&#39;s going on?</text>
+<text x="759.2" y="144.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="144.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="144.4" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs">❯</text>
+<text x="784.4" y="144.4" fill="#c0caf5" textLength="226.8" lengthAdjust="spacingAndGlyphs"> You are the quartermaster…</text>
+<text x="1019.6" y="144.4" fill="#414868" textLength="92.4" lengthAdjust="spacingAndGlyphs">[+13 lines]</text>
+<text x="1120.4" y="144.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="20" y="164.4" fill="#565f89" textLength="42" lengthAdjust="spacingAndGlyphs">   ├─</text>
+<text x="70.4" y="164.4" fill="#7dcfff" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="87.2" y="164.4" fill="#a9b1d6" textLength="75.60000000000001" lengthAdjust="spacingAndGlyphs">notes-h6p</text>
+<text x="213.20000000000002" y="164.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="164.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="164.4" fill="#9ece6a" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="246.8" y="164.4" fill="#c0caf5" font-weight="bold" textLength="33.6" lengthAdjust="spacingAndGlyphs">Bash</text>
+<text x="280.40000000000003" y="164.4" fill="#c0caf5" textLength="193.20000000000002" lengthAdjust="spacingAndGlyphs">(quartermaster context)</text>
+<text x="759.2" y="164.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="164.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="164.4" fill="#bb9af7" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="784.4" y="164.4" fill="#c0caf5" textLength="151.20000000000002" lengthAdjust="spacingAndGlyphs"> On it: notes-9wc.</text>
+<text x="1120.4" y="164.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="20" y="184.4" fill="#565f89" textLength="42" lengthAdjust="spacingAndGlyphs">   ├─</text>
+<text x="70.4" y="184.4" fill="#7dcfff" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="87.2" y="184.4" fill="#a9b1d6" textLength="75.60000000000001" lengthAdjust="spacingAndGlyphs">notes-r8t</text>
+<text x="213.20000000000002" y="184.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="184.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="246.8" y="184.4" fill="#414868" textLength="495.6" lengthAdjust="spacingAndGlyphs">⎿  - 18:16 notes-7qk [needs_you] notes-7qk is marked needs…</text>
+<text x="759.2" y="184.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="184.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="184.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="20" y="204.4" fill="#565f89" textLength="42" lengthAdjust="spacingAndGlyphs">   └─</text>
+<text x="70.4" y="204.4" fill="#7dcfff" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="87.2" y="204.4" fill="#a9b1d6" textLength="75.60000000000001" lengthAdjust="spacingAndGlyphs">notes-c4j</text>
+<text x="213.20000000000002" y="204.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="204.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="246.8" y="204.4" fill="#414868" textLength="495.6" lengthAdjust="spacingAndGlyphs">   - 18:16 notes-h6p [checks_failing] PR #48 checks failin…</text>
+<text x="759.2" y="204.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="204.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="204.4" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs">❯</text>
+<text x="1120.4" y="204.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<rect x="20" y="210" width="8.4" height="20" fill="#232636"/>
+<rect x="28.4" y="210" width="8.4" height="20" fill="#232636"/>
+<text x="28.4" y="224.4" fill="#9ece6a" textLength="8.4" lengthAdjust="spacingAndGlyphs">○</text>
+<rect x="36.8" y="210" width="8.4" height="20" fill="#232636"/>
+<rect x="45.2" y="210" width="109.2" height="20" fill="#232636"/>
+<text x="45.2" y="224.4" fill="#c0caf5" font-weight="bold" textLength="109.2" lengthAdjust="spacingAndGlyphs">quartermaster</text>
+<rect x="154.4" y="210" width="58.800000000000004" height="20" fill="#232636"/>
+<text x="213.20000000000002" y="224.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="224.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="246.8" y="224.4" fill="#414868" textLength="495.6" lengthAdjust="spacingAndGlyphs">   - 18:16 notes-h6p [finished] notes-h6p finished a turn …</text>
+<text x="759.2" y="224.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="224.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="224.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="213.20000000000002" y="244.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="244.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="246.8" y="244.4" fill="#414868" textLength="478.8" lengthAdjust="spacingAndGlyphs">   - notes-7qk · needs you · Add rate limiting to the API</text>
+<text x="759.2" y="244.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="244.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="244.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="213.20000000000002" y="264.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="264.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="246.8" y="264.4" fill="#414868" textLength="495.6" lengthAdjust="spacingAndGlyphs">   - notes-9wc · review · PR #45 · Upgrade the Postgres dr…</text>
+<text x="759.2" y="264.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="264.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="264.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="213.20000000000002" y="284.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="284.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="246.8" y="284.4" fill="#414868" textLength="495.6" lengthAdjust="spacingAndGlyphs">   - notes-r8t · review · PR #47 · Write the v2 migration …</text>
+<text x="759.2" y="284.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="284.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="284.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="213.20000000000002" y="304.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="304.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="246.8" y="304.4" fill="#414868" textLength="495.6" lengthAdjust="spacingAndGlyphs">   - notes-h6p · checks failing · PR #48 (e2e) · Dark mode…</text>
+<text x="759.2" y="304.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="304.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="304.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="213.20000000000002" y="324.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="324.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="324.4" fill="#bb9af7" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="238.4" y="324.4" fill="#c0caf5" textLength="478.8" lengthAdjust="spacingAndGlyphs"> notes-7qk needs you: limit per API key or per client IP?</text>
+<text x="759.2" y="324.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="324.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="324.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="213.20000000000002" y="344.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="344.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="344.4" fill="#c0caf5" textLength="495.6" lengthAdjust="spacingAndGlyphs">  notes-h6p&#39;s e2e check is failing; its worker is on it. In</text>
+<text x="759.2" y="344.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="344.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="344.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="213.20000000000002" y="364.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="364.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="364.4" fill="#c0caf5" textLength="445.20000000000005" lengthAdjust="spacingAndGlyphs">  review: notes-9wc, notes-r8t. Next up is notes-c4j:</text>
+<text x="759.2" y="364.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="364.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="364.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="213.20000000000002" y="384.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="384.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="384.4" fill="#c0caf5" textLength="344.40000000000003" lengthAdjust="spacingAndGlyphs">  Paginate the search endpoint. Start it?</text>
+<text x="759.2" y="384.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="384.4" fill="#565f89" textLength="361.2" lengthAdjust="spacingAndGlyphs">└─────────────────────────────────────────┘</text>
+<text x="20" y="404.4" fill="#565f89" textLength="33.6" lengthAdjust="spacingAndGlyphs"> new</text>
+<text x="162.8" y="404.4" fill="#7aa2f7" font-weight="bold" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="179.6" y="404.4" fill="#565f89" textLength="33.6" lengthAdjust="spacingAndGlyphs">menu</text>
+<text x="213.20000000000002" y="404.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="404.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="404.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="404.4" fill="#565f89" textLength="361.2" lengthAdjust="spacingAndGlyphs">┌─────────────────────────────────────────┐</text>
+<text x="20" y="424.4" fill="#1a1b26" textLength="201.60000000000002" lengthAdjust="spacingAndGlyphs">───────────────────────│</text>
+<text x="221.60000000000002" y="424.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="424.4" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs">❯</text>
+<text x="238.4" y="424.4" fill="#c0caf5" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> go</text>
+<text x="759.2" y="424.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="424.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="424.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">◆</text>
+<text x="792.8000000000001" y="424.4" fill="#c0caf5" font-weight="bold" textLength="50.400000000000006" lengthAdjust="spacingAndGlyphs">worker</text>
+<text x="851.6" y="424.4" fill="#565f89" textLength="92.4" lengthAdjust="spacingAndGlyphs">· notes-c4j</text>
+<text x="1120.4" y="424.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="20" y="444.4" fill="#565f89" font-weight="bold" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs"> agents</text>
+<text x="104" y="444.4" fill="#7aa2f7" font-weight="bold" textLength="109.2" lengthAdjust="spacingAndGlyphs">quartermaster</text>
+<text x="213.20000000000002" y="444.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="444.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="444.4" fill="#9ece6a" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="246.8" y="444.4" fill="#c0caf5" font-weight="bold" textLength="33.6" lengthAdjust="spacingAndGlyphs">Bash</text>
+<text x="280.40000000000003" y="444.4" fill="#c0caf5" textLength="285.6" lengthAdjust="spacingAndGlyphs">(quartermaster dispatch notes-c4j)</text>
+<text x="759.2" y="444.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="444.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="444.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="213.20000000000002" y="464.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="464.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="246.8" y="464.4" fill="#414868" textLength="495.6" lengthAdjust="spacingAndGlyphs">⎿  started a worker on notes-c4j (w8:p1, branch demo/notes…</text>
+<text x="759.2" y="464.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="464.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="464.4" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs">❯</text>
+<text x="784.4" y="464.4" fill="#c0caf5" textLength="226.8" lengthAdjust="spacingAndGlyphs"> You are the quartermaster…</text>
+<text x="1019.6" y="464.4" fill="#414868" textLength="92.4" lengthAdjust="spacingAndGlyphs">[+13 lines]</text>
+<text x="1120.4" y="464.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<rect x="20" y="470" width="8.4" height="20" fill="#232636"/>
+<rect x="28.4" y="470" width="8.4" height="20" fill="#232636"/>
+<text x="28.4" y="484.4" fill="#9ece6a" textLength="8.4" lengthAdjust="spacingAndGlyphs">○</text>
+<rect x="36.8" y="470" width="117.60000000000001" height="20" fill="#232636"/>
+<text x="36.8" y="484.4" fill="#565f89" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs"> quartermaster</text>
+<rect x="154.4" y="470" width="58.800000000000004" height="20" fill="#232636"/>
+<text x="213.20000000000002" y="484.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="484.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="484.4" fill="#bb9af7" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="238.4" y="484.4" fill="#c0caf5" textLength="470.40000000000003" lengthAdjust="spacingAndGlyphs"> Started a worker on notes-c4j in its own worktree. I&#39;ll</text>
+<text x="759.2" y="484.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="484.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="484.4" fill="#9ece6a" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="792.8000000000001" y="484.4" fill="#c0caf5" font-weight="bold" textLength="33.6" lengthAdjust="spacingAndGlyphs">Bash</text>
+<text x="826.4000000000001" y="484.4" fill="#c0caf5" textLength="159.6" lengthAdjust="spacingAndGlyphs">(bd show notes-c4j)</text>
+<text x="1120.4" y="484.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<rect x="20" y="490" width="25.200000000000003" height="20" fill="#232636"/>
+<rect x="45.2" y="490" width="168" height="20" fill="#232636"/>
+<text x="45.2" y="504.4" fill="#565f89" textLength="168" lengthAdjust="spacingAndGlyphs">coordinator · 1 nee…</text>
+<text x="213.20000000000002" y="504.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="504.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="504.4" fill="#c0caf5" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs">  tell you when it needs you.</text>
+<text x="759.2" y="504.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="504.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="792.8000000000001" y="504.4" fill="#414868" textLength="327.6" lengthAdjust="spacingAndGlyphs">⎿  notes-c4j · Paginate the search endp</text>
+<text x="1120.4" y="504.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="28.4" y="524.4" fill="#7dcfff" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="36.8" y="524.4" fill="#565f89" textLength="84" lengthAdjust="spacingAndGlyphs"> notes-7qk</text>
+<text x="213.20000000000002" y="524.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="524.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="524.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="524.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="524.4" fill="#414868" textLength="33.6" lengthAdjust="spacingAndGlyphs">oint</text>
+<text x="1120.4" y="524.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="45.2" y="544.4" fill="#f7768e" font-weight="bold" textLength="75.60000000000001" lengthAdjust="spacingAndGlyphs">needs you</text>
+<text x="213.20000000000002" y="544.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="544.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="230" y="544.4" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs">❯</text>
+<text x="759.2" y="544.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="544.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="544.4" fill="#bb9af7" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="784.4" y="544.4" fill="#c0caf5" textLength="302.40000000000003" lengthAdjust="spacingAndGlyphs"> Search returns every match at once.</text>
+<text x="1120.4" y="544.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="28.4" y="564.4" fill="#7dcfff" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="36.8" y="564.4" fill="#565f89" textLength="84" lengthAdjust="spacingAndGlyphs"> notes-9wc</text>
+<text x="213.20000000000002" y="564.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="564.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="564.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="564.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="564.4" fill="#c0caf5" textLength="226.8" lengthAdjust="spacingAndGlyphs">  Adding cursor pagination.</text>
+<text x="1120.4" y="564.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="45.2" y="584.4" fill="#e0af68" textLength="126" lengthAdjust="spacingAndGlyphs">review · PR #45</text>
+<text x="213.20000000000002" y="584.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="584.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="584.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="584.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="584.4" fill="#9ece6a" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="792.8000000000001" y="584.4" fill="#c0caf5" font-weight="bold" textLength="50.400000000000006" lengthAdjust="spacingAndGlyphs">Update</text>
+<text x="843.2" y="584.4" fill="#c0caf5" textLength="235.20000000000002" lengthAdjust="spacingAndGlyphs">(internal/search/handler.go)</text>
+<text x="1120.4" y="584.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="28.4" y="604.4" fill="#7dcfff" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="36.8" y="604.4" fill="#565f89" textLength="84" lengthAdjust="spacingAndGlyphs"> notes-r8t</text>
+<text x="213.20000000000002" y="604.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="604.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="604.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="604.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="792.8000000000001" y="604.4" fill="#414868" textLength="75.60000000000001" lengthAdjust="spacingAndGlyphs">⎿  +41 −7</text>
+<text x="1120.4" y="604.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="45.2" y="624.4" fill="#e0af68" textLength="126" lengthAdjust="spacingAndGlyphs">review · PR #47</text>
+<text x="213.20000000000002" y="624.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="624.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="624.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="624.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="624.4" fill="#9ece6a" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="792.8000000000001" y="624.4" fill="#c0caf5" font-weight="bold" textLength="50.400000000000006" lengthAdjust="spacingAndGlyphs">Update</text>
+<text x="843.2" y="624.4" fill="#c0caf5" textLength="277.2" lengthAdjust="spacingAndGlyphs">(internal/search/handler_test.go)</text>
+<text x="1120.4" y="624.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="28.4" y="644.4" fill="#7dcfff" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="36.8" y="644.4" fill="#565f89" textLength="84" lengthAdjust="spacingAndGlyphs"> notes-h6p</text>
+<text x="213.20000000000002" y="644.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="644.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="644.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="644.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="792.8000000000001" y="644.4" fill="#414868" textLength="50.400000000000006" lengthAdjust="spacingAndGlyphs">⎿  +68</text>
+<text x="1120.4" y="644.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="45.2" y="664.4" fill="#f7768e" textLength="168" lengthAdjust="spacingAndGlyphs">checks failing · PR…</text>
+<text x="213.20000000000002" y="664.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="664.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="664.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="664.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="664.4" fill="#9ece6a" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="792.8000000000001" y="664.4" fill="#c0caf5" font-weight="bold" textLength="33.6" lengthAdjust="spacingAndGlyphs">Bash</text>
+<text x="826.4000000000001" y="664.4" fill="#c0caf5" textLength="260.40000000000003" lengthAdjust="spacingAndGlyphs">(go test ./internal/search/...)</text>
+<text x="1120.4" y="664.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="28.4" y="684.4" fill="#7dcfff" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="36.8" y="684.4" fill="#565f89" textLength="84" lengthAdjust="spacingAndGlyphs"> notes-c4j</text>
+<text x="213.20000000000002" y="684.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="684.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="684.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="684.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="792.8000000000001" y="684.4" fill="#414868" textLength="294" lengthAdjust="spacingAndGlyphs">⎿  ok  notes/internal/search  0.42s</text>
+<text x="1120.4" y="684.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="45.2" y="704.4" fill="#565f89" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">working</text>
+<text x="213.20000000000002" y="704.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="704.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="704.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="704.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="704.4" fill="#bb9af7" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="784.4" y="704.4" fill="#c0caf5" textLength="268.8" lengthAdjust="spacingAndGlyphs"> Tests pass. Opening a draft PR.</text>
+<text x="1120.4" y="704.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="213.20000000000002" y="724.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="724.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="724.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="724.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1120.4" y="724.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="213.20000000000002" y="744.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="744.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="759.2" y="744.4" fill="#7aa2f7" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="767.6" y="744.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="776" y="744.4" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs">❯</text>
+<text x="1120.4" y="744.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="204.8" y="764.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">«</text>
+<text x="213.20000000000002" y="764.4" fill="#1a1b26" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="221.60000000000002" y="764.4" fill="#7aa2f7" textLength="546" lengthAdjust="spacingAndGlyphs">└───────────────────────────────────────────────────────────────┘</text>
+<text x="767.6" y="764.4" fill="#565f89" textLength="361.2" lengthAdjust="spacingAndGlyphs">└─────────────────────────────────────────┘</text>
+</g>
+</svg>

@@ -1,15 +1,14 @@
 package main
 
 import (
-	"fmt"
-	"html"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
+
+	"github.com/travisjeffery/herdr-quartermaster/internal/ansisvg"
 )
 
 // TestDemoScreenshots draws the board for the README from made-up data: a
@@ -40,7 +39,7 @@ func TestDemoScreenshots(t *testing.T) {
 
 func writeDemo(t *testing.T, dir, name, screen string, w, h int) {
 	t.Helper()
-	svg := screenSVG(replay(screen, w, h), "quartermaster board")
+	svg := ansisvg.SVG(ansisvg.Replay(screen, w, h), "quartermaster board", ansisvg.TokyoNight)
 	if err := os.WriteFile(filepath.Join(dir, name+".svg"), []byte(svg), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -152,161 +151,4 @@ var demoTail = []string{
 var demoInbox = []InboxItem{
 	{Event: Event{Bead: "notes-7qk", Kind: EventNeedsYou, At: demoAt.Add(-4 * time.Minute),
 		Summary: "notes-7qk needs you: limit per API key or per client IP?"}},
-}
-
-// cell is one character on the replayed screen and the SGR state it was
-// drawn in.
-type cell struct {
-	r                 rune
-	bold, dim, invert bool
-	fg                int // 30-37, 0 for the default
-}
-
-// replay runs the board's escape sequences against a w×h screen: the few it
-// writes are cursor home, clear, cursor position and SGR.
-func replay(s string, w, h int) [][]cell {
-	scr := make([][]cell, h)
-	for i := range scr {
-		scr[i] = make([]cell, w)
-		for j := range scr[i] {
-			scr[i][j].r = ' '
-		}
-	}
-	var cur cell
-	row, col := 0, 0
-	for i := 0; i < len(s); {
-		switch c := s[i]; {
-		case c == 0x1b && i+1 < len(s) && s[i+1] == '[':
-			j := i + 2
-			for j < len(s) && (s[j] == ';' || s[j] == '?' || s[j] >= '0' && s[j] <= '9') {
-				j++
-			}
-			params, cmd := s[i+2:j], s[j]
-			i = j + 1
-			switch cmd {
-			case 'H':
-				row, col = 0, 0
-				if r, c, ok := strings.Cut(params, ";"); ok {
-					row, _ = strconv.Atoi(r)
-					col, _ = strconv.Atoi(c)
-					row, col = row-1, col-1
-				}
-			case 'm':
-				for p := range strings.SplitSeq(params, ";") {
-					switch n, _ := strconv.Atoi(p); {
-					case n == 0:
-						cur = cell{}
-					case n == 1:
-						cur.bold = true
-					case n == 2:
-						cur.dim = true
-					case n == 7:
-						cur.invert = true
-					case n >= 30 && n <= 37:
-						cur.fg = n
-					}
-				}
-			}
-		case c == '\r':
-			col = 0
-			i++
-		case c == '\n':
-			row++
-			i++
-		default:
-			r, size := utf8.DecodeRuneInString(s[i:])
-			i += size
-			if row >= 0 && row < h && col >= 0 && col < w {
-				cur.r = r
-				scr[row][col] = cur
-			}
-			col++
-		}
-	}
-	return scr
-}
-
-// The palette: Tokyo Night.
-var (
-	demoBg     = "#1a1b26"
-	demoFg     = "#c0caf5"
-	demoDim    = "#565f89"
-	demoChrome = "#16161e"
-	demoColors = map[int]string{31: "#f7768e", 32: "#9ece6a", 33: "#e0af68", 36: "#7dcfff"}
-)
-
-const (
-	cellW   = 8.4 // 0.6em: a monospace advance at 14px
-	cellH   = 20.0
-	padX    = 20.0
-	padY    = 16.0
-	chromeH = 34.0
-)
-
-// screenSVG draws the screen in a window with a title bar. Each run of
-// same-styled text is placed at its column and stretched to its cells, so a
-// fallback font can't shift the columns.
-func screenSVG(scr [][]cell, title string) string {
-	w, h := len(scr[0]), len(scr)
-	width := float64(w)*cellW + 2*padX
-	height := chromeH + float64(h)*cellH + 2*padY
-	var s strings.Builder
-	fmt.Fprintf(&s, `<svg xmlns="http://www.w3.org/2000/svg" width="%g" height="%g" viewBox="0 0 %g %g">`+"\n", width, height, width, height)
-	fmt.Fprintf(&s, `<rect width="%g" height="%g" rx="10" fill="%s"/>`+"\n", width, height, demoBg)
-	fmt.Fprintf(&s, `<path d="M0 10a10 10 0 0 1 10-10h%g a10 10 0 0 1 10 10v%gh-%gz" fill="%s"/>`+"\n", width-20, chromeH-10, width, demoChrome)
-	for i, c := range []string{"#ff5f57", "#febc2e", "#28c840"} {
-		fmt.Fprintf(&s, `<circle cx="%g" cy="%g" r="6" fill="%s"/>`+"\n", 20+float64(i)*20, chromeH/2, c)
-	}
-	fmt.Fprintf(&s, `<text x="%g" y="%g" fill="%s" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle">%s</text>`+"\n",
-		width/2, chromeH/2+4.5, demoDim, html.EscapeString(title))
-	fmt.Fprintf(&s, `<g font-family="'JetBrains Mono', 'JetBrainsMono Nerd Font', ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">`+"\n")
-	for y, line := range scr {
-		top := chromeH + padY + float64(y)*cellH
-		for x := 0; x < w; {
-			st := line[x]
-			end := x + 1
-			for end < w && sameStyle(line[end], st) {
-				end++
-			}
-			text := strings.TrimRight(runText(line[x:end]), " ")
-			fg, bg := demoFg, ""
-			switch {
-			case st.fg != 0:
-				fg = demoColors[st.fg]
-			case st.dim:
-				fg = demoDim
-			}
-			if st.invert {
-				fg, bg = demoBg, demoFg
-				text = runText(line[x:end])
-			}
-			if bg != "" {
-				fmt.Fprintf(&s, `<rect x="%g" y="%g" width="%g" height="%g" fill="%s"/>`+"\n", padX+float64(x)*cellW, top, float64(end-x)*cellW, cellH, bg)
-			}
-			if n := utf8.RuneCountInString(text); strings.TrimSpace(text) != "" {
-				weight := ""
-				if st.bold {
-					weight = ` font-weight="bold"`
-				}
-				fmt.Fprintf(&s, `<text x="%g" y="%g" fill="%s"%s textLength="%g" lengthAdjust="spacingAndGlyphs">%s</text>`+"\n",
-					padX+float64(x)*cellW, top+cellH*0.72, fg, weight, float64(n)*cellW, html.EscapeString(text))
-			}
-			x = end
-		}
-	}
-	s.WriteString("</g>\n</svg>\n")
-	return s.String()
-}
-
-func sameStyle(a, b cell) bool {
-	a.r, b.r = 0, 0
-	return a == b
-}
-
-func runText(cells []cell) string {
-	var b strings.Builder
-	for _, c := range cells {
-		b.WriteRune(c.r)
-	}
-	return b.String()
 }
