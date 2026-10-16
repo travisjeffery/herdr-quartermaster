@@ -167,7 +167,8 @@ host and globally.
 
 **Labels** are capabilities a bead or repo can require. Suggested starting
 set: `go-heavy` (enough RAM for full builds), `admin-ok` (may hold
-break-glass/admin credentials), `aws`, `kube`, `browser` (Chrome automation),
+break-glass/admin credentials), `aws` (may use viewer/developer AWS
+credentials from the desktop's broker, §9.1), `kube`, `browser` (Chrome automation),
 `docker` (can run containers for tests; see §8). `local` has all of them; a
 remote host gets only what its bootstrap actually provisioned.
 
@@ -454,18 +455,111 @@ Injected at container start, from a per-host directory on the host
 | Agent CLI logins (Claude, Codex, Muse OAuth) | per host, stored in `qm-agents` | existing | logged in once per host interactively (`docker exec -it qm-worker claude /login`, `codex login --device-auth`); persist on the volume; revoke from each vendor's sessions page |
 | Beads proxy key | yes, can only run `bd` (§5) | n/a | key file; remove the `authorized_keys` line to revoke |
 | Linear / Slack / other MCP | claude.ai-hosted connectors follow the Claude login; anything needing a local token: none on remote by default | as today | add per need, as a mounted file |
-| AWS | **none** by default; optionally a read-only SSO profile (`aws sso login --use-device-code` per host, short-lived) for hosts labelled `aws` | SSO profiles, admin break-glass | never admin/break-glass on remote hosts |
-| Kubernetes | **none** by default | as today | `kube` label stays `local`-only until there's a reason |
+| AWS | only on hosts labelled `aws`: short-lived viewer/developer credentials from the desktop's broker (§9.1); no AWS secrets stored on the host | SSO profiles, admin break-glass | admin is never brokered; revoke a host by removing its broker key |
+| Kubernetes | only on hosts labelled `aws` *and* with network reach to the cluster API: kubeconfigs that call `aws eks get-token` with the brokered profile | as today | follows the AWS broker; no static kube credentials on any host |
 | Personal accounts (e.g. the Beads S3 sync remote) | never | as today | — |
 
 Per-host scoping falls out of labels: work that needs `admin-ok`, `aws` or
-`kube` only schedules where those credentials exist, which by default is
-`local`. A compromised remote host can push branches to the configured repos,
-open PRs (which still need review), spend agent subscription quota and
-read/write beads — not touch production or admin roles.
+`kube` only schedules where those credentials exist. `admin-ok` is `local`
+only; `aws` is `local` plus remote hosts given a broker key. A compromised
+remote host can push branches to the configured repos, open PRs (which still
+need review), spend agent subscription quota, read/write beads and, if
+labelled `aws`, act as the viewer/developer roles for at most an hour after
+its key is revoked — never admin.
 
 No SSH agent forwarding into the container (it would expose the desktop's
 keys to every worker).
+
+### 9.1 AWS through a desktop credential broker
+
+Remote workers that need AWS get it from the desktop, which already holds an
+SSO session, instead of holding AWS credentials of their own. Same pattern as
+the Beads proxy (§5): a forced-command SSH key per host.
+
+```
+ worker (server)                                   desktop (local)
+ aws --profile viewer …                            authorized_keys:
+   └─ credential_process = qm-aws-creds viewer       command="quartermaster aws-broker --host server",restrict ssh-ed25519 …
+        └─ ssh -i aws-broker-key desktop.local ───▶ quartermaster aws-broker
+             "creds viewer --bead app-123"            ├─ host from the key line, never from the request
+                                                      ├─ profile in this host's allowlist? admin? → deny
+                                                      ├─ mint from the desktop's SSO session
+                                                      ├─ verify the role, cap the lifetime
+                                                      ├─ log the request
+        ◀──── credential_process JSON ───────────────┘
+```
+
+**Desktop side: `quartermaster aws-broker`.**
+
+- The host's identity comes from the `--host` in its `authorized_keys` line
+  (one key per host), not from anything the host sends.
+- Config names which profiles each host may have:
+
+  ```toml
+  [aws_broker]
+  max_minutes = 60               # 15–60
+  [aws_broker.hosts]
+  server = ["viewer", "developer"]   # logical name -> desktop profile below
+  [aws_broker.profiles]
+  viewer = "<desktop SSO profile for the read-only role>"
+  developer = "<desktop SSO profile for the developer role>"
+  ```
+
+- **Admin is never brokered**, whatever the config says. The broker refuses
+  any profile whose configured role name or ARN matches an admin pattern
+  (`*Admin*`, `*admin*`, break-glass names). After minting it checks the role
+  ARN of the credentials it got (`sts get-caller-identity`) against the same
+  patterns and against the expected role, and refuses on a mismatch. These
+  checks are in code, not config.
+- **Minting.** `aws configure export-credentials --profile <p> --format process`
+  on the desktop returns the SSO role's temporary credentials. Their lifetime
+  is the permission set's session duration. The broker hands them out only if
+  they expire within `max_minutes`; otherwise it chains once (`sts
+  assume-role` into the same role with `DurationSeconds` ≤ 3600, which AWS
+  caps at an hour for chained roles anyway), which needs the role's trust
+  policy to allow it. Phase 0 of this work checks the permission sets' session
+  durations to see which path applies.
+- **Every request is logged** on the desktop, granted or denied, as a JSON
+  line in `~/.local/state/quartermaster/aws-broker.log`: time, host, profile,
+  bead and actor (as the worker sent them), access key id (never the secret),
+  expiry, and the outcome or denial reason. A denial is also an inbox event,
+  so the coordinator sees it.
+- **Fails closed.** If the desktop's SSO session has expired, the broker
+  returns an error, not stale or broader credentials:
+  `aws broker: the desktop's SSO session expired; run "aws sso login --profile <p>" on the desktop`.
+  The worker turns that into a `RUN:` note, like any other command only the
+  user can run.
+
+**Host side.**
+
+- Only hosts labelled `aws` get a broker key (`/run/qm-secrets/aws-broker-key`,
+  separate from the Beads key so each can be revoked alone). With the key
+  present, the entrypoint writes `~/.aws/config` with one profile per allowed
+  name, each `credential_process = qm-aws-creds <name>`. With no key, there is
+  no AWS config at all.
+- `qm-aws-creds` passes the bead (`QM_BEAD`, which dispatch exports into the
+  pane alongside `BEADS_ACTOR`) and prints the broker's `credential_process`
+  JSON. The AWS CLI and SDKs cache it until it expires and then ask again.
+- If the desktop is unreachable it exits non-zero with
+  `aws broker: desktop unreachable; AWS is unavailable on this host until it's back`.
+  Nothing falls back to other credentials.
+- Kubernetes: `aws eks update-kubeconfig --profile viewer` writes kubeconfigs
+  whose exec plugin runs `aws eks get-token` with the brokered profile, so
+  kube access follows the broker's scope and revocation. Reaching a private
+  cluster endpoint still needs network access (§10); without it, kube work
+  stays on `local`.
+
+**Revocation.** Remove the host's line from the desktop's `authorized_keys`.
+Credentials already issued stay valid until they expire (at most
+`max_minutes`).
+
+**Future: IAM Roles Anywhere.** For a host that must use AWS while the desktop
+is off, IAM Roles Anywhere gives it its own short-lived credentials: a
+per-host X.509 certificate from a private CA, a trust anchor, and a profile
+that maps only to the viewer/developer roles. It costs a CA to run (a managed
+private CA, or a self-managed one with a CRL for revocation) and IAM changes,
+and the certificate is a long-lived secret on the host. Not needed while every
+remote host sits next to an always-on desktop.
 
 ## 10. Things that need the host
 
@@ -592,8 +686,11 @@ changes until it's proven on `server`.
 - The coordinator, ticker, inbox, notifications, GitHub/Linear polling,
   verify.
 - The Beads DB and its S3 sync.
-- Work labelled `admin-ok`, `aws` (beyond read-only), `kube`, `browser`, and
-  anything needing WARP.
+- Work labelled `admin-ok` (admin and break-glass AWS are never brokered),
+  `browser`, and anything needing WARP; `aws`/`kube` work on hosts without a
+  broker key.
+- The AWS SSO session itself: remote hosts only ever see short-lived role
+  credentials minted from it (§9.1).
 - Releases that sign tags with the user's own key.
 
 ## 18. Bootstrap: adding a host
@@ -616,6 +713,7 @@ re-running converges. Steps that need the user stop with the exact command
 | 8 | Herdr wrapper on host + machine profile on `local` | `herdr --machine <name> agent list` | install wrapper; `herdr machine add --label <name> <ssh>` | auto (Herdr prompts if a server is incompatible: answer no) |
 | 9 | Repos | each `repos` entry cloned, `origin` reachable | `gh repo clone` inside the container | auto |
 | 10 | Agent logins | `claude`/`codex` auth status | print `docker exec -it qm-worker claude /login` etc. | **you** (OAuth, once per host) |
+| 10a | AWS broker (hosts labelled `aws` only) | `qm-aws-creds viewer` returns credentials; `aws sts get-caller-identity --profile viewer` shows the viewer role | generate `aws-broker` key on host; append `command="quartermaster aws-broker --host <name>",restrict` line to `local`'s `authorized_keys`; add the host to `[aws_broker.hosts]` | auto (you confirm the `authorized_keys` line once) |
 | 11 | Toolchains warm | `mise install` for each repo; `go mod download` | run them | auto |
 | 12 | Smoke | dispatch a no-op bead with `--host <name>`, check it notes and closes | — | auto |
 
@@ -637,13 +735,15 @@ stack.
 | 4. Ticker/resume/resolve/sweep fan-out | parallel listing, stale snapshots, unreachable handling, per-host resolve/sweep/resume | 1.5–2 | — |
 | 5. Scheduler, health, drain, views | `schedule = auto`, probes, `host list/drain/undrain/update`, board/context host views | 1.5 | — |
 | 6. Bootstrap | `host bootstrap` checklist, docs | 1 | steps 2, 4, 5, 10 on `server` (~30–45 min) |
-| 7. Optional | `local-c` container on the desktop; nested Podman; WARP sidecar | 1–2 | — |
+| 7. AWS credential broker | `quartermaster aws-broker` (per-host allowlist, hard admin deny, role check, lifetime cap, request log, fail closed), `qm-aws-creds` and AWS config in the image, `QM_BEAD` in the pane env, kubeconfig via `aws eks get-token`, tests | 1–1.5 | permission-set session durations (or a trust-policy change for chaining); `aws sso login` on the desktop |
+| 8. Optional | `local-c` container on the desktop; nested Podman; WARP sidecar; IAM Roles Anywhere | 1–2 | — |
 
-Total for phases 0–6: about **8–10 agent-days**.
+Total for phases 0–7: about **9–11.5 agent-days**.
 
 ## Decisions
 
-Made 2026-10-15; each took the recommended option.
+Made 2026-10-15; each took the recommended option except 4, revised the same
+day.
 
 1. **Beads transport**: a forced-command SSH proxy to the desktop (§5,
    option A). A Dolt sql-server stays the fallback if latency or lock
@@ -653,8 +753,13 @@ Made 2026-10-15; each took the recommended option.
    subuid/subgid and lingering.
 3. **Commit signing on remote hosts**: a per-host SSH signing key,
    registered on GitHub as a signing key named for the host.
-4. **AWS on remote hosts**: none. AWS work keeps the `aws` label and runs on
-   `local`.
+4. **AWS on remote hosts**: through a desktop credential broker (§9.1).
+   Hosts labelled `aws` get short-lived (15–60 min) viewer/developer
+   credentials minted from the desktop's SSO session over a forced-command
+   SSH key; admin is never brokered; every request is logged; it fails
+   closed when the desktop is offline or its SSO session has expired. IAM
+   Roles Anywhere is the later option for hosts that must work with the
+   desktop off. (First decided as "no AWS on remote hosts"; revised.)
 5. **Scheduling**: `schedule = "manual"` first (remote only with `--host` or a
    `host:` label); `auto` comes after remote workers have run for a while.
 6. **Image recipe**: lives in the dotfiles repo, next to the dotfiles it
