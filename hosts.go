@@ -53,7 +53,7 @@ const (
 	needsLabel     = "needs:"
 )
 
-var hostNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+var hostKeyRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // validateHosts checks the registry once at load, so a typo fails loudly
 // instead of sending a worker nowhere.
@@ -67,7 +67,7 @@ func (c Config) validateHosts() error {
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.Hosts)) {
 		h := c.Hosts[name]
-		if !hostNameRE.MatchString(name) {
+		if !hostKeyRE.MatchString(name) {
 			return fmt.Errorf("hosts.%s: a host name is lowercase letters, digits and dashes", name)
 		}
 		if name == localHost {
