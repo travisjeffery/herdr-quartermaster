@@ -560,6 +560,45 @@ its worktree, branch and PRs then live in that repository, and
 configured repository falls back to `repo` and shows as a warning in
 `quartermaster context`.
 
+### Worker hosts
+
+Workers can run on other machines, each running a headless herdr server that
+the desktop's herdr reaches as a saved machine (`herdr machine add --label
+server server.local`); see [docs/design/worker-hosts.md](docs/design/worker-hosts.md).
+Only dispatch and queued briefs know about hosts so far; the ticker, resume,
+resolve and sweep still act on `local`.
+
+```toml
+schedule = "manual"       # local unless --host or a host: label; "auto" is not built yet
+
+[hosts.local]             # optional: local is implicit and carries every label
+slots = 5
+
+[hosts.server]
+machine = "server"        # the herdr machine label
+ssh = "server.local"      # for git and probes, through the host's worker container
+cores = 24
+ram_gib = 15              # slots = 0 derives min(cores/4, (ram_gib-3)/4) = 3
+labels = ["go-heavy"]
+repos = { herdr-quartermaster = "~/src/herdr-quartermaster" }  # name -> path on the host
+runtime = "podman"        # podman (default) or docker; container = "qm-worker"
+
+[repo_needs]              # host labels every bead in a repo needs
+infra = ["aws"]
+```
+
+`quartermaster dispatch <bead> --host server` fetches the base branch in the
+host's clone (`ssh server.local podman exec -i qm-worker git -C ... fetch`),
+creates the worktree and starts the worker through `herdr --machine server`,
+and labels the bead `host:server`. Later dispatches and `focus` go to the
+host the label names; `--host` moves it. A host must be enabled, list the
+bead's repo (the default repo by its directory name) and carry every label
+the bead needs (`needs:<label>` labels and `repo_needs`); `--force` skips the
+label check. On a remote host the pane gets `BEADS_ACTOR` only: `bd` there is
+the shim to the desktop's database. Briefs for a remote agent that is not ready
+queue in `outbox/<host>/<agent>.md`. `quartermaster host list` prints the
+registry with each host's slots.
+
 `~/.config/quartermaster/instructions.md` is added to every worker's brief.
 
 ## Commands
@@ -567,7 +606,8 @@ configured repository falls back to `repo` and shows as a warning in
 | Command | What it does |
 |---|---|
 | `quartermaster coordinator [--agent K]` | Open (or focus) the coordinator agent. Also `prefix+shift+j`. |
-| `quartermaster dispatch <bead> [--agent K] [--focus]` | Claim a bead, create its worktree and branch, start a worker and brief it. |
+| `quartermaster dispatch <bead> [--agent K] [--focus] [--host H] [--force]` | Claim a bead, create its worktree and branch, start a worker and brief it, on host `H` (default: the bead's `host:` label, else local). |
+| `quartermaster host list` | The worker hosts: herdr machine, slots, labels, repos. |
 | `quartermaster focus [<bead>] [--agent K]` | Focus the bead's worker, or dispatch one. With no bead, reads the id from the clipboard. |
 | `quartermaster context` | The coordinator's digest: inbox, threads by state, Linear moves, `next` and ready beads. |
 | `quartermaster inbox done [<bead>...]` | Mark inbox items handled (all of them if no bead is given). |

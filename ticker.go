@@ -384,7 +384,7 @@ func (t Ticker) once(st *TickerState) error {
 	if st.LastGH.Equal(now) {
 		t.fixNames(st)
 	}
-	for _, name := range deliverOutbox(t.herdr, agents) {
+	for _, name := range deliverOutbox(t.cfg, t.herdr, agents) {
 		t.log.Printf("delivered queued brief to %s", name)
 	}
 	var rows []sidebarRow

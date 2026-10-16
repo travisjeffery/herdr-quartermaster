@@ -63,18 +63,70 @@ func brief(b Bead, branch, path, linear, instructions string) string {
 type DispatchOpts struct {
 	Kind  string
 	Focus bool
+	// Host runs the worker there; empty means the bead's host: label, else
+	// local.
+	Host string
+	// Force dispatches to a host that lacks a label the bead needs.
+	Force bool
 }
 
-// dispatch starts a worker on a bead, or focuses the one already on it.
+// agentsOnHosts lists the agents of every enabled host in parallel. A host
+// that can't be listed is in errs instead.
+func agentsOnHosts(cfg Config, h Herdr) (map[string][]Agent, map[string]error) {
+	type listing struct {
+		host   string
+		agents []Agent
+		err    error
+	}
+	var names []string
+	for _, n := range cfg.hostNames() {
+		if hc, _ := cfg.host(n); hc.enabled() {
+			names = append(names, n)
+		}
+	}
+	ch := make(chan listing, len(names))
+	for _, n := range names {
+		go func() {
+			a, err := cfg.herdrOn(h, n).Agents()
+			ch <- listing{n, a, err}
+		}()
+	}
+	agents, errs := map[string][]Agent{}, map[string]error{}
+	for range names {
+		l := <-ch
+		if l.err != nil {
+			errs[l.host] = l.err
+		} else {
+			agents[l.host] = l.agents
+		}
+	}
+	return agents, errs
+}
+
+// onHost is " on <host>" for a remote host, nothing for local, so local
+// messages read as they always have.
+func onHost(host string) string {
+	if host == localHost || host == "" {
+		return ""
+	}
+	return " on " + host
+}
+
+// dispatch starts a worker on a bead, or focuses the one already on it. The
+// worker runs on the host --host names, else the one the bead's host: label
+// records, else local; the bead is labelled with where it went.
 func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	name := agentName(id)
-	if agents, err := h.Agents(); err == nil {
-		for _, a := range agents {
+	// Agent names are per herdr server, so an existing worker can be on any
+	// host.
+	listed, unreachable := agentsOnHosts(cfg, h)
+	for _, host := range cfg.hostNames() {
+		for _, a := range listed[host] {
 			if a.Name == name {
 				if o.Focus {
-					return "focused the agent already on " + id, h.Focus(name)
+					return "focused the agent already on " + id + onHost(host), cfg.herdrOn(h, host).Focus(name)
 				}
-				return id + " already has an agent (" + a.PaneID + ")", nil
+				return id + " already has an agent (" + a.PaneID + ")" + onHost(host), nil
 			}
 		}
 	}
@@ -99,38 +151,59 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	if b.Status == StatusClosed {
 		return "", fmt.Errorf("%s is closed", id)
 	}
+	host, err := cfg.hostFor(b, o.Host, o.Force)
+	if err != nil {
+		return "", err
+	}
+	// Local keeps its old behavior of carrying on when the list fails; a
+	// remote host that can't be listed can't be dispatched to either.
+	if err, ok := unreachable[host]; ok && host != localHost {
+		return "", fmt.Errorf("%s: unreachable: %w", host, err)
+	}
+	hh := cfg.herdrOn(h, host)
+	repo, _ := cfg.repoOn(host, b)
+	if host != localHost {
+		// An idle host's clone falls behind; cut the worktree from a fresh base.
+		if out, err := cfg.hostExec(host, "git", "-C", repo, "fetch", "origin", cfg.BaseBranch).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("%s: git fetch origin %s in %s: %v: %s", host, cfg.BaseBranch, repo, err, strings.TrimSpace(string(out)))
+		}
+	}
 	branch := branchFor(cfg.BranchPrefix, b)
-	opened, err := h.WorktreeCreate(cfg.repoFor(b), branch, cfg.BaseBranch, name, o.Focus)
+	opened, err := hh.WorktreeCreate(repo, branch, cfg.BaseBranch, name, o.Focus)
 	if err != nil {
 		// A resumed bead already has its branch.
 		var err2 error
-		if opened, err2 = h.WorktreeOpen(cfg.repoFor(b), branch, name, o.Focus); err2 != nil {
-			return "", fmt.Errorf("worktree for %s: %v; open: %v", branch, err, err2)
+		if opened, err2 = hh.WorktreeOpen(repo, branch, name, o.Focus); err2 != nil {
+			return "", fmt.Errorf("worktree for %s%s: %v; open: %v", branch, onHost(host), err, err2)
 		}
 	}
 	if err := bd.Claim(id); err != nil && b.Status != StatusInProgress {
 		return "", fmt.Errorf("claim %s: %w", id, err)
 	}
+	if err := setHostLabel(bd, b, host); err != nil {
+		return "", fmt.Errorf("label %s %s%s (its worktree is %s%s): %w", id, hostLabel, host, opened.Path, onHost(host), err)
+	}
 	tab := opened.PaneID[:strings.LastIndex(opened.PaneID, ":")] + ":t1"
-	_ = h.TabRename(tab, shortTitle(b.Title, 34))
+	_ = hh.TabRename(tab, shortTitle(b.Title, 34))
 	text := brief(b, branch, opened.Path, linearKey(b, cfg.LinearPrefixes), readInstructions())
-	_ = h.Run(opened.PaneID, cfg.agentEnv(kind))
-	if err := h.AgentStart(name, kind, opened.PaneID, cfg.agentArgs(kind)...); err != nil {
+	_ = hh.Run(opened.PaneID, cfg.agentEnvOn(host, kind))
+	where := opened.PaneID + onHost(host)
+	if err := hh.AgentStart(name, kind, opened.PaneID, cfg.agentArgs(kind)...); err != nil {
 		// A new worktree often opens on the agent's folder-trust prompt. The
 		// ticker delivers the brief once someone answers it.
 		if !strings.Contains(err.Error(), "agent_not_ready") {
-			return "", fmt.Errorf("start %s in %s: %w", kind, opened.PaneID, err)
+			return "", fmt.Errorf("start %s in %s: %w", kind, where, err)
 		}
-		if err := queueBrief(name, text); err != nil {
+		if err := queueBriefOn(host, name, text); err != nil {
 			return "", err
 		}
-		h.Notify("quartermaster: "+id+" is waiting for you", "Answer its startup prompt (folder trust?) in "+opened.PaneID+"; the brief follows.")
-		return fmt.Sprintf("started %s on %s (%s, branch %s); it is at a startup prompt, the brief is queued", kind, id, opened.PaneID, branch), nil
+		h.Notify("quartermaster: "+id+" is waiting for you", "Answer its startup prompt (folder trust?) in "+where+"; the brief follows.")
+		return fmt.Sprintf("started %s on %s (%s, branch %s); it is at a startup prompt, the brief is queued", kind, id, where, branch), nil
 	}
-	if err := h.Prompt(name, text); err != nil {
+	if err := hh.Prompt(name, text); err != nil {
 		return "", fmt.Errorf("brief %s: %w", name, err)
 	}
-	return fmt.Sprintf("started %s on %s (%s, branch %s)", kind, id, opened.PaneID, branch), nil
+	return fmt.Sprintf("started %s on %s (%s, branch %s)", kind, id, where, branch), nil
 }
 
 // resolve removes a finished bead's linked worktree and, once its PR merged,
@@ -285,11 +358,21 @@ func relabelCoordinatorWorkspace(h Herdr, workspace string) bool {
 }
 
 // The outbox holds briefs for agents that were not ready when dispatched, one
-// file per agent name.
+// file per agent name: outbox/<agent>.md for local, outbox/<host>/<agent>.md
+// for a remote host, since agent names are per herdr server.
 func outboxDir() string { return filepath.Join(stateDir(), "outbox") }
 
-func queueBrief(agent, text string) error {
-	return writeAtomic(filepath.Join(outboxDir(), agent+".md"), []byte(text))
+func outboxDirOn(host string) string {
+	if host == localHost || host == "" {
+		return outboxDir()
+	}
+	return filepath.Join(outboxDir(), host)
+}
+
+func queueBrief(agent, text string) error { return queueBriefOn(localHost, agent, text) }
+
+func queueBriefOn(host, agent, text string) error {
+	return writeAtomic(filepath.Join(outboxDirOn(host), agent+".md"), []byte(text))
 }
 
 // moveQueuedBrief follows a renamed agent with its queued brief, which is
@@ -302,20 +385,54 @@ func moveQueuedBrief(from, to string) {
 	_ = os.Rename(src, dst)
 }
 
-// deliverOutbox sends queued briefs to agents that have become ready.
-func deliverOutbox(h Herdr, agents map[string]Agent) []string {
-	entries, err := os.ReadDir(outboxDir())
+// deliverOutbox sends queued briefs to agents that have become ready: local
+// ones from agents, a remote host's from its own listing, made only while
+// it has briefs queued. It returns who got one, host-qualified when remote.
+func deliverOutbox(cfg Config, h Herdr, agents map[string]Agent) []string {
+	sent := deliverQueued(h, localHost, agents)
+	entries, _ := os.ReadDir(outboxDir())
+	for _, e := range entries {
+		host := e.Name()
+		hc, ok := cfg.host(host)
+		if !e.IsDir() || host == localHost || !ok || !hc.enabled() {
+			continue
+		}
+		if queued, _ := filepath.Glob(filepath.Join(outboxDirOn(host), "*.md")); len(queued) == 0 {
+			continue
+		}
+		hh := cfg.herdrOn(h, host)
+		list, err := hh.Agents()
+		if err != nil {
+			continue
+		}
+		byName := map[string]Agent{}
+		for _, a := range list {
+			byName[a.Name] = a
+		}
+		for _, name := range deliverQueued(hh, host, byName) {
+			sent = append(sent, name+onHost(host))
+		}
+	}
+	return sent
+}
+
+func deliverQueued(h Herdr, host string, agents map[string]Agent) []string {
+	dir := outboxDirOn(host)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
 	var sent []string
 	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
 		name := strings.TrimSuffix(e.Name(), ".md")
 		a, ok := agents[name]
 		if !ok || !agentReady(&a) {
 			continue
 		}
-		path := filepath.Join(outboxDir(), e.Name())
+		path := filepath.Join(dir, e.Name())
 		text, err := os.ReadFile(path)
 		if err != nil {
 			continue
