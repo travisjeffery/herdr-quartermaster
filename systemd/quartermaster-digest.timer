@@ -1,0 +1,11 @@
+[Unit]
+Description=quartermaster: hourly digest of every open bead
+
+[Timer]
+OnCalendar=hourly
+# A digest missed while the machine slept or was off runs at the next boot.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

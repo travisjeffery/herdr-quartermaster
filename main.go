@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -27,6 +28,10 @@ Usage:
                                                        (no bead: read it from the clipboard)
   quartermaster context                                the coordinator's per-turn digest
   quartermaster report [--since 24h|7d|YYYY-MM-DD]     Markdown of what shipped, merged, is in flight, needs you
+  quartermaster digest [--deliver T,...] [--always]    every open bead by state, what changed since the last run;
+                                                       writes digest.md, notifies when something changed or needs you
+                                                       (T: desktop, slack, stdout, none; default desktop)
+  quartermaster digest show|install|uninstall          page the last digest; set up or remove the hourly timer
   quartermaster inbox done [<bead>...]                 mark inbox items handled (all if none given)
   quartermaster resolve <bead> [--force]               remove a finished bead's worktree and merged branch
   quartermaster sweep [--yes]                          list finished linked worktrees; --yes removes the safe ones
@@ -129,6 +134,8 @@ func run(args []string) error {
 	yes := fs.Bool("yes", false, "sweep: remove the clean candidates; verify: act on the verdicts")
 	days := fs.Int("days", 7, "stale: untouched for at least this many days")
 	release := fs.Bool("release", false, "stale: set each stale claim back to open")
+	deliver := fs.String("deliver", defaultDeliver(), "digest: where to send it: desktop, slack, stdout, none (comma-separated)")
+	always := fs.Bool("always", false, "digest: notify even when nothing changed and nothing needs you")
 	pos, err := interspersed(fs, rest)
 	if err != nil {
 		return err
@@ -196,6 +203,27 @@ func run(args []string) error {
 			return err
 		}
 		fmt.Print(renderReport(r, now))
+	case "digest":
+		sub := ""
+		if len(pos) > 0 {
+			sub = pos[0]
+		}
+		switch sub {
+		case "":
+			return runDigest(cfg, *deliver, *always, os.Stdout)
+		case "show":
+			return showDigest(cfg)
+		case "install":
+			lines, err := digestInstall(cfg, userUnitDir(), exec.LookPath, systemctlUser)
+			fmt.Print(strings.Join(append(lines, ""), "\n"))
+			return err
+		case "uninstall":
+			lines, err := digestUninstall(userUnitDir(), systemctlUser)
+			fmt.Print(strings.Join(append(lines, ""), "\n"))
+			return err
+		default:
+			return fmt.Errorf("usage: quartermaster digest [show|install|uninstall] [--deliver desktop,slack,stdout,none] [--always]")
+		}
 	case "inbox":
 		if len(pos) == 0 || pos[0] != "done" {
 			return fmt.Errorf("usage: quartermaster inbox done [<bead>...]")
@@ -241,7 +269,7 @@ func run(args []string) error {
 	case "action":
 		// Plugin actions: open one of this plugin's panes.
 		if len(pos) != 1 {
-			return fmt.Errorf("usage: quartermaster action board")
+			return fmt.Errorf("usage: quartermaster action board|digest")
 		}
 		return h.OpenPane(pos[0])
 	case "ticker":

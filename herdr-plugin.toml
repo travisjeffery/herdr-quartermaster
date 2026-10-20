@@ -24,6 +24,12 @@ contexts = ["global", "workspace"]
 command = ["bin/quartermaster", "action", "board"]
 
 [[actions]]
+id = "digest"
+title = "Quartermaster: digest of every open bead (the last hourly one)"
+contexts = ["global", "workspace"]
+command = ["bin/quartermaster", "action", "digest"]
+
+[[actions]]
 id = "coordinator"
 title = "Quartermaster: open the coordinator"
 contexts = ["global", "workspace"]
@@ -54,3 +60,11 @@ placement = "popup"
 width = "85%"
 height = "80%"
 command = ["bin/quartermaster", "board"]
+
+[[panes]]
+id = "digest"
+title = "Quartermaster digest"
+placement = "popup"
+width = "85%"
+height = "80%"
+command = ["bin/quartermaster", "digest", "show"]
