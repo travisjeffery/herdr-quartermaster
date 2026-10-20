@@ -669,7 +669,8 @@ the last digest in a popup; `quartermaster digest show` pages it in a terminal.
 **Hourly.** `quartermaster digest install` writes
 `quartermaster-digest.service` and `quartermaster-digest.timer` (from
 [`systemd/`](systemd/)) to `~/.config/systemd/user/`, plus a drop-in with
-`BEADS_DIR` and a `PATH` that finds `bd`, `gh` and `notify-send`, then enables
+`BEADS_DIR` and a `PATH` that finds `bd`, `gh` and `notify-send` (and mise's
+shims, if you use mise), then enables
 the timer (`OnCalendar=hourly`, `Persistent=true`). Run it again after moving
 `bd` or the database; `quartermaster digest uninstall` removes it all. It runs
 `~/.local/bin/quartermaster`, so `configure` comes first. Check it with

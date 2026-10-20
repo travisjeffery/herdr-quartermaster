@@ -234,16 +234,28 @@ func systemdQuote(s string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
 
-// digestSearchPath lists the directories of the tools the digest runs, then the
-// system ones.
-func digestSearchPath(lookPath func(string) (string, error)) []string {
+// digestSearchPath lists the directories of the tools the digest runs, then
+// mise's shims, if there are any, then the system directories. A version
+// manager's install directory goes away on upgrade; its shims stay.
+func digestSearchPath(lookPath func(string) (string, error), shims string) []string {
 	var dirs []string
 	for _, tool := range []string{"bd", "gh", "herdr", "notify-send", "git"} {
 		if p, err := lookPath(tool); err == nil {
 			dirs = append(dirs, filepath.Dir(p))
 		}
 	}
+	if fi, err := os.Stat(shims); err == nil && fi.IsDir() {
+		dirs = append(dirs, shims)
+	}
 	return dedupe(append(dirs, "/usr/local/bin", "/usr/bin", "/bin"))
+}
+
+func miseShims() string {
+	if d := os.Getenv("MISE_DATA_DIR"); d != "" {
+		return filepath.Join(d, "shims")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "mise", "shims")
 }
 
 // digestInstall writes the digest's systemd user units and drop-in into dir
@@ -266,7 +278,7 @@ func digestInstall(cfg Config, dir string, lookPath func(string) (string, error)
 		lines = append(lines, "wrote "+filepath.Join(dir, name))
 	}
 	dropIn := filepath.Join(dir, digestService+".d", toolName+".conf")
-	if err := writeAtomic(dropIn, []byte(digestDropIn(cfg.BeadsDir, digestSearchPath(lookPath)))); err != nil {
+	if err := writeAtomic(dropIn, []byte(digestDropIn(cfg.BeadsDir, digestSearchPath(lookPath, miseShims())))); err != nil {
 		return lines, err
 	}
 	lines = append(lines, "wrote "+dropIn)

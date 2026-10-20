@@ -371,6 +371,7 @@ func TestSendSlack(t *testing.T) {
 func TestDigestInstall(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("MISE_DATA_DIR", filepath.Join(home, "no-mise"))
 	dir := filepath.Join(home, "units")
 	var ran []string
 	systemctl := func(args ...string) error { ran = append(ran, strings.Join(args, " ")); return nil }
@@ -409,6 +410,13 @@ func TestDigestInstall(t *testing.T) {
 	if !strings.Contains(string(drop), "Environment=BEADS_DIR=/home/me/src/app/.beads\n") ||
 		!strings.Contains(string(drop), "Environment=PATH=/opt/mise/bd:/usr/local/bin:/usr/bin:/bin\n") {
 		t.Errorf("drop-in:\n%s", drop)
+	}
+	shims := filepath.Join(home, "mise", "shims")
+	if err := os.MkdirAll(shims, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := digestSearchPath(lookPath, shims); !slices.Equal(got, []string{"/opt/mise/bd", shims, "/usr/local/bin", "/usr/bin", "/bin"}) {
+		t.Errorf("search path with shims = %v", got)
 	}
 	if want := []string{"daemon-reload", "enable --now " + digestTimer}; !slices.Equal(ran, want) {
 		t.Errorf("systemctl %q, want %q", ran, want)
