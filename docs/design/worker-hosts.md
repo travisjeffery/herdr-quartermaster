@@ -108,7 +108,7 @@ Herdr's remote model (from `herdr --skill`, 0.9.1):
  │                                                      │        │               bd shim ──┐                  │
  │ quartermaster ticker                                 │        │                         │                  │
  │   ├─ herdr agent list           (local)              │        │ volumes: repos, worktrees, caches,          │
- │   ├─ herdr --machine server …   (each host)          │        │          agent homes, codegraph            │
+ │   ├─ herdr --machine server …   (each host)          │        │          agent homes                       │
  │   ├─ gh / Linear / verify       (local only)         │        └─────────────────────────┼──────────────────┘
  │   └─ inbox, state.json, notifications (local only)   │                                  │
  │                                                      │◀── ssh forced command: bd ───────┘
@@ -412,9 +412,8 @@ version is explicit and bumping one is a one-line PR:
   manifest lists them; CI fails if a repo's declared version isn't in the
   image. mise also lets a worker install a missing pinned version into the
   cache volume on demand rather than failing.
-- codegraph (MCP server + indexer).
 - Dotfiles: global `CLAUDE.md`/`AGENTS.md`, Claude/Codex/Muse settings,
-  hooks (SessionStart `bd prime`, codegraph), skills, user plugins, git
+  hooks (SessionStart `bd prime`), skills, user plugins, git
   config (minus identity keys and signing key path, which come at runtime),
   `~/worktrees` pre-trusted in each agent's config.
 - The `bd` shim (§5) as `/usr/local/bin/bd`, and an entrypoint that starts
@@ -489,7 +488,6 @@ and inspection easy):
 | `qm-worktrees` | `~/worktrees` | worker worktrees |
 | `qm-cache` | `~/.cache` | GOCACHE, GOMODCACHE (via `GOPATH=~/.cache/go`), npm/pnpm, mise installs, pip |
 | `qm-agents` | `~/.claude`, `~/.codex`, `~/.config/muse` state subdirs | session histories (`--continue`, `resume --last`), per-host OAuth tokens (§9) |
-| `qm-codegraph` | codegraph index dir | per-worktree indexes |
 | `qm-herdr` | `~/.config/herdr` | Herdr session state and socket |
 
 Dotfile-managed config in those directories (settings, hooks, skills) comes
