@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -72,6 +73,10 @@ type Config struct {
 	RAMPerWorkerGiB int `toml:"ram_per_worker_gib"`
 	ReserveGiB      int `toml:"reserve_gib"`
 
+	// CoordinatorRules are extra lines appended to the coordinator guide's
+	// rules, one bullet each.
+	CoordinatorRules []string `toml:"coordinator_rules"`
+
 	// Agents holds per-kind settings ([agents.muse]), for workers and the
 	// coordinator alike.
 	Agents map[string]AgentConfig `toml:"agents"`
@@ -80,6 +85,9 @@ type Config struct {
 type AgentConfig struct {
 	// Args go to the agent's own CLI on every start, dispatch and resume.
 	Args []string `toml:"args"`
+	// Env is "NAME=value" pairs exported in the agent's pane before it
+	// starts, after BEADS_ACTOR and BEADS_DIR, on every host.
+	Env []string `toml:"env"`
 }
 
 // defaultAgentArgs apply to a kind with no [agents.<kind>] table. Muse's
@@ -106,7 +114,31 @@ func (c Config) agentEnvOn(host, kind string) string {
 	if c.BeadsDir != "" && host == localHost {
 		cmd += " BEADS_DIR=" + shellQuote(c.BeadsDir)
 	}
+	for _, e := range c.Agents[kind].Env {
+		k, v, _ := strings.Cut(e, "=")
+		cmd += " " + k + "=" + shellQuote(v)
+	}
 	return cmd
+}
+
+var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateAgents checks each [agents.<kind>] env entry is NAME=value with a
+// name the shell can export unquoted. BEADS_ACTOR and BEADS_DIR are
+// quartermaster's to set: a remote pane must not get BEADS_DIR.
+func (c Config) validateAgents() error {
+	for kind, a := range c.Agents {
+		for _, e := range a.Env {
+			k, _, ok := strings.Cut(e, "=")
+			if !ok || !envNameRE.MatchString(k) {
+				return fmt.Errorf("[agents.%s] env: %q is not NAME=value", kind, e)
+			}
+			if k == "BEADS_ACTOR" || k == "BEADS_DIR" {
+				return fmt.Errorf("[agents.%s] env: quartermaster sets %s itself", kind, k)
+			}
+		}
+	}
+	return nil
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
@@ -280,6 +312,9 @@ func loadConfig() (Config, error) {
 		cfg.Repos[name] = expandHome(path)
 	}
 	if err := cfg.validateHosts(); err != nil {
+		return cfg, err
+	}
+	if err := cfg.validateAgents(); err != nil {
 		return cfg, err
 	}
 	if cfg.Repo == "" {

@@ -542,9 +542,13 @@ stale_days = 3            # a bead untouched this long is checked
 auto_close = false        # close beads on strong evidence; off, they are only flagged
 verify_max = 20           # GitHub calls a pass may make beyond its probes
 gh_min_remaining = 1000   # skip a pass below this many GraphQL points left
+coordinator_rules = ["Ask before touching the staging cluster."]  # extra bullets under the coordinator's Rules
 
 [agents.muse]             # per-kind args for the agent's own CLI, on dispatch, resume and the coordinator
 args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
+
+[agents.claude]           # per-kind environment, exported in the agent's pane before it starts
+env = ["CLAUDE_CODE_ENABLE_TELEMETRY=1", "OTEL_EXPORTER_OTLP_ENDPOINT=https://otel.example.com"]
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts
@@ -559,6 +563,14 @@ for Muse's own defaults. Other kinds start with no extra args.
 Before starting any agent, quartermaster exports `BEADS_ACTOR` (the kind) and
 `BEADS_DIR` (`beads_dir`) in its pane, so `bd` finds the database from a
 worktree. Claude and Codex can set these in their own configs; Muse can't.
+Then it exports that kind's `[agents.<kind>] env`, each entry `NAME=value`
+with the value shell-quoted, on local and remote hosts alike: telemetry
+settings, say, that every worker of a kind should start with. `BEADS_ACTOR`
+and `BEADS_DIR` can't be set there.
+
+`coordinator_rules` are appended, one bullet each, to the Rules section of
+the guide the coordinator starts with: standing instructions of your own
+that the built-in rules don't cover.
 
 The ticker always follows `herdr_socket` (herdr's default server unless set),
 not the server that happened to start it: every herdr server that loads the

@@ -306,3 +306,38 @@ func TestDeliverOutboxOnRemoteHost(t *testing.T) {
 		t.Fatal("delivered brief left in the outbox")
 	}
 }
+
+func TestAgentEnvAppendsConfiguredEnv(t *testing.T) {
+	cfg := Config{BeadsDir: "/home/u/.beads", Agents: map[string]AgentConfig{
+		"claude": {Env: []string{"OTEL_LOGS_EXPORTER=otlp", "ATTRS=a=1,b='2'"}},
+	}}
+	want := `export BEADS_ACTOR='claude' BEADS_DIR='/home/u/.beads' OTEL_LOGS_EXPORTER='otlp' ATTRS='a=1,b='\''2'\'''`
+	if got := cfg.agentEnv("claude"); got != want {
+		t.Errorf("local:\n got %s\nwant %s", got, want)
+	}
+	if got := cfg.agentEnvOn("server", "claude"); got != `export BEADS_ACTOR='claude' OTEL_LOGS_EXPORTER='otlp' ATTRS='a=1,b='\''2'\'''` {
+		t.Errorf("remote: %s", got)
+	}
+	if got := cfg.agentEnvOn("server", "codex"); got != "export BEADS_ACTOR='codex'" {
+		t.Errorf("other kind: %s", got)
+	}
+}
+
+func TestValidateAgentsEnv(t *testing.T) {
+	for _, tc := range []struct {
+		env []string
+		ok  bool
+	}{
+		{[]string{"A=1", "B_2="}, true},
+		{[]string{"NOEQUALS"}, false},
+		{[]string{"A;rm -rf ~=1"}, false},
+		{[]string{"1A=x"}, false},
+		{[]string{"BEADS_DIR=/x"}, false},
+		{[]string{"BEADS_ACTOR=x"}, false},
+	} {
+		cfg := Config{Agents: map[string]AgentConfig{"claude": {Env: tc.env}}}
+		if err := cfg.validateAgents(); (err == nil) != tc.ok {
+			t.Errorf("%q: err %v, want ok=%v", tc.env, err, tc.ok)
+		}
+	}
+}

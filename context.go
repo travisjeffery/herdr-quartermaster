@@ -235,7 +235,18 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   own issue's status current. The context's Linear section is where each issue
   should be: make those moves and fix flagged titles with your Linear tools if
   you have them, else list them for TJ.
-`, repoGuide(cfg), cfg.BranchPrefix)
+%s`, repoGuide(cfg), cfg.BranchPrefix, extraRules(cfg.CoordinatorRules))
+}
+
+// extraRules renders coordinator_rules as more bullets under ## Rules.
+func extraRules(rules []string) string {
+	var s strings.Builder
+	for _, r := range rules {
+		if r = strings.TrimSpace(r); r != "" {
+			s.WriteString("- " + r + "\n")
+		}
+	}
+	return s.String()
 }
 
 func repoGuide(cfg Config) string {

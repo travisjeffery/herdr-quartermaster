@@ -30,3 +30,11 @@ func TestLinearTitleCheckWaitsForTitle(t *testing.T) {
 		}
 	}
 }
+
+func TestCoordinatorGuideAppendsConfiguredRules(t *testing.T) {
+	base := coordinatorGuide(Config{Repo: "/r"})
+	got := coordinatorGuide(Config{Repo: "/r", CoordinatorRules: []string{"Rule one.", "  ", "Rule two."}})
+	if want := base + "- Rule one.\n- Rule two.\n"; got != want {
+		t.Errorf("guide tail:\n%s", got[len(got)-200:])
+	}
+}
