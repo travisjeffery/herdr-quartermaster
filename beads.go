@@ -29,6 +29,15 @@ type Bead struct {
 
 	ClosedAt    time.Time `json:"closed_at"`
 	CloseReason string    `json:"close_reason"`
+
+	Dependencies []Dependency `json:"dependencies"`
+}
+
+// Dependency is one edge out of a bead: DependsOn blocks it when Type is
+// "blocks"; parent-child and related edges never do.
+type Dependency struct {
+	DependsOn string `json:"depends_on_id"`
+	Type      string `json:"type"`
 }
 
 func (b Bead) HasLabel(l string) bool {

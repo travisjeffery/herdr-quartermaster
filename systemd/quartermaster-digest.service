@@ -1,0 +1,21 @@
+# Installed by `quartermaster digest install`, which also writes a drop-in
+# (quartermaster-digest.service.d/quartermaster.conf) with BEADS_DIR and PATH.
+[Unit]
+Description=quartermaster: digest of every open bead
+Documentation=https://github.com/travisjeffery/herdr-quartermaster#hourly-digest
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/quartermaster digest
+# Optional: QUARTERMASTER_DIGEST_DELIVER and the Slack settings. Absent is fine.
+EnvironmentFile=-%h/.config/quartermaster/digest.env
+# notify-send reaches the desktop over the session bus. The user manager
+# normally has this from the graphical session; this is its fixed address for
+# a run before the session has exported it.
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+# bd forks a detached `bd send-metrics` child after each command; killing the
+# whole control group would wait on it and fail the run as a timeout.
+KillMode=process
+TimeoutStartSec=2min
+Nice=10

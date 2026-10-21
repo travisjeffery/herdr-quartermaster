@@ -284,7 +284,8 @@ once per head commit; otherwise the board shows
 
 State lives in `~/.local/state/quartermaster/`: `state.json` (the ticker's memory
 of each thread), `inbox/` and `inbox/done/` (events), `outbox/` (briefs
-waiting for an agent), `coordinator/` (its folder) and `ticker.log`.
+waiting for an agent), `coordinator/` (its folder), `ticker.log`, and
+`digest.md` and `digest-state.json` (the last digest and what it remembers).
 
 ## A day with quartermaster
 
@@ -622,6 +623,77 @@ registry with each host's slots.
 
 `~/.config/quartermaster/instructions.md` is added to every worker's brief.
 
+## Hourly digest
+
+`quartermaster digest` is a snapshot for clearing through beads: every bead
+that isn't closed, grouped as
+
+1. **Needs you**: `needs_me`, with the question (or `RUN:` command) from its
+   latest note, and in-progress beads whose agent is stopped at a prompt;
+2. **Waiting on review/merge**: in progress with an open PR, with its checks,
+   review decision and conflicts;
+3. **Blocked**: `blocked`, with its latest note, or blocked by a bead that
+   isn't closed;
+4. **In progress**, with its agent's state;
+5. **Ready / next**: open with the `next` label;
+6. **Backlog**: a count and the top five by priority.
+
+Each line has the id, priority, title, assignee, when it was last updated and
+its Linear key, and is marked **STALE** when a needs-you bead has waited over
+4 hours, an in-progress one has had no update in 24 hours, or a blocked one in
+7 days. A "changed since the last digest" section lists new needs-you and
+newly blocked beads, PRs whose checks went green, that were approved or that
+merged, and beads closed since.
+
+It's built from live state with no LLM: one `bd list --json` for the open beads
+and one for those closed since the last run, Herdr's agent list, and one GitHub
+GraphQL query per 20 PRs, run in parallel, for the PRs that active beads link.
+A PR that has merged or closed is remembered in `digest-state.json` in the
+state dir and not asked about again. A run takes a few seconds.
+
+The full digest goes to `digest.md` in the state dir every run. Delivery is
+`--deliver`, a comma-separated list (default `desktop`, or
+`QUARTERMASTER_DIGEST_DELIVER`):
+
+- `desktop`: `notify-send` with the counts, the changes and the top of needs
+  you;
+- `slack`: the same summary, a little longer, to Slack (off unless configured,
+  below);
+- `stdout`: the full digest;
+- `none`: only the file.
+
+Nothing is sent when nothing changed and nothing needs you, unless `--always`.
+The `digest` plugin action (`Quartermaster: digest of every open bead`) opens
+the last digest in a popup; `quartermaster digest show` pages it in a terminal.
+
+**Hourly.** `quartermaster digest install` writes
+`quartermaster-digest.service` and `quartermaster-digest.timer` (from
+[`systemd/`](systemd/)) to `~/.config/systemd/user/`, plus a drop-in with
+`BEADS_DIR` and a `PATH` that finds `bd`, `gh` and `notify-send` (and mise's
+shims, if you use mise), then enables
+the timer (`OnCalendar=hourly`, `Persistent=true`). Run it again after moving
+`bd` or the database; `quartermaster digest uninstall` removes it all. It runs
+`~/.local/bin/quartermaster`, so `configure` comes first. Check it with
+`systemctl --user list-timers quartermaster-digest.timer` and
+`journalctl --user -u quartermaster-digest`.
+
+**Slack.** Put the settings in `~/.config/quartermaster/digest.env` (read by
+the service if present; `chmod 600` it), either an incoming webhook:
+
+```sh
+QUARTERMASTER_DIGEST_DELIVER=desktop,slack
+QUARTERMASTER_DIGEST_SLACK_WEBHOOK=https://hooks.slack.com/services/...
+```
+
+or a bot token with `chat:write` and a channel, or your user id for a DM from
+the bot:
+
+```sh
+QUARTERMASTER_DIGEST_DELIVER=desktop,slack
+QUARTERMASTER_DIGEST_SLACK_TOKEN=xoxb-...
+QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
+```
+
 ## Commands
 
 | Command | What it does |
@@ -638,6 +710,8 @@ registry with each host's slots.
 | `quartermaster resolve <bead> [--force]` | Remove a finished bead's worktree, and its branch if the PR merged. |
 | `quartermaster sweep [--yes]` | List finished worktrees across every repo; `--yes` removes only the safe ones. |
 | `quartermaster report [--since 24h\|7d\|DATE]` | Markdown summary of what shipped, what's in flight and what needs you. |
+| `quartermaster digest [--deliver T,...] [--always]` | Every open bead by state and what changed since the last run, written to `digest.md`; notifies when something changed or needs you. See [Hourly digest](#hourly-digest). |
+| `quartermaster digest show\|install\|uninstall` | Page the last digest (the plugin's `digest` action); install or remove the hourly systemd timer. |
 | `quartermaster board` | The board popup (`prefix+j`). |
 | `quartermaster ticker run\|start\|stop\|status`, `quartermaster tick` | The background loop, or one pass of it in the foreground. `status` shows the herdr socket it follows. |
 | `quartermaster configure [--repo PATH]` | First-time setup: write the config, link `~/.local/bin/quartermaster` (and `qm`), install the agent view. Safe to run again. |
