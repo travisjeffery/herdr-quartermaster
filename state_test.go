@@ -336,6 +336,12 @@ func TestInterspersedFlags(t *testing.T) {
 	if err != nil || !slices.Equal(pos, []string{"backend-ab12"}) || *kind != "codex" {
 		t.Fatalf("pos=%v kind=%q err=%v", pos, *kind, err)
 	}
+	// A bool flag after the bead id, as in resolve <bead> --force.
+	force := fs.Bool("force", false, "")
+	pos, err = interspersed(fs, []string{"backend-ab12", "--force"})
+	if err != nil || !slices.Equal(pos, []string{"backend-ab12"}) || !*force {
+		t.Fatalf("pos=%v force=%v err=%v", pos, *force, err)
+	}
 }
 
 func TestParseOpened(t *testing.T) {

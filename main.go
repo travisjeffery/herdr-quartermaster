@@ -33,7 +33,8 @@ Usage:
                                                        (T: desktop, slack, stdout, none; default desktop)
   quartermaster digest show|install|uninstall          page the last digest; set up or remove the hourly timer
   quartermaster inbox done [<bead>...]                 mark inbox items handled (all if none given)
-  quartermaster resolve <bead> [--force]               remove a finished bead's worktree and merged branch
+  quartermaster resolve <bead> [--force]               remove a finished bead's worktree and merged branch;
+                                                       --force also removes an open or dirty one
   quartermaster sweep [--yes]                          list finished linked worktrees; --yes removes the safe ones
   quartermaster resume [<bead>...] [--agent K]         restart exited agents in their worktrees, continuing
                                                        their last conversation (all resumable if none given)
@@ -129,7 +130,7 @@ func run(args []string) error {
 	kind := fs.String("agent", "", "agent kind: claude, codex, muse or auto")
 	focus := fs.Bool("focus", false, "focus the new workspace")
 	repoFlag := fs.String("repo", "", "configure: the repository quartermaster works in, written to config.toml if it has none")
-	force := fs.Bool("force", false, "resolve even if the bead is open or its agent is working; dispatch to a host lacking a needed label")
+	force := fs.Bool("force", false, "resolve even if the bead is open, its agent is working or its worktree is dirty; dispatch to a host lacking a needed label")
 	hostFlag := fs.String("host", "", "dispatch: the worker host to run on")
 	sinceFlag := fs.String("since", "24h", "report window: Nh, Nd or YYYY-MM-DD")
 	yes := fs.Bool("yes", false, "sweep: remove the clean candidates; verify: act on the verdicts")

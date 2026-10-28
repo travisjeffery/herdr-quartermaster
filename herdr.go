@@ -206,8 +206,14 @@ func (h Herdr) WorktreeOpen(repo, branch, label string, focus bool) (Opened, err
 	return parseOpened(res)
 }
 
-func (h Herdr) WorktreeRemove(workspace string) error {
-	_, err := h.call(30*time.Second, "worktree", "remove", "--workspace", workspace)
+// WorktreeRemove removes a workspace's worktree checkout. herdr refuses one
+// with modified or untracked files unless force is set.
+func (h Herdr) WorktreeRemove(workspace string, force bool) error {
+	args := []string{"worktree", "remove", "--workspace", workspace}
+	if force {
+		args = append(args, "--force")
+	}
+	_, err := h.call(30*time.Second, args...)
 	return err
 }
 

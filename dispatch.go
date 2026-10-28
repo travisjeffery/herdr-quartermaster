@@ -209,6 +209,8 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 // resolve removes a finished bead's linked worktree and, once its PR merged,
 // its local branch. It only ever touches a linked worktree herdr lists for the
 // bead's branch, never the main checkout or a workspace other agents share.
+// force resolves an open bead or a working agent's, and removes a worktree
+// with modified or untracked files; without it, a dirty worktree is kept.
 func resolve(cfg Config, h Herdr, id string, force bool) (string, error) {
 	b, err := Beads{}.Show(id)
 	if err != nil {
@@ -247,10 +249,10 @@ func resolve(cfg Config, h Herdr, id string, force bool) (string, error) {
 		return "", fmt.Errorf("refusing to remove the main checkout %s", target.Path)
 	}
 	if target.WorkspaceID != "" {
-		if err := h.WorktreeRemove(target.WorkspaceID); err != nil {
+		if err := h.WorktreeRemove(target.WorkspaceID, force); err != nil {
 			return "", err
 		}
-	} else if out, err := exec.Command("git", "-C", repo, "worktree", "remove", target.Path).CombinedOutput(); err != nil {
+	} else if out, err := exec.Command("git", gitWorktreeRemove(repo, target.Path, force)...).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("git worktree remove: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	done := []string{"removed worktree " + target.Path}
@@ -262,6 +264,16 @@ func resolve(cfg Config, h Herdr, id string, force bool) (string, error) {
 		done = append(done, "kept branch "+target.Branch+" (no merged PR)")
 	}
 	return strings.Join(done, "; "), nil
+}
+
+// gitWorktreeRemove is the git argv that removes path; force also removes a
+// checkout with modified or untracked files.
+func gitWorktreeRemove(repo, path string, force bool) []string {
+	args := []string{"-C", repo, "worktree", "remove"}
+	if force {
+		args = append(args, "--force")
+	}
+	return append(args, path)
 }
 
 func merged(repo, branch string) bool {
