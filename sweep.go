@@ -63,7 +63,7 @@ func liveSweepEnv(h Herdr) sweepEnv {
 			return err == nil
 		},
 		git:             gitRun,
-		removeWorkspace: h.WorktreeRemove,
+		removeWorkspace: func(id string) error { return h.WorktreeRemove(id, false) },
 	}
 }
 

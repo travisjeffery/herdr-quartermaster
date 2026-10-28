@@ -159,7 +159,8 @@ func TestAgentEnvOnRemoteLeavesBeadsDirToProxy(t *testing.T) {
 // fakeTools puts fake herdr, bd and ssh first on PATH. Each logs its argv,
 // one call per line, to <name>.log in the returned dir. herdr answers agent
 // list on a remote machine with $FAKE_REMOTE_AGENTS and locally with
-// $FAKE_LOCAL_AGENTS; bd show prints $FAKE_BEAD.
+// $FAKE_LOCAL_AGENTS, and worktree list with $FAKE_WORKTREES; bd show prints
+// $FAKE_BEAD; gh finds no merged PR.
 func fakeTools(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -170,6 +171,7 @@ if [ "$1" = --machine ]; then remote=1; shift 2; fi
 case "$1 $2" in
 "agent list") if [ -n "$remote" ]; then echo "{\"result\":{\"agents\":${FAKE_REMOTE_AGENTS:-[]}}}"; else echo "{\"result\":{\"agents\":${FAKE_LOCAL_AGENTS:-[]}}}"; fi ;;
 "worktree create") echo '{"result":{"workspace":{"workspace_id":"w9"},"worktree":{"path":"/home/u/worktrees/x"},"root_pane":{"pane_id":"w9:p1"}}}' ;;
+"worktree list") echo "{\"result\":{\"worktrees\":${FAKE_WORKTREES:-[]}}}" ;;
 *) echo '{"result":{}}' ;;
 esac
 `,
@@ -177,6 +179,9 @@ esac
 case "$1" in show) echo "$FAKE_BEAD" ;; esac
 `,
 		"ssh": `echo "$*" >> "$LOG/ssh.log"
+`,
+		"gh": `echo "$*" >> "$LOG/gh.log"
+echo 0
 `,
 	}
 	for name, body := range scripts {
@@ -339,5 +344,35 @@ func TestValidateAgentsEnv(t *testing.T) {
 		if err := cfg.validateAgents(); (err == nil) != tc.ok {
 			t.Errorf("%q: err %v, want ok=%v", tc.env, err, tc.ok)
 		}
+	}
+}
+
+// resolve forwards --force to herdr worktree remove, which otherwise refuses a
+// worktree with untracked files, and never forces without it.
+func TestResolveForwardsForce(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		dir := fakeTools(t)
+		t.Setenv("FAKE_BEAD", `[{"id":"b-1","title":"Do it","status":"closed"}]`)
+		t.Setenv("FAKE_WORKTREES", `[{"branch":"tj/b-1-do-it","path":"/wt/b-1","is_linked_worktree":true,"open_workspace_id":"w7"}]`)
+		msg, err := resolve(hostsConfig(), newHerdr(), "b-1", force)
+		if err != nil || !strings.HasPrefix(msg, "removed worktree /wt/b-1") {
+			t.Fatalf("force=%v: %q, %v", force, msg, err)
+		}
+		want := "worktree remove --workspace w7"
+		if force {
+			want += " --force"
+		}
+		if got := logLines(t, dir, "herdr"); !slices.Contains(got, want) {
+			t.Fatalf("force=%v: herdr ran %q, want %q", force, got, want)
+		}
+	}
+}
+
+func TestGitWorktreeRemoveForce(t *testing.T) {
+	if got := gitWorktreeRemove("/r", "/wt", false); !slices.Equal(got, []string{"-C", "/r", "worktree", "remove", "/wt"}) {
+		t.Fatalf("got %q", got)
+	}
+	if got := gitWorktreeRemove("/r", "/wt", true); !slices.Equal(got, []string{"-C", "/r", "worktree", "remove", "--force", "/wt"}) {
+		t.Fatalf("got %q", got)
 	}
 }
