@@ -31,57 +31,11 @@ type detailResult struct {
 }
 
 const (
-	detailDescLines = 10
-	detailTailLines = 10
-	detailTimeout   = 5 * time.Second
+	detailDescLines    = 10
+	detailHistoryLines = 12
+	detailTailLines    = 10
+	detailTimeout      = 5 * time.Second
 )
-
-// loadDetail starts the bead's slow lookups; each sends its result to out.
-// The agent's screen is read only when there is an agent.
-func loadDetail(h Herdr, r boardRow, out chan<- detailResult) int {
-	id := r.bead.ID
-	go func() {
-		b, err := Beads{}.Show(id)
-		out <- detailResult{id, func(d *beadDetail) {
-			if err != nil {
-				d.fullErr = err.Error()
-				return
-			}
-			d.full = &b
-		}}
-	}()
-	if r.agent == nil {
-		return 1
-	}
-	pane, working := r.agent.PaneID, r.agent.Status == "working"
-	go func() {
-		text, err := h.Read(pane, 40, detailTimeout)
-		out <- detailResult{id, func(d *beadDetail) {
-			d.tailDone = true
-			switch {
-			case err == nil:
-				d.tail = tailLines(text, detailTailLines)
-			case !working:
-				// A working agent's screen can be mid-redraw; its read failing
-				// isn't worth showing.
-				d.tailErr = err.Error()
-			}
-		}}
-	}()
-	return 2
-}
-
-// beadInbox is the unhandled inbox items about one bead.
-func beadInbox(id string) []InboxItem {
-	items, _ := readInbox()
-	var out []InboxItem
-	for _, it := range items {
-		if it.Bead == id {
-			out = append(out, it)
-		}
-	}
-	return out
-}
 
 // linkedPRs is every PR the ticker's last pass knows a bead by: the one it is
 // delivered through, its merged ones, and those its notes link. A linked PR
@@ -169,15 +123,38 @@ func checkSummary(c Checks) string {
 	return "checks " + strings.Join(s, ", ")
 }
 
-// notesSplit is a bead's latest note and how many came before it: bd keeps
-// one note per line.
-func notesSplit(notes string) (latest string, earlier int) {
+// noteLines is a bead's notes, oldest first: bd keeps one note per line.
+func noteLines(notes string) []string {
 	var lines []string
 	for _, l := range strings.Split(notes, "\n") {
 		if l = strings.TrimSpace(l); l != "" {
 			lines = append(lines, l)
 		}
 	}
+	return lines
+}
+
+// waitingNotes is how many of a needs_me bead's last notes say what it
+// waits on: the last two (a question and its options, or a RUN: and its
+// why), reaching back up to four for the latest note that asks something,
+// since a worker often notes progress after posing the question.
+func waitingNotes(notes []string) int {
+	n := min(2, len(notes))
+	for i := len(notes) - 1; i >= 0 && i >= len(notes)-4; i-- {
+		if asks(notes[i]) {
+			return max(n, len(notes)-i)
+		}
+	}
+	return n
+}
+
+var asksRE = regexp.MustCompile(`\?|(?i)\bquestion\b|\boptions?\b|\(a\)|^RUN:`)
+
+func asks(note string) bool { return asksRE.MatchString(note) }
+
+// notesSplit is a bead's latest note and how many came before it.
+func notesSplit(notes string) (latest string, earlier int) {
+	lines := noteLines(notes)
 	if len(lines) == 0 {
 		return "", 0
 	}
@@ -265,6 +242,21 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 	if r.line != "" {
 		para(r.color, "", r.line)
 	}
+	var when []string
+	for _, t := range []struct {
+		name string
+		at   time.Time
+	}{{"created", b.CreatedAt}, {"updated", b.UpdatedAt}} {
+		if !t.at.IsZero() {
+			when = append(when, t.name+" "+t.at.Local().Format("Jan 2 15:04"))
+		}
+	}
+	if b.Assignee != "" {
+		when = append(when, "assignee "+b.Assignee)
+	}
+	if len(when) > 0 {
+		para(ansiDim, "", strings.Join(when, " · "))
+	}
 
 	section("Description")
 	switch {
@@ -276,7 +268,7 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 			add("", "  "+l)
 		}
 		if more := len(lines) - detailDescLines; more > 0 {
-			para(ansiDim, "  ", fmt.Sprintf("… %d more lines (s shows all)", more))
+			para(ansiDim, "  ", fmt.Sprintf("… %d more lines (b shows all)", more))
 		}
 	case d.fullErr != "":
 		para(ansiRed, "  ", d.fullErr)
@@ -284,22 +276,45 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 		add(ansiDim, "  loading…")
 	}
 
-	latest, earlier := notesSplit(b.Notes)
-	switch earlier {
-	case 0:
-		section("Latest note")
-	case 1:
-		section("Latest note (1 earlier)")
-	default:
-		section(fmt.Sprintf("Latest note (%d earlier)", earlier))
-	}
-	if latest == "" {
-		add(ansiDim, "  (none)")
+	notes := noteLines(b.Notes)
+	shown := 1
+	if b.Status == StatusNeedsMe {
+		shown = waitingNotes(notes)
+		section("Waiting on you")
+		if len(notes) == 0 {
+			add(ansiDim, "  (no note says what for)")
+		}
+		for _, n := range notes[len(notes)-shown:] {
+			para("", "  ", n)
+		}
+		if cmd := r.run; cmd != "" {
+			para(ansiRed, "  ", "run: "+cmd+" (p copies)")
+		}
+		if why := unanswerable(r.agent); why != "" {
+			para(ansiDim, "  ", why)
+		} else {
+			para(ansiDim, "  ", "A answers "+r.agent.Name)
+		}
 	} else {
-		para("", "  ", latest)
+		section("Latest note")
+		if len(notes) == 0 {
+			add(ansiDim, "  (none)")
+		} else {
+			para("", "  ", notes[len(notes)-1])
+		}
+		if cmd := r.run; cmd != "" {
+			para(ansiRed, "  ", "run: "+cmd+" (p copies)")
+		}
 	}
-	if cmd := r.run; cmd != "" {
-		para(ansiRed, "  ", "run: "+cmd+" (p copies)")
+
+	if earlier := notes[:max(0, len(notes)-shown)]; len(earlier) > 0 {
+		section(fmt.Sprintf("History (%d earlier notes, newest first)", len(earlier)))
+		for i := len(earlier) - 1; i >= 0 && i >= len(earlier)-detailHistoryLines; i-- {
+			para(ansiDim, "  ", earlier[i])
+		}
+		if older := len(earlier) - detailHistoryLines; older > 0 {
+			para(ansiDim, "  ", fmt.Sprintf("… %d older (b shows all)", older))
+		}
 	}
 
 	section("PRs")
@@ -318,6 +333,20 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 		para("", "  ", r.linear)
 		for _, m := range r.moves {
 			para(ansiDim, "  ", "expected: "+m)
+		}
+	}
+
+	if len(r.runs) > 0 {
+		section("Runs")
+		for _, run := range r.runs {
+			state := run.Status
+			if run.Conclusion != "" {
+				state = run.Conclusion
+			}
+			para("", "  ", run.Workflow+" · "+strings.ToLower(state))
+			if run.URL != "" {
+				para(ansiDim, "    ", run.URL)
+			}
 		}
 	}
 

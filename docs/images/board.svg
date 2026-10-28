@@ -1,62 +1,92 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="880" height="546" viewBox="0 0 880 546">
-<rect width="880" height="546" rx="10" fill="#1a1b26"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="666" viewBox="0 0 880 666">
+<rect width="880" height="666" rx="10" fill="#1a1b26"/>
 <path d="M0 10a10 10 0 0 1 10-10h860 a10 10 0 0 1 10 10v24h-880z" fill="#16161e"/>
 <circle cx="20" cy="17" r="6" fill="#ff5f57"/>
 <circle cx="40" cy="17" r="6" fill="#febc2e"/>
 <circle cx="60" cy="17" r="6" fill="#28c840"/>
 <text x="440" y="21.5" fill="#565f89" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" text-anchor="middle">quartermaster board</text>
 <g font-family="'JetBrains Mono', 'JetBrainsMono Nerd Font', ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14" xml:space="preserve">
-<text x="20" y="64.4" fill="#c0caf5" font-weight="bold" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">threads</text>
-<text x="20" y="84.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-7qk</text>
-<text x="179.6" y="84.4" fill="#f7768e" textLength="226.8" lengthAdjust="spacingAndGlyphs">needs you · PR #50 · APP-14</text>
-<text x="456.8" y="84.4" fill="#c0caf5" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs"> Add rate limiting to the API</text>
-<rect x="20" y="90" width="840" height="20" fill="#c0caf5"/>
-<text x="20" y="104.4" fill="#1a1b26" textLength="747.6" lengthAdjust="spacingAndGlyphs">  notes-m3d        needs you · run command           Rotate the staging database password</text>
-<text x="20" y="124.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-2fz</text>
-<text x="179.6" y="124.4" fill="#e0af68" textLength="193.20000000000002" lengthAdjust="spacingAndGlyphs">merged · PR #42 · APP-9</text>
-<text x="456.8" y="124.4" fill="#c0caf5" textLength="210" lengthAdjust="spacingAndGlyphs"> Fix the flaky login test</text>
-<text x="20" y="144.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-9wc</text>
-<text x="179.6" y="144.4" fill="#9ece6a" textLength="277.2" lengthAdjust="spacingAndGlyphs">ready to merge · PR #45 approved…</text>
-<text x="456.8" y="144.4" fill="#c0caf5" textLength="285.6" lengthAdjust="spacingAndGlyphs"> Upgrade the Postgres driver to v5</text>
-<text x="20" y="164.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-r8t</text>
-<text x="179.6" y="164.4" fill="#e0af68" textLength="126" lengthAdjust="spacingAndGlyphs">review · PR #47</text>
-<text x="456.8" y="164.4" fill="#c0caf5" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs"> Write the v2 migration guide</text>
-<text x="20" y="184.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-x5n</text>
-<text x="179.6" y="184.4" fill="#e0af68" textLength="277.2" lengthAdjust="spacingAndGlyphs">rolling out · PR #39 · Deploy pr…</text>
-<text x="456.8" y="184.4" fill="#c0caf5" textLength="310.8" lengthAdjust="spacingAndGlyphs"> Move image uploads to object storage</text>
-<text x="20" y="204.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-h6p</text>
-<text x="179.6" y="204.4" fill="#f7768e" textLength="277.2" lengthAdjust="spacingAndGlyphs">checks failing · PR #48 (e2e (fi…</text>
-<text x="456.8" y="204.4" fill="#c0caf5" textLength="268.8" lengthAdjust="spacingAndGlyphs"> Dark mode for the settings page</text>
-<text x="20" y="224.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-b7v</text>
-<text x="179.6" y="224.4" fill="#565f89" textLength="33.6" lengthAdjust="spacingAndGlyphs">idle</text>
-<text x="456.8" y="224.4" fill="#c0caf5" textLength="268.8" lengthAdjust="spacingAndGlyphs"> Translate the onboarding emails</text>
-<text x="20" y="244.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-c4j</text>
-<text x="179.6" y="244.4" fill="#9ece6a" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">working</text>
-<text x="456.8" y="244.4" fill="#c0caf5" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs"> Paginate the search endpoint</text>
-<text x="20" y="264.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-u2e</text>
-<text x="179.6" y="264.4" fill="#9ece6a" textLength="260.40000000000003" lengthAdjust="spacingAndGlyphs">working · PR #49 checks running</text>
-<text x="456.8" y="264.4" fill="#c0caf5" textLength="277.2" lengthAdjust="spacingAndGlyphs"> Cache rendered Markdown previews</text>
-<text x="20" y="284.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-k9s</text>
-<text x="179.6" y="284.4" fill="#565f89" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">blocked</text>
-<text x="456.8" y="284.4" fill="#c0caf5" textLength="294" lengthAdjust="spacingAndGlyphs"> Single sign-on for the admin panel</text>
-<text x="20" y="304.4" fill="#c0caf5" font-weight="bold" textLength="33.6" lengthAdjust="spacingAndGlyphs">next</text>
-<text x="20" y="324.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-d1f</text>
-<text x="179.6" y="324.4" fill="#7dcfff" textLength="84" lengthAdjust="spacingAndGlyphs">P1 feature</text>
-<text x="456.8" y="324.4" fill="#c0caf5" textLength="193.20000000000002" lengthAdjust="spacingAndGlyphs"> CSV export for reports</text>
-<text x="20" y="344.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-p5g</text>
-<text x="179.6" y="344.4" fill="#7dcfff" textLength="50.400000000000006" lengthAdjust="spacingAndGlyphs">P2 bug</text>
-<text x="456.8" y="344.4" fill="#c0caf5" textLength="285.6" lengthAdjust="spacingAndGlyphs"> Invoices show the wrong time zone</text>
-<text x="20" y="364.4" fill="#c0caf5" font-weight="bold" textLength="42" lengthAdjust="spacingAndGlyphs">ready</text>
-<text x="20" y="384.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-w8m</text>
-<text x="179.6" y="384.4" fill="#565f89" textLength="84" lengthAdjust="spacingAndGlyphs">P2 feature</text>
-<text x="456.8" y="384.4" fill="#c0caf5" textLength="218.4" lengthAdjust="spacingAndGlyphs"> Webhooks for new comments</text>
-<text x="20" y="404.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-e3r</text>
-<text x="179.6" y="404.4" fill="#565f89" textLength="67.2" lengthAdjust="spacingAndGlyphs">P3 chore</text>
-<text x="456.8" y="404.4" fill="#c0caf5" textLength="285.6" lengthAdjust="spacingAndGlyphs"> Remove feature flags that shipped</text>
-<text x="20" y="424.4" fill="#c0caf5" textLength="92.4" lengthAdjust="spacingAndGlyphs">  notes-s6y</text>
-<text x="179.6" y="424.4" fill="#565f89" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">P3 task</text>
-<text x="456.8" y="424.4" fill="#c0caf5" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs"> Document the release process</text>
-<text x="20" y="504.4" fill="#f7768e" textLength="436.8" lengthAdjust="spacingAndGlyphs">run: make rotate-db-password ENV=staging  (p copies)</text>
-<text x="20" y="524.4" fill="#565f89" textLength="831.6" lengthAdjust="spacingAndGlyphs">↵ focus/start  space detail  c claude  x codex  m muse  n next  y copy  p copy command  / filter  …</text>
+<text x="20" y="64.4" fill="#c0caf5" font-weight="bold" textLength="554.4" lengthAdjust="spacingAndGlyphs">quartermaster · 16 open · 2 need you · by priority · beads 12s ago</text>
+<text x="20" y="84.4" fill="#f7768e" font-weight="bold" textLength="109.2" lengthAdjust="spacingAndGlyphs">needs you (2)</text>
+<text x="20" y="104.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-7qk P1</text>
+<text x="146" y="104.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">○</text>
+<text x="162.8" y="104.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> 4m</text>
+<text x="196.4" y="104.4" fill="#f7768e" textLength="226.8" lengthAdjust="spacingAndGlyphs">needs you · PR #50 · APP-14</text>
+<text x="524" y="104.4" fill="#c0caf5" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs"> Add rate limiting to the API</text>
+<rect x="20" y="110" width="840" height="20" fill="#c0caf5"/>
+<text x="20" y="124.4" fill="#1a1b26" textLength="814.8000000000001" lengthAdjust="spacingAndGlyphs">▌ notes-m3d P2 ○ 22m needs you · run command                 Rotate the staging database password</text>
+<text x="20" y="144.4" fill="#e0af68" font-weight="bold" textLength="84" lengthAdjust="spacingAndGlyphs">merged (1)</text>
+<text x="20" y="164.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-2fz P2</text>
+<text x="146" y="164.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">○</text>
+<text x="162.8" y="164.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> 3h</text>
+<text x="196.4" y="164.4" fill="#e0af68" textLength="126" lengthAdjust="spacingAndGlyphs">merged · PR #42</text>
+<text x="524" y="164.4" fill="#c0caf5" textLength="210" lengthAdjust="spacingAndGlyphs"> Fix the flaky login test</text>
+<text x="20" y="184.4" fill="#9ece6a" font-weight="bold" textLength="151.20000000000002" lengthAdjust="spacingAndGlyphs">ready to merge (1)</text>
+<text x="20" y="204.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-9wc P2</text>
+<text x="146" y="204.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">○</text>
+<text x="162.8" y="204.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> 1h</text>
+<text x="196.4" y="204.4" fill="#9ece6a" textLength="268.8" lengthAdjust="spacingAndGlyphs">ready to merge · PR #45 approved</text>
+<text x="524" y="204.4" fill="#c0caf5" textLength="285.6" lengthAdjust="spacingAndGlyphs"> Upgrade the Postgres driver to v5</text>
+<text x="20" y="224.4" fill="#e0af68" font-weight="bold" textLength="84" lengthAdjust="spacingAndGlyphs">review (1)</text>
+<text x="20" y="244.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-r8t P2</text>
+<text x="146" y="244.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">○</text>
+<text x="162.8" y="244.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs">26h</text>
+<text x="196.4" y="244.4" fill="#e0af68" textLength="126" lengthAdjust="spacingAndGlyphs">review · PR #47</text>
+<text x="524" y="244.4" fill="#c0caf5" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs"> Write the v2 migration guide</text>
+<text x="20" y="264.4" fill="#e0af68" font-weight="bold" textLength="126" lengthAdjust="spacingAndGlyphs">rolling out (1)</text>
+<text x="20" y="284.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-x5n P2</text>
+<text x="146" y="284.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">○</text>
+<text x="162.8" y="284.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs">50m</text>
+<text x="196.4" y="284.4" fill="#e0af68" textLength="327.6" lengthAdjust="spacingAndGlyphs">rolling out · PR #39 · Deploy producti…</text>
+<text x="524" y="284.4" fill="#c0caf5" textLength="310.8" lengthAdjust="spacingAndGlyphs"> Move image uploads to object storage</text>
+<text x="20" y="304.4" fill="#f7768e" font-weight="bold" textLength="151.20000000000002" lengthAdjust="spacingAndGlyphs">checks failing (1)</text>
+<text x="20" y="324.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-h6p P2</text>
+<text x="146" y="324.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">○</text>
+<text x="162.8" y="324.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> 2h</text>
+<text x="196.4" y="324.4" fill="#f7768e" textLength="327.6" lengthAdjust="spacingAndGlyphs">checks failing · PR #48 (e2e (firefox))</text>
+<text x="524" y="324.4" fill="#c0caf5" textLength="268.8" lengthAdjust="spacingAndGlyphs"> Dark mode for the settings page</text>
+<text x="20" y="344.4" fill="#565f89" font-weight="bold" textLength="67.2" lengthAdjust="spacingAndGlyphs">idle (1)</text>
+<text x="20" y="364.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-b7v P2</text>
+<text x="146" y="364.4" fill="#565f89" textLength="8.4" lengthAdjust="spacingAndGlyphs">○</text>
+<text x="162.8" y="364.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> 5h</text>
+<text x="196.4" y="364.4" fill="#565f89" textLength="33.6" lengthAdjust="spacingAndGlyphs">idle</text>
+<text x="524" y="364.4" fill="#c0caf5" textLength="268.8" lengthAdjust="spacingAndGlyphs"> Translate the onboarding emails</text>
+<text x="20" y="384.4" fill="#9ece6a" font-weight="bold" textLength="92.4" lengthAdjust="spacingAndGlyphs">working (2)</text>
+<text x="20" y="404.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-c4j P2</text>
+<text x="146" y="404.4" fill="#9ece6a" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="162.8" y="404.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs">40s</text>
+<text x="196.4" y="404.4" fill="#9ece6a" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">working</text>
+<text x="524" y="404.4" fill="#c0caf5" textLength="243.60000000000002" lengthAdjust="spacingAndGlyphs"> Paginate the search endpoint</text>
+<text x="20" y="424.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-u2e P2</text>
+<text x="146" y="424.4" fill="#9ece6a" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="162.8" y="424.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> 6m</text>
+<text x="196.4" y="424.4" fill="#9ece6a" textLength="260.40000000000003" lengthAdjust="spacingAndGlyphs">working · PR #49 checks running</text>
+<text x="524" y="424.4" fill="#c0caf5" textLength="277.2" lengthAdjust="spacingAndGlyphs"> Cache rendered Markdown previews</text>
+<text x="20" y="444.4" fill="#565f89" font-weight="bold" textLength="92.4" lengthAdjust="spacingAndGlyphs">blocked (1)</text>
+<text x="20" y="464.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-k9s P2</text>
+<text x="162.8" y="464.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> 4d</text>
+<text x="196.4" y="464.4" fill="#565f89" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">blocked</text>
+<text x="524" y="464.4" fill="#c0caf5" textLength="294" lengthAdjust="spacingAndGlyphs"> Single sign-on for the admin panel</text>
+<text x="20" y="484.4" fill="#7dcfff" font-weight="bold" textLength="67.2" lengthAdjust="spacingAndGlyphs">next (2)</text>
+<text x="20" y="504.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-d1f P1</text>
+<text x="162.8" y="504.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> 2d</text>
+<text x="196.4" y="504.4" fill="#7dcfff" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">feature</text>
+<text x="524" y="504.4" fill="#c0caf5" textLength="193.20000000000002" lengthAdjust="spacingAndGlyphs"> CSV export for reports</text>
+<text x="20" y="524.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-p5g P2</text>
+<text x="162.8" y="524.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> 6d</text>
+<text x="196.4" y="524.4" fill="#7dcfff" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs">bug</text>
+<text x="524" y="524.4" fill="#c0caf5" textLength="285.6" lengthAdjust="spacingAndGlyphs"> Invoices show the wrong time zone</text>
+<text x="20" y="544.4" fill="#565f89" font-weight="bold" textLength="92.4" lengthAdjust="spacingAndGlyphs">backlog (3)</text>
+<text x="20" y="564.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-w8m P2</text>
+<text x="162.8" y="564.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> 9d</text>
+<text x="196.4" y="564.4" fill="#565f89" textLength="58.800000000000004" lengthAdjust="spacingAndGlyphs">feature</text>
+<text x="524" y="564.4" fill="#c0caf5" textLength="218.4" lengthAdjust="spacingAndGlyphs"> Webhooks for new comments</text>
+<text x="20" y="584.4" fill="#c0caf5" textLength="117.60000000000001" lengthAdjust="spacingAndGlyphs">  notes-e3r P3</text>
+<text x="162.8" y="584.4" fill="#565f89" textLength="25.200000000000003" lengthAdjust="spacingAndGlyphs"> 3w</text>
+<text x="196.4" y="584.4" fill="#565f89" textLength="42" lengthAdjust="spacingAndGlyphs">chore</text>
+<text x="524" y="584.4" fill="#c0caf5" textLength="285.6" lengthAdjust="spacingAndGlyphs"> Remove feature flags that shipped</text>
+<text x="20" y="604.4" fill="#565f89" textLength="764.4" lengthAdjust="spacingAndGlyphs">It needs the vault login only you have; the app picks the new secret up on its next deploy.</text>
+<text x="20" y="624.4" fill="#f7768e" textLength="436.8" lengthAdjust="spacingAndGlyphs">run: make rotate-db-password ENV=staging  (p copies)</text>
+<text x="20" y="644.4" fill="#565f89" textLength="747.6" lengthAdjust="spacingAndGlyphs">↵ focus/start  space detail  a note  A answer  n next  S status  T tidy  / filter  ? help</text>
 </g>
 </svg>

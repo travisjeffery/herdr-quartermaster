@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,7 +14,7 @@ import (
 
 // TestDemoScreenshots draws the board for the README from made-up data: a
 // small open-source notes app, its beads, agents and PRs. It runs the real
-// layout (boardRows, renderBoard, detailLines) and replays the terminal output
+// layout (buildRows, renderBoard, detailLines) and replays the terminal output
 // into SVG, so the pictures can't drift from the board. Nothing is read from
 // bd, herdr or GitHub. scripts/demo/screenshots.sh runs it and makes the PNGs.
 func TestDemoScreenshots(t *testing.T) {
@@ -21,20 +22,150 @@ func TestDemoScreenshots(t *testing.T) {
 	if dir == "" {
 		t.Skip("set QM_DEMO_DIR to write the demo screenshots (scripts/demo/screenshots.sh)")
 	}
-	threads, next, ready, st := demoData()
-	rows := boardRows(Config{}, st, threads, next, ready)
-
+	m := demoBoard()
 	const w = 100
 	// The list, with the thread that waits on a command selected: its command
 	// shows in the status line.
-	list := renderBoard(rows, 2, "", boardFilter{}, nil, w, 24)
-	writeDemo(t, dir, "board", list, w, 24)
+	selectBead(t, m, "notes-m3d")
+	writeDemo(t, dir, "board", renderBoard(m, w, 30), w, 30)
 
 	// The detail pane on the thread with a question for you.
-	r := rows[1]
-	d := &beadDetail{full: demoFull(r.bead), tail: demoTail, tailDone: true, inbox: demoInbox[:1]}
-	detail := renderBoard(rows, 1, "", boardFilter{}, detailLines(r, d, w), w, 46)
-	writeDemo(t, dir, "board-detail", detail, w, 46)
+	selectBead(t, m, "notes-7qk")
+	m.view = viewDetail
+	r := m.sel()
+	m.details[r.bead.ID] = demoDetail(r.bead)
+	writeDemo(t, dir, "board-detail", renderBoard(m, w, 46), w, 46)
+
+	// The tidy view, with one stale claim marked.
+	m.view = viewList
+	press(t, m, "T")
+	press(t, m, " ")
+	writeDemo(t, dir, "board-tidy", renderBoard(m, w, 30), w, 30)
+}
+
+// TestDemoRecording is the README's board recording: the real board, driven
+// by keys over the made-up data, one frame per step. screenshots.sh turns
+// the frames into a GIF.
+func TestDemoRecording(t *testing.T) {
+	dir := os.Getenv("QM_DEMO_DIR")
+	if dir == "" {
+		t.Skip("set QM_DEMO_DIR to write the demo recording (scripts/demo/screenshots.sh)")
+	}
+	frames := filepath.Join(dir, "board-frames")
+	if err := os.MkdirAll(frames, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const w, h = 100, 30
+	m := demoBoard()
+	n := 0
+	frame := func() {
+		n++
+		writeDemo(t, frames, fmt.Sprintf("%02d", n), renderBoard(m, w, h), w, h)
+	}
+	keys := func(ks ...string) {
+		for _, k := range ks {
+			press(t, m, k)
+			if r := m.sel(); r != nil && m.view == viewDetail {
+				if d, ok := m.details[r.bead.ID]; ok && d.full != nil && d.full.Description == "" {
+					m.details[r.bead.ID] = demoDetail(r.bead)
+				}
+			}
+			frame()
+		}
+	}
+	frame()
+	keys("j", "j", "j")
+	typed := func(chunks ...string) {
+		for _, c := range chunks {
+			typeText(t, m, c)
+			frame()
+		}
+	}
+	keys("/")
+	typed("r", "a", "t", "e")
+	keys("\r", " ", "J")
+	keys("\x1b", "A")
+	typed("per", " key,", " 100/min,", " anonymous", " calls share", " one bucket")
+	keys("\r", "y")
+	keys("\x1b", "T", " ", "u")
+	keys("\x1b", "\x1b")
+}
+
+// demoDetail is the detail pane's slow lookups, finished.
+func demoDetail(b Bead) *beadDetail {
+	var inbox []InboxItem
+	if b.ID == demoInbox[0].Bead {
+		inbox = demoInbox[:1]
+	}
+	return &beadDetail{full: demoFull(b), tail: demoTail, tailDone: true, inbox: inbox}
+}
+
+// demoBoard is the board over the demo's beads, agents and PRs, as bd, herdr
+// and the ticker's last pass would have them.
+func demoBoard() *board {
+	threads, next, ready, st := demoData()
+	data := boardData{BeadsAt: demoAt.Add(-12 * time.Second), State: st}
+	data.State.Runs = map[string][]Run{}
+	for _, th := range threads {
+		data.Beads = append(data.Beads, th.Bead)
+		if th.Agent != nil {
+			data.Agents = append(data.Agents, *th.Agent)
+		}
+		if th.PR != nil {
+			pr := *th.PR
+			pr.Checks = demoChecks(th.Checks)
+			data.State.PRs[th.Bead.ID] = pr
+		}
+		data.State.Runs[th.Bead.ID] = th.Runs
+	}
+	data.Beads = append(append(data.Beads, next...), ready...)
+	// Last activity, spread the way a working afternoon spreads it.
+	ages := []time.Duration{4 * time.Minute, 22 * time.Minute, 3 * time.Hour, time.Hour, 26 * time.Hour, 50 * time.Minute,
+		2 * time.Hour, 40 * time.Second, 6 * time.Minute, 5 * time.Hour, 4 * 24 * time.Hour, 2 * 24 * time.Hour, 6 * 24 * time.Hour,
+		9 * 24 * time.Hour, 3 * 7 * 24 * time.Hour, 5 * 7 * 24 * time.Hour}
+	for i := range data.Beads {
+		data.Beads[i].UpdatedAt = demoAt.Add(-ages[i%len(ages)])
+	}
+	f := &fakeBoard{beads: data.Beads, agents: data.Agents, gc: demoTidy(data)}
+	env := f.env()
+	env.local = func() (TickerState, []InboxItem) { return data.State, nil }
+	m := newBoard(Config{LinearPrefixes: []string{"APP"}}, env, data, func() time.Time { return demoAt })
+	m.agentsAt, m.localAt, m.beadsTried = demoAt, demoAt, demoAt
+	return m
+}
+
+// demoTidy is what the tidy view finds in the demo: a claim nobody has
+// touched in ten days, a bead verify thinks is done, and a closed bead's
+// worktree left behind.
+func demoTidy(data boardData) []gcItem {
+	stale := Bead{ID: "notes-f2h", Title: "Spike: full-text search with SQLite FTS5", Status: StatusInProgress, Priority: 3,
+		Assignee: "claude", UpdatedAt: demoAt.Add(-10 * 24 * time.Hour), Notes: "FTS5 works; ranking needs bm25 weights tuned"}
+	flagged := Bead{ID: "notes-y4k", Title: "Retry failed webhook deliveries", Status: StatusOpen, Priority: 2, UpdatedAt: demoAt.Add(-9 * 24 * time.Hour)}
+	closed := Bead{ID: "notes-a1c", Title: "Upgrade the Markdown renderer", Status: StatusClosed, ClosedAt: demoAt.Add(-3 * time.Hour),
+		CloseReason: "PR #40 merged; previews render the same on 200 sample notes"}
+	return gcItems("tj/", gcInputs{
+		active: []Bead{stale, flagged},
+		closed: []Bead{closed},
+		bare:   []Bead{stale},
+		inbox: []InboxItem{{Event: Event{Bead: flagged.ID, Kind: EventLikelyStale, At: demoAt.Add(-2 * time.Hour),
+			Summary: "likely stale: (b) linked PR #38 merged: Retry webhooks with backoff"}}},
+		candidates: []sweepCandidate{{Path: "/home/me/worktrees/notes/tj-notes-a1c-upgrade-the-markdown", Branch: "tj/notes-a1c-upgrade-the-markdown"}},
+	}, demoAt)
+}
+
+// demoChecks is a check rollup that summarizes to c.
+func demoChecks(c Checks) []Check {
+	var out []Check
+	for _, name := range c.Failing {
+		out = append(out, Check{Name: name, Status: "COMPLETED", Conclusion: "FAILURE"})
+	}
+	for i := range c.Pending {
+		out = append(out, Check{Name: "pending-" + strconv.Itoa(i), Status: "IN_PROGRESS"})
+	}
+	for i := range c.Passing {
+		out = append(out, Check{Name: "ok-" + strconv.Itoa(i), Status: "COMPLETED", Conclusion: "SUCCESS"})
+	}
+	return out
 }
 
 func writeDemo(t *testing.T, dir, name, screen string, w, h int) {

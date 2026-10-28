@@ -186,8 +186,9 @@ func TestDetailLines(t *testing.T) {
 		"backend-ab12 · in_progress · P0 · labels repo:widgets · parent backend-ab",
 		"Fix the thing",
 		"Description\n  A long description",
-		"  … 10 more lines (s shows all)",
-		"Latest note (4 earlier)\n  PR: https://github.com/acme/other/pull/3",
+		"  … 10 more lines (b shows all)",
+		"Latest note\n  PR: https://github.com/acme/other/pull/3",
+		"History (4 earlier notes, newest first)\n  why: needs prod creds\n  RUN: make deploy\n",
 		"  run: make deploy (p copies)",
 		"PRs\n  acme/widgets#7 · open · draft",
 		"    INF-42: Fix the thing",
@@ -235,21 +236,26 @@ var ansiSeq = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
 
 func TestRenderBoardWithDetail(t *testing.T) {
 	r, d := testDetailRow()
-	rows := testBoard()
-	rows[1] = r
-	const w, hgt = 60, 15
-	screen := renderBoard(rows, 1, "", boardFilter{}, detailLines(r, d, w), w, hgt)
-	// The status and hint lines are placed by cursor moves, not newlines.
-	screen = regexp.MustCompile(`\x1b\[\d+;1H`).ReplaceAllString(screen, "\r\n")
-	lines := strings.Split(ansiSeq.ReplaceAllString(screen, ""), "\r\n")
-	// body is 12 lines: the list gets a third, 4 of its 6 rows.
-	if !strings.HasPrefix(lines[0], "threads") || !strings.Contains(lines[1], "backend-ab12") || !strings.HasPrefix(lines[4], "───") {
-		t.Fatalf("list then rule, got:\n%s", strings.Join(lines[:5], "\n"))
+	m := testModel(t, nil)
+	m.rows = testBoard()
+	m.rows[1] = r
+	m.cur = 1
+	m.view = viewDetail
+	m.details[r.bead.ID] = d
+	const w, hgt = 60, 18
+	lines := screenLines(renderBoard(m, w, hgt))
+	if len(lines) != hgt {
+		t.Fatalf("%d lines, want %d", len(lines), hgt)
 	}
-	if !strings.Contains(screen, "… more below (s shows the bead in full)") {
+	// Title, then the list (a third of the body), then the rule and the pane.
+	if !strings.HasPrefix(lines[1], "threads") || !strings.Contains(lines[2], "backend-ab12") || !strings.HasPrefix(lines[5], "───") {
+		t.Fatalf("list then rule, got:\n%s", strings.Join(lines[:6], "\n"))
+	}
+	screen := strings.Join(lines, "\n")
+	if !strings.Contains(screen, "… more below (J scrolls, b shows the bead in full)") {
 		t.Error("an overflowing pane doesn't say it was cut")
 	}
-	if !strings.Contains(screen, "J/K scroll  o open PR  l Linear  s bd show") {
+	if !strings.Contains(screen, "J/K scroll") {
 		t.Error("no detail key hint")
 	}
 	for _, l := range lines {
@@ -258,8 +264,33 @@ func TestRenderBoardWithDetail(t *testing.T) {
 		}
 	}
 	// Without a pane, the list keeps the whole body.
-	if plain := renderBoard(rows, 1, "", boardFilter{}, nil, w, hgt); strings.Contains(plain, "───") {
+	m.view = viewList
+	if plain := renderBoard(m, w, hgt); strings.Contains(plain, "───") {
 		t.Error("rule drawn without a pane")
+	}
+}
+
+// screenLines is a rendered screen as plain lines.
+func screenLines(screen string) []string {
+	return strings.Split(ansiSeq.ReplaceAllString(screen, ""), "\r\n")
+}
+
+func TestWaitingNotes(t *testing.T) {
+	cases := []struct {
+		notes []string
+		want  int
+	}{
+		{nil, 0},
+		{[]string{"one"}, 1},
+		{[]string{"a", "b", "c"}, 2},
+		{[]string{"Question: per key or per IP? (a) key (b) IP", "progress", "more progress", "pending your a/b"}, 4},
+		{[]string{"old?", "x", "y", "z", "w"}, 2}, // past four notes back: just the last two
+		{[]string{"RUN: make deploy", "why: prod creds"}, 2},
+	}
+	for _, c := range cases {
+		if got := waitingNotes(c.notes); got != c.want {
+			t.Errorf("waitingNotes(%q) = %d, want %d", c.notes, got, c.want)
+		}
 	}
 }
 
