@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -16,19 +15,24 @@ import (
 
 type boardRow struct {
 	header string
-	bead   Bead
-	agent  *Agent
-	line   string
-	color  string
-	run    string
-	// search is the lowercased text '/' matches: id, title, agent, state,
-	// PR, Linear key and the section the row sits in.
+	// count is a header's number of rows.
+	count int
+	group Group
+	bead  Bead
+	agent *Agent
+	line  string
+	color string
+	run   string
+	// search is the lowercased text '/' matches: id, title, status, agent,
+	// state, PR, Linear key, labels and the section the row sits in.
 	search string
-	// prs, linear and moves are for the detail pane: the bead's PRs as the
-	// ticker last saw them, its Linear key and where that issue should be.
+	// prs, linear, moves and runs are for the detail pane: the bead's PRs as
+	// the ticker last saw them, its Linear key, where that issue should be,
+	// and its workflow runs.
 	prs    []PR
 	linear string
 	moves  []string
+	runs   []Run
 }
 
 func searchText(parts ...string) string {
@@ -54,71 +58,1017 @@ func groupColor(g Group) string {
 		return ansiYellow
 	case GroupWorking, GroupReady:
 		return ansiGreen
+	case sectionNext:
+		return ansiCyan
 	default:
 		return ansiDim
 	}
 }
 
-// loadBoard builds the rows from live bd and herdr state plus the ticker's
-// last PR pass, so opening the board never waits on GitHub.
-func loadBoard(cfg Config) ([]boardRow, error) {
-	st := loadState()
-	t := newTicker(cfg, nil)
-	st.LastGH = time.Now() // never call gh from the board
-	threads, _, err := t.gather(&st, time.Now())
-	if err != nil {
-		return nil, err
-	}
-	next, _ := Beads{}.Next()
-	ready, _ := Beads{}.Ready()
-	return boardRows(cfg, st, threads, next, ready), nil
+// How often the board refreshes on its own. Agents are one cheap herdr call;
+// beads are a bd call that costs a second or more and queues behind every
+// worker's, so they refresh rarely and after each action.
+const (
+	agentsEvery = 2 * time.Second
+	localEvery  = 5 * time.Second
+	beadsEvery  = 30 * time.Second
+)
+
+// boardEnv is everything the board reads or changes, so the model is testable
+// without bd, herdr, git or a terminal.
+type boardEnv struct {
+	beads  func() ([]Bead, error)
+	agents func() ([]Agent, error)
+	// local is the ticker's last state and the unhandled inbox, both files.
+	local func() (TickerState, []InboxItem)
+	show  func(id string) (Bead, error)
+	read  func(pane string) (string, error)
+	gc    func(data boardData) ([]gcItem, error)
+
+	note        func(id, text string) error
+	setStatus   func(id, status string) error
+	setLabel    func(id, label string, on bool) error
+	setPriority func(id string, p int) error
+	close       func(id, reason string) error
+	child       func(parent Bead, title string) (string, error)
+	prompt      func(agent, text string) error
+	dispatch    func(id, kind string) (string, error)
+	resume      func(id string) (string, error)
+	resolve     func(id string) (string, error)
+	release     func(b Bead, days int) error
+	focus       func(agent string) error
+	inboxDone   func(id string) error
+	copy        func(text string) error
+	open        func(url string) string
 }
 
-// boardRows lays out the threads, the beads labelled next and the other ready
-// beads as the board's rows.
-func boardRows(cfg Config, st TickerState, threads []Thread, next, ready []Bead) []boardRow {
-	sort.SliceStable(threads, func(i, j int) bool {
-		gi, gj := classify(threads[i]), classify(threads[j])
-		if gi != gj {
-			return gi < gj
+func liveBoardEnv(cfg Config, h Herdr) boardEnv {
+	bd := Beads{}
+	cache := boardCachePath()
+	return boardEnv{
+		beads: func() ([]Bead, error) {
+			beads, err := bd.list("--status", strings.Join(boardStatuses, ","))
+			if err == nil {
+				_ = saveBoardCache(cache, beads, time.Now())
+			}
+			return beads, err
+		},
+		agents: h.Agents,
+		local: func() (TickerState, []InboxItem) {
+			inbox, _ := readInbox()
+			return loadState(), inbox
+		},
+		show: bd.Show,
+		read: func(pane string) (string, error) { return h.Read(pane, 40, detailTimeout) },
+		gc:   func(data boardData) ([]gcItem, error) { return loadGC(cfg, h, data) },
+
+		note:      bd.Note,
+		setStatus: bd.SetStatus,
+		setLabel:  bd.SetLabel,
+		setPriority: func(id string, p int) error {
+			_, err := bd.run("update", id, "--priority", fmt.Sprint(p))
+			return err
+		},
+		close: func(id, reason string) error {
+			_, err := bd.run("close", id, "--reason", reason)
+			return err
+		},
+		child: func(parent Bead, title string) (string, error) {
+			out, err := bd.run("create", title, "-t", "task", "-p", fmt.Sprint(parent.Priority), "--parent", parent.ID, "--silent")
+			return strings.TrimSpace(string(out)), err
+		},
+		prompt: h.Prompt,
+		dispatch: func(id, kind string) (string, error) {
+			return dispatch(cfg, h, id, DispatchOpts{Kind: kind, Focus: true})
+		},
+		resume: func(id string) (string, error) {
+			lines, err := resume(cfg, h, []string{id}, "")
+			return strings.Join(lines, "; "), err
+		},
+		resolve: func(id string) (string, error) { return resolve(cfg, h, id, false) },
+		release: func(b Bead, days int) error {
+			if err := bd.Note(b.ID, fmt.Sprintf("released by quartermaster board: no agent or worktree for %dd", days)); err != nil {
+				return err
+			}
+			return bd.SetStatus(b.ID, StatusOpen)
+		},
+		focus: h.Focus,
+		inboxDone: func(id string) error {
+			_, err := inboxDone([]string{id})
+			return err
+		},
+		copy: func(text string) error { return exec.Command("wl-copy", text).Run() },
+		open: openURL,
+	}
+}
+
+// Messages are what finishes off the UI: loads and actions run as goroutines
+// and send one of these back.
+type (
+	msg      any
+	cmd      func() msg
+	beadsMsg struct {
+		beads []Bead
+		at    time.Time
+		err   error
+	}
+	agentsMsg struct {
+		agents []Agent
+		err    error
+	}
+	localMsg struct {
+		st    TickerState
+		inbox []InboxItem
+	}
+	gcMsg struct {
+		items []gcItem
+		err   error
+		took  time.Duration
+	}
+	// doneMsg is an action finishing: its message, and what to reload.
+	doneMsg struct {
+		text   string
+		err    error
+		reload bool
+		gc     bool
+		quit   bool
+	}
+)
+
+type boardView int
+
+const (
+	viewList boardView = iota
+	viewDetail
+	viewGC
+	viewHelp
+)
+
+// ask is the bottom line asking for something: free text (a note, an
+// answer, a reason), one key of a few (a status, a priority), or y to
+// confirm. Esc cancels any of them.
+type ask struct {
+	prompt string
+	text   bool
+	keys   string
+	buf    string
+	then   func(answer string) []cmd
+}
+
+// confirm asks y/n before do runs; any key but y cancels.
+func confirm(prompt string, do func() []cmd) *ask {
+	return &ask{prompt: prompt + "  y/n", keys: "y", then: func(string) []cmd { return do() }}
+}
+
+type board struct {
+	cfg Config
+	env boardEnv
+	now func() time.Time
+
+	data boardData
+	// all is every row; rows is what's shown and what selection indexes: all,
+	// narrowed by the '/' filter.
+	all    []boardRow
+	rows   []boardRow
+	cur    int
+	sort   sortMode
+	filter boardFilter
+	view   boardView
+	// back is the view help returns to.
+	back   boardView
+	status string
+	ask    *ask
+
+	beadsLoading, agentsLoading, localLoading bool
+	// reloadAgain asks for another bead load once the running one returns,
+	// because an action wrote after it started.
+	reloadAgain       bool
+	beadsErr          string
+	agentsAt, localAt time.Time
+	beadsTried        time.Time
+
+	// details caches each bead's slow lookups until a bead reload; scroll is
+	// how far the pane is scrolled, starting over on each bead.
+	details    map[string]*beadDetail
+	scroll     int
+	scrolledOn string
+
+	gc        []gcItem
+	gcLoading bool
+	gcLoaded  bool
+	gcErr     string
+	gcTook    time.Duration
+	gcCur     int
+	gcMarked  map[string]bool
+
+	quit bool
+	// handoff, when set, is run by the loop with the terminal handed back
+	// (the pager).
+	handoff func() error
+}
+
+func newBoard(cfg Config, env boardEnv, data boardData, now func() time.Time) *board {
+	m := &board{cfg: cfg, env: env, now: now, data: data, details: map[string]*beadDetail{}, gcMarked: map[string]bool{}}
+	m.rebuild()
+	return m
+}
+
+// rebuild lays the rows out again from data, keeping the selection on the
+// same bead when it is still shown.
+func (m *board) rebuild() {
+	var id string
+	if r := m.sel(); r != nil {
+		id = r.bead.ID
+	}
+	m.all = buildRows(m.cfg, m.data, m.sort)
+	m.rows = filterRows(m.all, m.filter.query)
+	m.cur = -1
+	for i, r := range m.rows {
+		if r.header == "" && id != "" && r.bead.ID == id {
+			m.cur = i
 		}
-		return threads[i].Bead.ID < threads[j].Bead.ID
+	}
+	if m.cur < 0 {
+		m.cur = nextSelectable(m.rows, 0, 1)
+	}
+}
+
+func (m *board) sel() *boardRow {
+	if m.cur < 0 || m.cur >= len(m.rows) || m.rows[m.cur].header != "" {
+		return nil
+	}
+	return &m.rows[m.cur]
+}
+
+// tick starts whatever refresh is due.
+func (m *board) tick() []cmd {
+	now := m.now()
+	var cmds []cmd
+	if !m.agentsLoading && now.Sub(m.agentsAt) >= agentsEvery {
+		m.agentsLoading = true
+		cmds = append(cmds, func() msg {
+			a, err := m.env.agents()
+			return agentsMsg{a, err}
+		})
+	}
+	if !m.localLoading && now.Sub(m.localAt) >= localEvery {
+		m.localLoading = true
+		cmds = append(cmds, func() msg {
+			st, inbox := m.env.local()
+			return localMsg{st, inbox}
+		})
+	}
+	if !m.beadsLoading && now.Sub(m.beadsTried) >= beadsEvery {
+		cmds = append(cmds, m.loadBeads())
+	}
+	if m.view == viewDetail {
+		cmds = append(cmds, m.loadDetail()...)
+	}
+	if m.view == viewGC && !m.gcLoaded && !m.gcLoading {
+		cmds = append(cmds, m.loadGC())
+	}
+	return cmds
+}
+
+// loadBeads starts a bead load, or asks for one after the running one.
+func (m *board) loadBeads() cmd {
+	if m.beadsLoading {
+		m.reloadAgain = true
+		return nil
+	}
+	m.beadsLoading = true
+	m.beadsTried = m.now()
+	return func() msg {
+		b, err := m.env.beads()
+		return beadsMsg{b, time.Now(), err}
+	}
+}
+
+func (m *board) loadGC() cmd {
+	m.gcLoading = true
+	data := m.data
+	return func() msg {
+		start := time.Now()
+		items, err := m.env.gc(data)
+		return gcMsg{items, err, time.Since(start)}
+	}
+}
+
+// loadDetail starts the selected bead's slow lookups once: bd show for its
+// description, and the end of its agent's screen.
+func (m *board) loadDetail() []cmd {
+	r := m.sel()
+	if r == nil {
+		return nil
+	}
+	id := r.bead.ID
+	if _, ok := m.details[id]; ok {
+		return nil
+	}
+	var inbox []InboxItem
+	for _, it := range m.data.Inbox {
+		if it.Bead == id {
+			inbox = append(inbox, it)
+		}
+	}
+	m.details[id] = &beadDetail{inbox: inbox}
+	cmds := []cmd{func() msg {
+		b, err := m.env.show(id)
+		return detailResult{id, func(d *beadDetail) {
+			if err != nil {
+				d.fullErr = err.Error()
+				return
+			}
+			d.full = &b
+		}}
+	}}
+	if r.agent != nil {
+		pane, working := r.agent.PaneID, r.agent.Status == "working"
+		cmds = append(cmds, func() msg {
+			text, err := m.env.read(pane)
+			return detailResult{id, func(d *beadDetail) {
+				d.tailDone = true
+				switch {
+				case err == nil:
+					d.tail = tailLines(text, detailTailLines)
+				case !working:
+					// A working agent's screen can be mid-redraw; its read failing
+					// isn't worth showing.
+					d.tailErr = err.Error()
+				}
+			}}
+		})
+	}
+	return cmds
+}
+
+// apply takes in one finished load or action.
+func (m *board) apply(x msg) []cmd {
+	switch x := x.(type) {
+	case beadsMsg:
+		m.beadsLoading = false
+		var cmds []cmd
+		if m.reloadAgain {
+			m.reloadAgain = false
+			cmds = append(cmds, m.loadBeads())
+		}
+		if x.err != nil {
+			m.beadsErr = x.err.Error()
+			return cmds
+		}
+		m.beadsErr = ""
+		m.data.Beads, m.data.BeadsAt = x.beads, x.at
+		// Notes and status may have moved: look the details up again.
+		m.details = map[string]*beadDetail{}
+		m.rebuild()
+		return cmds
+	case agentsMsg:
+		m.agentsLoading = false
+		m.agentsAt = m.now()
+		if x.err == nil {
+			m.data.Agents = x.agents
+			m.rebuild()
+		}
+	case localMsg:
+		m.localLoading = false
+		m.localAt = m.now()
+		m.data.State, m.data.Inbox = x.st, x.inbox
+		m.rebuild()
+	case gcMsg:
+		m.gcLoading, m.gcLoaded = false, true
+		m.gcErr, m.gcTook = "", x.took
+		if x.err != nil {
+			m.gcErr = x.err.Error()
+			return nil
+		}
+		m.gc = x.items
+		m.gcCur = min(m.gcCur, max(0, len(m.gc)-1))
+		for id := range m.gcMarked {
+			if !m.gcHas(id) {
+				delete(m.gcMarked, id)
+			}
+		}
+	case detailResult:
+		if d, ok := m.details[x.id]; ok {
+			x.apply(d)
+		}
+	case doneMsg:
+		switch {
+		case x.err != nil && x.text != "":
+			m.status = x.text + "; " + x.err.Error()
+		case x.err != nil:
+			m.status = x.err.Error()
+		default:
+			m.status = x.text
+		}
+		if x.quit && x.err == nil {
+			m.quit = true
+		}
+		var cmds []cmd
+		if x.reload {
+			cmds = append(cmds, m.loadBeads())
+		}
+		if x.gc {
+			m.gcLoaded = false
+		}
+		return cmds
+	}
+	return nil
+}
+
+func (m *board) gcHas(id string) bool {
+	for _, it := range m.gc {
+		if it.bead.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// edit applies one key to a line being typed: it reports whether Enter
+// submitted it and whether Esc dropped it.
+func edit(buf *string, k string) (submit, cancel bool) {
+	switch k {
+	case "\r", "\n":
+		return true, false
+	case "\x1b":
+		return false, true
+	case "\x7f", "\b":
+		if r := []rune(*buf); len(r) > 0 {
+			*buf = string(r[:len(r)-1])
+		}
+	case "\x15": // ctrl-u
+		*buf = ""
+	case "\x17": // ctrl-w
+		s := strings.TrimRight(*buf, " ")
+		*buf = s[:strings.LastIndex(s, " ")+1]
+	default:
+		if r, _ := utf8.DecodeRuneInString(k); len(k) > 0 && unicode.IsPrint(r) && utf8.RuneCountInString(k) == 1 {
+			*buf += k
+		}
+	}
+	return false, false
+}
+
+// key handles one keypress and returns the work it starts.
+func (m *board) key(k string) []cmd {
+	if k == "\x03" {
+		m.quit = true
+		return nil
+	}
+	if a := m.ask; a != nil {
+		if a.text {
+			submit, cancel := edit(&a.buf, k)
+			switch {
+			case cancel:
+				m.ask, m.status = nil, "cancelled"
+			case submit && strings.TrimSpace(a.buf) == "":
+				m.ask, m.status = nil, "cancelled: nothing typed"
+			case submit:
+				m.ask = nil
+				return a.then(strings.TrimSpace(a.buf))
+			}
+			return nil
+		}
+		m.ask = nil
+		if len(k) == 1 && strings.Contains(a.keys, k) {
+			return a.then(k)
+		}
+		m.status = "cancelled"
+		return nil
+	}
+	if m.filter.typing {
+		if m.filter.key(k) {
+			m.rows = filterRows(m.all, m.filter.query)
+			m.cur = nextSelectable(m.rows, 0, 1)
+		}
+		return nil
+	}
+	m.status = ""
+	switch m.view {
+	case viewHelp:
+		m.view = m.back
+		return nil
+	case viewGC:
+		return m.gcKey(k)
+	case viewDetail:
+		if m.detailKey(k) {
+			return nil
+		}
+	}
+	return m.listKey(k)
+}
+
+func (m *board) detailKey(k string) bool {
+	switch k {
+	case "\x1b", "q", " ", "v":
+		m.view = viewList
+	case "J", "\x1b[6~":
+		m.scroll += 5
+	case "K", "\x1b[5~":
+		m.scroll = max(0, m.scroll-5)
+	default:
+		return false
+	}
+	return true
+}
+
+// move steps the selection by n selectable rows, stopping at either end.
+func (m *board) move(n int) {
+	dir := 1
+	if n < 0 {
+		dir, n = -1, -n
+	}
+	for ; n > 0; n-- {
+		i := nextSelectable(m.rows, m.cur+dir, dir)
+		if i < 0 {
+			return
+		}
+		m.cur = i
+	}
+}
+
+// jumpSection moves to the first row of the next (dir 1) or previous section.
+func (m *board) jumpSection(dir int) {
+	// The current section's header.
+	h := m.cur
+	for h > 0 && m.rows[h].header == "" {
+		h--
+	}
+	target := -1
+	if dir > 0 {
+		for i := h + 1; i < len(m.rows); i++ {
+			if m.rows[i].header != "" {
+				target = i
+				break
+			}
+		}
+	} else {
+		for i := h - 1; i >= 0; i-- {
+			if m.rows[i].header != "" {
+				target = i
+				break
+			}
+		}
+	}
+	if target < 0 {
+		return
+	}
+	if i := nextSelectable(m.rows, target, 1); i >= 0 {
+		m.cur = i
+	}
+}
+
+// page is how far ctrl-d and ctrl-u move.
+const page = 10
+
+func (m *board) listKey(k string) []cmd {
+	switch k {
+	case "q", "\x1b":
+		// Esc clears a kept filter before it closes the board.
+		if k == "\x1b" && m.filter.query != "" {
+			m.filter.query = ""
+			m.rebuild()
+			return nil
+		}
+		m.quit = true
+		return nil
+	case "?":
+		m.back, m.view = m.view, viewHelp
+		return nil
+	case "j", "\x1b[B":
+		m.move(1)
+		return nil
+	case "k", "\x1b[A":
+		m.move(-1)
+		return nil
+	case "\x04", "\x1b[6~":
+		m.move(page)
+		return nil
+	case "\x15", "\x1b[5~":
+		m.move(-page)
+		return nil
+	case "g", "\x1b[H":
+		m.cur = nextSelectable(m.rows, 0, 1)
+		return nil
+	case "G", "\x1b[F":
+		m.cur = nextSelectable(m.rows, len(m.rows)-1, -1)
+		return nil
+	case "]", "\t":
+		m.jumpSection(1)
+		return nil
+	case "[", "\x1b[Z":
+		m.jumpSection(-1)
+		return nil
+	case "/":
+		m.filter.typing = true
+		return nil
+	case ":":
+		m.ask = &ask{prompt: "go to bead: ", text: true, then: func(id string) []cmd { m.jump(id); return nil }}
+		return nil
+	case "s":
+		m.sort = (m.sort + 1) % 3
+		m.rebuild()
+		m.status = "sorted by " + m.sort.String()
+		return nil
+	case "r":
+		m.status = "refreshing…"
+		m.agentsAt, m.localAt = time.Time{}, time.Time{}
+		return append(m.tick(), m.loadBeads())
+	case "T":
+		m.view = viewGC
+		return m.tick()
+	case " ", "v":
+		if m.sel() != nil {
+			m.view = viewDetail
+			return m.loadDetail()
+		}
+		return nil
+	}
+	if r := m.sel(); r != nil {
+		return m.beadKey(k, *r)
+	}
+	return nil
+}
+
+// jump selects the bead whose id is id, else ends with it, else contains it,
+// clearing a filter that hides it.
+func (m *board) jump(id string) {
+	id = strings.ToLower(id)
+	find := func(rows []boardRow) int {
+		for _, match := range []func(string) bool{
+			func(s string) bool { return s == id },
+			func(s string) bool { return strings.HasSuffix(s, id) },
+			func(s string) bool { return strings.Contains(s, id) },
+		} {
+			for i, r := range rows {
+				if r.header == "" && match(strings.ToLower(r.bead.ID)) {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+	if i := find(m.rows); i >= 0 {
+		m.cur = i
+		return
+	}
+	if i := find(m.all); i >= 0 {
+		m.filter.query = ""
+		m.rows = m.all
+		m.cur = i
+		return
+	}
+	m.status = "no open bead matches " + id
+}
+
+// beadKey is the keys that act on the selected bead.
+func (m *board) beadKey(k string, r boardRow) []cmd {
+	id := r.bead.ID
+	switch k {
+	case "\r":
+		if r.agent != nil {
+			name := r.agent.Name
+			return []cmd{func() msg { return doneMsg{err: m.env.focus(name), quit: true} }}
+		}
+		m.dispatchAsk(r, "")
+	case "c", "x", "m":
+		m.dispatchAsk(r, map[string]string{"c": "claude", "x": "codex", "m": "muse"}[k])
+	case "R":
+		if r.agent != nil {
+			m.status = id + " already has an agent (" + r.agent.Name + ")"
+			return nil
+		}
+		m.ask = confirm("resume "+id+"'s last agent conversation in its worktree?", func() []cmd {
+			m.status = "resuming " + id + "…"
+			return []cmd{func() msg {
+				text, err := m.env.resume(id)
+				return doneMsg{text: text, err: err, reload: true}
+			}}
+		})
+	case "a":
+		m.ask = &ask{prompt: "note on " + id + ": ", text: true, then: func(text string) []cmd {
+			m.local(id, func(b *Bead) { b.Notes = strings.TrimLeft(b.Notes+"\n"+text, "\n") })
+			return []cmd{func() msg {
+				return doneMsg{text: "noted on " + id, err: m.env.note(id, text), reload: true}
+			}}
+		}}
+	case "A":
+		m.answer(r)
+	case "n":
+		on := !r.bead.HasLabel(LabelNext)
+		m.local(id, func(b *Bead) {
+			if on {
+				b.Labels = append(b.Labels, LabelNext)
+			} else {
+				b.Labels = without(b.Labels, LabelNext)
+			}
+		})
+		word := map[bool]string{true: "labelled next", false: "unlabelled next"}[on]
+		return []cmd{func() msg {
+			return doneMsg{text: id + " " + word, err: m.env.setLabel(id, LabelNext, on), reload: true}
+		}}
+	case "S":
+		statuses := map[string]string{"o": StatusOpen, "i": StatusInProgress, "b": StatusBlocked, "m": StatusNeedsMe}
+		m.ask = &ask{prompt: id + " status: o open · i in_progress · b blocked · m needs_me", keys: "oibm", then: func(a string) []cmd {
+			status := statuses[a]
+			if status == r.bead.Status {
+				m.status = id + " is already " + status
+				return nil
+			}
+			m.local(id, func(b *Bead) { b.Status = status })
+			return []cmd{func() msg {
+				return doneMsg{text: id + " → " + status, err: m.env.setStatus(id, status), reload: true}
+			}}
+		}}
+	case "P":
+		m.ask = &ask{prompt: fmt.Sprintf("%s priority (now P%d): 0-4", id, r.bead.Priority), keys: "01234", then: func(a string) []cmd {
+			p := int(a[0] - '0')
+			m.local(id, func(b *Bead) { b.Priority = p })
+			return []cmd{func() msg {
+				return doneMsg{text: fmt.Sprintf("%s → P%d", id, p), err: m.env.setPriority(id, p), reload: true}
+			}}
+		}}
+	case "+":
+		m.ask = &ask{prompt: "child task of " + id + ", title: ", text: true, then: func(title string) []cmd {
+			m.ask = confirm(fmt.Sprintf("create task %q under %s (P%d)?", title, id, r.bead.Priority), func() []cmd {
+				return []cmd{func() msg {
+					child, err := m.env.child(r.bead, title)
+					return doneMsg{text: "created " + child + " under " + id, err: err, reload: true}
+				}}
+			})
+			return nil
+		}}
+	case "C":
+		m.ask = &ask{prompt: "close " + id + ", reason: ", text: true, then: func(reason string) []cmd {
+			m.ask = confirm(fmt.Sprintf("close %s: %q?", id, reason), func() []cmd {
+				return []cmd{func() msg {
+					return doneMsg{text: "closed " + id, err: m.env.close(id, reason), reload: true}
+				}}
+			})
+			return nil
+		}}
+	case "o":
+		if len(r.prs) == 0 {
+			m.status = "no PR known"
+			return nil
+		}
+		m.status = m.env.open(r.prs[0].URL)
+	case "l":
+		m.status = openLinear(m.cfg, r)
+	case "y":
+		m.status = m.copied(id, "copied "+id)
+	case "p":
+		if r.run != "" {
+			m.status = m.copied(r.run, "copied the command")
+		}
+	case "b":
+		m.handoff = func() error { return pageBead(id) }
+	}
+	return nil
+}
+
+func (m *board) copied(text, done string) string {
+	if err := m.env.copy(text); err != nil {
+		return "wl-copy: " + err.Error()
+	}
+	return done
+}
+
+// dispatchAsk confirms, then starts a worker on the bead and closes the board
+// on the new workspace, which dispatch focuses.
+func (m *board) dispatchAsk(r boardRow, kind string) {
+	id := r.bead.ID
+	who := kind
+	if who == "" {
+		who = "an agent"
+	}
+	m.ask = confirm(fmt.Sprintf("start %s on %s in its own worktree?", who, id), func() []cmd {
+		m.status = "starting " + id + "…"
+		return []cmd{func() msg {
+			text, err := m.env.dispatch(id, kind)
+			return doneMsg{text: text, err: err, reload: true, quit: true}
+		}}
 	})
-	var rows []boardRow
-	rows = append(rows, boardRow{header: "threads"})
-	for _, th := range threads {
-		r := boardRow{bead: th.Bead, agent: th.Agent, line: stateLine(th), color: groupColor(classify(th)), run: runCommand(th),
-			prs: linkedPRs(st, th.Bead), linear: th.Linear, moves: linearMoves([]Thread{th})}
-		agent, pr := "", ""
-		if th.Agent != nil {
-			agent = th.Agent.Name
-		}
-		if th.PR != nil {
-			pr = fmt.Sprintf("#%d %s", th.PR.Number, th.PR.URL)
-		}
-		r.search = searchText("threads", th.Bead.ID, th.Bead.Title, agent, r.line, pr, th.Linear)
-		rows = append(rows, r)
+}
+
+// answer prompts the bead's worker with the user's reply. Only an idle (or
+// done) agent is prompted: a working one is mid-turn, and a blocked one is at
+// a tool-approval prompt, which the board must never answer.
+func (m *board) answer(r boardRow) {
+	id := r.bead.ID
+	if why := unanswerable(r.agent); why != "" {
+		m.status = id + ": " + why
+		return
 	}
-	rows = append(rows, boardRow{header: "next"})
-	seen := map[string]bool{}
-	for _, b := range next {
-		seen[b.ID] = true
-		line := fmt.Sprintf("P%d %s", b.Priority, b.Type)
-		rows = append(rows, boardRow{bead: b, line: line, color: ansiCyan, search: searchText("next", b.ID, b.Title, line),
-			prs: linkedPRs(st, b), linear: linearKey(b, cfg.LinearPrefixes)})
+	name := r.agent.Name
+	m.ask = &ask{prompt: "answer " + name + ": ", text: true, then: func(text string) []cmd {
+		m.ask = confirm(fmt.Sprintf("send to %s: %q?", name, shortTitle(text, 50)), func() []cmd {
+			return []cmd{func() msg {
+				// The agent may have moved on while the answer was typed.
+				agents, err := m.env.agents()
+				if err != nil {
+					return doneMsg{err: err}
+				}
+				var now *Agent
+				for i := range agents {
+					if agents[i].Name == name {
+						now = &agents[i]
+					}
+				}
+				if why := unanswerable(now); why != "" {
+					return doneMsg{err: fmt.Errorf("not sent: %s", why)}
+				}
+				return doneMsg{text: "sent to " + name, err: m.env.prompt(name, text)}
+			}}
+		})
+		return nil
+	}}
+}
+
+// unanswerable is why an agent can't be prompted now, "" when it can.
+func unanswerable(a *Agent) string {
+	switch {
+	case a == nil:
+		return "no agent: start one (enter) or resume it (R)"
+	case a.Status == "blocked":
+		return a.Name + " is at an approval prompt; answer it in its pane (enter focuses)"
+	case !agentReady(a):
+		return a.Name + " is " + a.Status + "; answer once it stops"
 	}
-	rows = append(rows, boardRow{header: "ready"})
-	n := 0
-	for _, b := range ready {
-		if seen[b.ID] || b.Status != StatusOpen || n >= 25 {
-			continue
+	return ""
+}
+
+// local changes the bead in place so the board shows an action at once; the
+// reload that follows replaces it with what bd has.
+func (m *board) local(id string, f func(*Bead)) {
+	for i := range m.data.Beads {
+		if m.data.Beads[i].ID == id {
+			f(&m.data.Beads[i])
 		}
-		n++
-		line := fmt.Sprintf("P%d %s", b.Priority, b.Type)
-		rows = append(rows, boardRow{bead: b, line: line, color: ansiDim, search: searchText("ready", b.ID, b.Title, line),
-			prs: linkedPRs(st, b), linear: linearKey(b, cfg.LinearPrefixes)})
 	}
-	return rows
+	m.rebuild()
+}
+
+func without(list []string, x string) []string {
+	var out []string
+	for _, s := range list {
+		if s != x {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// gcTargets is the marked items, or the selected one when none are marked.
+func (m *board) gcTargets() []gcItem {
+	var out []gcItem
+	for _, it := range m.gc {
+		if m.gcMarked[it.bead.ID] {
+			out = append(out, it)
+		}
+	}
+	if len(out) == 0 && m.gcCur < len(m.gc) {
+		out = append(out, m.gc[m.gcCur])
+	}
+	return out
+}
+
+func (m *board) gcKey(k string) []cmd {
+	switch k {
+	case "q", "\x1b", "T":
+		m.view = viewList
+	case "?":
+		m.back, m.view = viewGC, viewHelp
+	case "j", "\x1b[B":
+		m.gcCur = min(m.gcCur+1, max(0, len(m.gc)-1))
+	case "k", "\x1b[A":
+		m.gcCur = max(m.gcCur-1, 0)
+	case "g":
+		m.gcCur = 0
+	case "G":
+		m.gcCur = max(0, len(m.gc)-1)
+	case " ":
+		if m.gcCur < len(m.gc) {
+			id := m.gc[m.gcCur].bead.ID
+			if m.gcMarked[id] {
+				delete(m.gcMarked, id)
+			} else {
+				m.gcMarked[id] = true
+			}
+			m.gcCur = min(m.gcCur+1, max(0, len(m.gc)-1))
+		}
+	case "*":
+		if len(m.gcMarked) > 0 {
+			m.gcMarked = map[string]bool{}
+		} else {
+			for _, it := range m.gc {
+				m.gcMarked[it.bead.ID] = true
+			}
+		}
+	case "r":
+		m.gcLoaded = false
+		return m.tick()
+	case "\r":
+		if m.gcCur < len(m.gc) && m.gc[m.gcCur].agent != "" {
+			name := m.gc[m.gcCur].agent
+			return []cmd{func() msg { return doneMsg{err: m.env.focus(name), quit: true} }}
+		}
+	case "C":
+		items := pick(m.gcTargets(), func(it gcItem) bool { return it.canClose })
+		if m.none(items, "close") {
+			return nil
+		}
+		m.ask = &ask{prompt: "close " + itemIDs(items) + ", reason: ", text: true, then: func(reason string) []cmd {
+			m.ask = confirm(fmt.Sprintf("close %s: %q?", itemIDs(items), reason), func() []cmd {
+				return m.gcRun("closed", items, func(it gcItem) (string, error) { return "", m.env.close(it.bead.ID, reason) })
+			})
+			return nil
+		}}
+	case "u":
+		items := pick(m.gcTargets(), func(it gcItem) bool { return it.canRelease })
+		if m.none(items, "release") {
+			return nil
+		}
+		now := m.now()
+		m.ask = confirm("release "+itemIDs(items)+" back to open (a note, then status open)?", func() []cmd {
+			return m.gcRun("released", items, func(it gcItem) (string, error) {
+				return "", m.env.release(it.bead, daysSince(it.bead.UpdatedAt, now))
+			})
+		})
+	case "d":
+		items := pick(m.gcTargets(), func(it gcItem) bool { return it.canResolve })
+		if m.none(items, "resolve") {
+			return nil
+		}
+		m.ask = confirm("quartermaster resolve "+itemIDs(items)+" (remove the worktree, and the branch once merged)?", func() []cmd {
+			return m.gcRun("resolved", items, func(it gcItem) (string, error) { return m.env.resolve(it.bead.ID) })
+		})
+	case "i":
+		items := pick(m.gcTargets(), func(it gcItem) bool { return it.canDismiss })
+		if m.none(items, "dismiss") {
+			return nil
+		}
+		return m.gcRun("dismissed", items, func(it gcItem) (string, error) { return "", m.env.inboxDone(it.bead.ID) })
+	}
+	return nil
+}
+
+func (m *board) none(items []gcItem, what string) bool {
+	if len(items) > 0 {
+		return false
+	}
+	m.status = "nothing to " + what + " in the selection"
+	return true
+}
+
+// gcRun applies do to each item in turn (bd serializes them anyway) and
+// reports what it did and what failed.
+func (m *board) gcRun(done string, items []gcItem, do func(gcItem) (string, error)) []cmd {
+	for _, it := range items {
+		delete(m.gcMarked, it.bead.ID)
+	}
+	m.status = fmt.Sprintf("%s: working on %d…", done, len(items))
+	return []cmd{func() msg {
+		var ok, errs []string
+		for _, it := range items {
+			if _, err := do(it); err != nil {
+				errs = append(errs, it.bead.ID+": "+err.Error())
+				continue
+			}
+			ok = append(ok, it.bead.ID)
+		}
+		text := fmt.Sprintf("%s %d", done, len(ok))
+		if len(ok) > 0 && len(ok) <= 3 {
+			text = done + " " + strings.Join(ok, ", ")
+		}
+		var err error
+		if len(errs) > 0 {
+			err = fmt.Errorf("%d failed: %s", len(errs), strings.Join(errs, "; "))
+		}
+		return doneMsg{text: text, err: err, reload: true, gc: true}
+	}}
+}
+
+func pick(items []gcItem, ok func(gcItem) bool) []gcItem {
+	var out []gcItem
+	for _, it := range items {
+		if ok(it) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+func itemIDs(items []gcItem) string {
+	var s []string
+	for _, it := range items {
+		s = append(s, it.bead.ID)
+	}
+	if len(s) > 3 {
+		return fmt.Sprintf("%s and %d more", strings.Join(s[:3], ", "), len(s)-3)
+	}
+	return strings.Join(s, ", ")
 }
 
 // filterRows keeps the rows whose search text contains every word of query,
@@ -166,29 +1116,17 @@ type boardFilter struct {
 // key applies one keypress while typing and reports whether the query changed.
 // Enter keeps the query and returns to navigation; Esc clears it.
 func (f *boardFilter) key(k string) bool {
-	switch k {
-	case "\r", "\n":
+	before := f.query
+	submit, cancel := edit(&f.query, k)
+	switch {
+	case submit:
 		f.typing = false
-		return false
-	case "\x1b":
+	case cancel:
 		f.typing = false
 		f.query = ""
 		return true
-	case "\x7f", "\b":
-		if r := []rune(f.query); len(r) > 0 {
-			f.query = string(r[:len(r)-1])
-			return true
-		}
-		return false
-	case "\x15": // ctrl-u
-		f.query = ""
-		return true
 	}
-	if r, _ := utf8.DecodeRuneInString(k); len(k) == 0 || !unicode.IsPrint(r) || utf8.RuneCountInString(k) != 1 {
-		return false // arrows and other controls
-	}
-	f.query += k
-	return true
+	return f.query != before
 }
 
 // splitKeys cuts one read's bytes into keypresses: a read can hold several
@@ -241,6 +1179,22 @@ func waitInput(fd, timeout int) (bool, error) {
 	}
 }
 
+// startBoard is the board's first state: beads from the last board's cache,
+// so the first paint waits on nothing slow, and agents and ticker state read
+// now, since both are cheap. The first tick loads beads from bd.
+func startBoard(cfg Config, env boardEnv, cache string, now func() time.Time) *board {
+	beads, at := loadBoardCache(cache)
+	st, inbox := env.local()
+	m := newBoard(cfg, env, boardData{Beads: beads, BeadsAt: at, State: st, Inbox: inbox}, now)
+	m.localAt = now()
+	if agents, err := env.agents(); err == nil {
+		m.data.Agents = agents
+		m.agentsAt = now()
+		m.rebuild()
+	}
+	return m
+}
+
 func runBoard(cfg Config) error {
 	fd := int(os.Stdin.Fd())
 	old, err := term.MakeRaw(fd)
@@ -251,233 +1205,69 @@ func runBoard(cfg Config) error {
 	fmt.Print("\x1b[?1049h\x1b[?25l")
 	defer fmt.Print("\x1b[?25h\x1b[?1049l")
 
-	// The same server loadBoard reads, so focus and dispatch act on the agents shown.
+	// The same server the ticker reads, so focus and dispatch act on the agents shown.
 	h := newHerdr().on(cfg.coordSocket())
-	all, err := loadBoard(cfg)
-	status := ""
-	if err != nil {
-		status = err.Error()
-	}
-	// rows is what's shown and what selection and actions index: all, narrowed
-	// by the '/' filter.
-	var filter boardFilter
-	rows := all
-	cur := nextSelectable(rows, 0, 1)
-	refilter := func() {
-		rows = filterRows(all, filter.query)
-		cur = nextSelectable(rows, 0, 1)
-	}
-	// The detail pane, while open, shows the selected bead and follows the
-	// selection. details caches each bead's slow lookups until a refresh;
-	// pending counts those still running.
-	showDetail := false
-	// scroll is how far the pane is scrolled down; it starts over on each bead.
-	scroll, scrolledOn := 0, ""
-	details := map[string]*beadDetail{}
-	results := make(chan detailResult, 16)
-	pending := 0
-	sel := func() *boardRow {
-		if cur < 0 || cur >= len(rows) {
-			return nil
-		}
-		return &rows[cur]
-	}
-	detail := func() *beadDetail {
-		r := sel()
-		if !showDetail || r == nil {
-			return nil
-		}
-		d, ok := details[r.bead.ID]
-		if !ok {
-			d = &beadDetail{inbox: beadInbox(r.bead.ID)}
-			details[r.bead.ID] = d
-			pending += loadDetail(h, *r, results)
-		}
-		return d
-	}
-	draw := func() {
-		var lines []styledLine
-		if d := detail(); d != nil {
-			if id := sel().bead.ID; id != scrolledOn {
-				scroll, scrolledOn = 0, id
+	m := startBoard(cfg, liveBoardEnv(cfg, h), boardCachePath(), time.Now)
+
+	results := make(chan msg, 64)
+	start := func(cmds []cmd) {
+		for _, c := range cmds {
+			if c != nil {
+				go func() { results <- c() }()
 			}
-			lines = detailLines(*sel(), d, termWidth())
-			scroll = min(scroll, len(lines)-1)
-			lines = lines[scroll:]
 		}
-		drawBoard(rows, cur, status, filter, lines)
 	}
 	buf := make([]byte, 256)
-	var keys []string
 	var partial []byte
-	for {
-		if len(keys) == 0 {
-			draw()
-			timeout := -1
-			if pending > 0 {
-				timeout = 100
-			}
-			ready, err := waitInput(fd, timeout)
-			if err != nil {
-				return err
-			}
-			for drained := false; !drained; {
-				select {
-				case res := <-results:
-					pending--
-					if d, ok := details[res.id]; ok {
-						res.apply(d)
-					}
-				default:
-					drained = true
-				}
-			}
-			if !ready {
-				continue
-			}
-			n, err := os.Stdin.Read(buf)
-			if err != nil {
-				return err
-			}
-			keys, partial = splitKeys(append(partial, buf[:n]...))
-			status = ""
-			if len(keys) == 0 {
-				continue
+	for !m.quit {
+		start(m.tick())
+		w, hgt, err := term.GetSize(int(os.Stdout.Fd()))
+		if err != nil {
+			w, hgt = 100, 30
+		}
+		fmt.Print(renderBoard(m, w, hgt))
+		// Wake at least each second: ages tick and refreshes come due.
+		ready, err := waitInput(fd, 1000)
+		if err != nil {
+			return err
+		}
+		for drained := false; !drained; {
+			select {
+			case x := <-results:
+				start(m.apply(x))
+			default:
+				drained = true
 			}
 		}
-		key := keys[0]
-		keys = keys[1:]
-		if key == "\x03" {
-			return nil
-		}
-		if filter.typing {
-			if filter.key(key) {
-				refilter()
-			}
+		if !ready {
 			continue
 		}
-		reload := func() {
-			if r, err := loadBoard(cfg); err == nil {
-				all = r
-				rows = filterRows(all, filter.query)
-				if cur >= len(rows) || cur < 0 || rows[cur].header != "" {
-					cur = nextSelectable(rows, 0, 1)
-				}
-				// Results still running land on no entry and are dropped.
-				details = map[string]*beadDetail{}
-			} else {
-				status = err.Error()
-			}
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			return err
 		}
-		if showDetail {
-			handled := true
-			switch key {
-			case "\x1b", "q", " ", "v":
-				showDetail = false
-			case "J", "\x1b[6~":
-				scroll += 5
-			case "K", "\x1b[5~":
-				scroll = max(0, scroll-5)
-			case "o":
-				if r := sel(); r != nil && len(r.prs) > 0 {
-					status = openURL(r.prs[0].URL)
-				} else {
-					status = "no PR known"
+		var keys []string
+		keys, partial = splitKeys(append(partial, buf[:n]...))
+		for _, k := range keys {
+			start(m.key(k))
+			if f := m.handoff; f != nil {
+				m.handoff = nil
+				fmt.Print("\x1b[?25h\x1b[?1049l")
+				term.Restore(fd, old)
+				if err := f(); err != nil {
+					m.status = err.Error()
 				}
-			case "l":
-				if r := sel(); r != nil {
-					status = openLinear(cfg, *r)
+				if _, err := term.MakeRaw(fd); err != nil {
+					return err
 				}
-			case "s":
-				if r := sel(); r != nil {
-					fmt.Print("\x1b[?25h\x1b[?1049l")
-					term.Restore(fd, old)
-					if err := pageBead(r.bead.ID); err != nil {
-						status = err.Error()
-					}
-					if _, err := term.MakeRaw(fd); err != nil {
-						return err
-					}
-					fmt.Print("\x1b[?1049h\x1b[?25l")
-				}
-			default:
-				handled = false
+				fmt.Print("\x1b[?1049h\x1b[?25l")
 			}
-			if handled {
-				continue
-			}
-		}
-		switch key {
-		case " ", "v":
-			if sel() != nil {
-				showDetail = true
-			}
-		case "/":
-			filter.typing = true
-		case "\x1b":
-			// Esc clears a kept filter before it closes the board.
-			if filter.query == "" {
-				return nil
-			}
-			filter.query = ""
-			refilter()
-		case "q":
-			return nil
-		case "j", "\x1b[B":
-			if i := nextSelectable(rows, cur+1, 1); i >= 0 {
-				cur = i
-			}
-		case "k", "\x1b[A":
-			if i := nextSelectable(rows, cur-1, -1); i >= 0 {
-				cur = i
-			}
-		case "r":
-			reload()
-		case "\r", "c", "x", "m":
-			r := sel()
-			if r == nil {
-				continue
-			}
-			if key == "\r" && r.agent != nil {
-				_ = h.Focus(r.agent.Name)
-				return nil
-			}
-			kind := ""
-			switch key {
-			case "c":
-				kind = "claude"
-			case "x":
-				kind = "codex"
-			case "m":
-				kind = "muse"
-			}
-			status = "starting " + r.bead.ID + "…"
-			drawBoard(rows, cur, status, filter, nil)
-			msg, err := dispatch(cfg, h, r.bead.ID, DispatchOpts{Kind: kind, Focus: true})
-			if err != nil {
-				status = err.Error()
-				continue
-			}
-			_ = msg
-			return nil
-		case "n":
-			if r := sel(); r != nil {
-				on := !r.bead.HasLabel(LabelNext)
-				if err := (Beads{}).SetLabel(r.bead.ID, LabelNext, on); err != nil {
-					status = err.Error()
-				}
-				reload()
-			}
-		case "y":
-			if r := sel(); r != nil {
-				status = copyText(r.bead.ID, "copied "+r.bead.ID)
-			}
-		case "p":
-			if r := sel(); r != nil && r.run != "" {
-				status = copyText(r.run, "copied the command")
+			if m.quit {
+				break
 			}
 		}
 	}
+	return nil
 }
 
 // openLinear opens the row's Linear issue in the browser.
@@ -492,13 +1282,6 @@ func openLinear(cfg Config, r boardRow) string {
 	return openURL(u)
 }
 
-func copyText(text, done string) string {
-	if err := exec.Command("wl-copy", text).Run(); err != nil {
-		return "wl-copy: " + err.Error()
-	}
-	return done
-}
-
 // statusFor is the status line: the last action's message, else the command
 // the selected thread is waiting on the user to run.
 func statusFor(rows []boardRow, cur int, status string) string {
@@ -506,97 +1289,6 @@ func statusFor(rows []boardRow, cur int, status string) string {
 		return status
 	}
 	return "run: " + rows[cur].run + "  (p copies)"
-}
-
-func termWidth() int {
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		return 100
-	}
-	return w
-}
-
-func drawBoard(rows []boardRow, cur int, status string, filter boardFilter, detail []styledLine) {
-	w, hgt, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		w, hgt = 100, 30
-	}
-	fmt.Print(renderBoard(rows, cur, status, filter, detail, w, hgt))
-}
-
-// renderBoard is the whole screen for a w×hgt terminal. With detail lines the
-// list shrinks to a third of the body, around the selection, and the detail
-// pane fills the rest.
-func renderBoard(rows []boardRow, cur int, status string, filter boardFilter, detail []styledLine, w, hgt int) string {
-	var s strings.Builder
-	s.WriteString("\x1b[H\x1b[2J")
-	body := hgt - 3
-	if line := filterLine(filter); line != "" {
-		fmt.Fprintf(&s, "%s%s%s\r\n", ansiCyan, fit(line, w), ansiReset)
-		body--
-	}
-	listH := body
-	if detail != nil {
-		listH = min(len(rows), max(3, body/3))
-	}
-	start := 0
-	if cur >= listH {
-		start = cur - listH + 1
-	}
-	stateW := min(34, max(12, w/3))
-	titleW := w - 2 - 17 - stateW - 1
-	for i := start; i < len(rows) && i-start < listH; i++ {
-		r := rows[i]
-		if r.header != "" {
-			fmt.Fprintf(&s, "%s%s%s\r\n", ansiBold, fit(r.header, w), ansiReset)
-			continue
-		}
-		id := fit(r.bead.ID, 16) + " "
-		state := fit(r.line, stateW)
-		title := ""
-		if titleW >= 8 {
-			title = " " + fit(r.bead.Title, titleW)
-		}
-		if i == cur {
-			fmt.Fprintf(&s, "%s  %s%s%s%s\r\n", ansiInvert, id, state, title, ansiReset)
-		} else {
-			fmt.Fprintf(&s, "  %s%s%s%s%s\r\n", id, r.color, state, ansiReset, title)
-		}
-	}
-	if detail != nil {
-		fmt.Fprintf(&s, "%s%s%s\r\n", ansiDim, strings.Repeat("─", max(w, 1)), ansiReset)
-		room := body - min(listH, len(rows)-start) - 1
-		if len(detail) > room && room > 0 {
-			detail = append(detail[:room-1:room-1], styledLine{"… more below (s shows the bead in full)", ansiDim})
-		}
-		for i, l := range detail {
-			if i >= room {
-				break
-			}
-			fmt.Fprintf(&s, "%s%s%s\r\n", l.style, fit(l.text, w), ansiReset)
-		}
-	}
-	fmt.Fprintf(&s, "\x1b[%d;1H%s%s%s", hgt-1, ansiRed, fit(statusFor(rows, cur, status), w-1), ansiReset)
-	hint := "↵ focus/start  space detail  c claude  x codex  m muse  n next  y copy  p copy command  / filter  r refresh  q quit"
-	switch {
-	case filter.typing:
-		hint = "type to filter  ↵ keep  esc clear  ⌫ edit"
-	case detail != nil:
-		hint = "j/k move  J/K scroll  o open PR  l Linear  s bd show  ↵ focus/start  esc/space back"
-	}
-	fmt.Fprintf(&s, "\x1b[%d;1H%s%s%s", hgt, ansiDim, fit(hint, w-1), ansiReset)
-	return s.String()
-}
-
-// filterLine is the header shown while a filter is being typed or kept.
-func filterLine(f boardFilter) string {
-	switch {
-	case f.typing:
-		return "/" + f.query + "▏"
-	case f.query != "":
-		return "/" + f.query + "  (esc clears)"
-	}
-	return ""
 }
 
 // fit pads or cuts s to exactly n characters (runes, not bytes: the state

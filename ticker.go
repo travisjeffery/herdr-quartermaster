@@ -127,21 +127,27 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 	}
 	threads := make([]Thread, 0, len(active))
 	for _, b := range active {
-		th := Thread{Bead: b, Linear: linearKey(b, t.cfg.LinearPrefixes)}
-		if a, ok := byName[agentName(b.ID)]; ok {
-			th.Agent = &a
-		}
-		if pr, ok := st.PRs[b.ID]; ok {
-			th.PR = &pr
-			th.Checks = summarizeChecks(pr.Checks)
-			th.Reviews = reviewsNotBy(pr.Reviews, st.Login)
-			th.BotReviews = botReviews(pr.Reviews)
-		}
-		th.Merged = st.MergedPRs[b.ID]
-		th.Runs = st.Runs[b.ID]
-		threads = append(threads, th)
+		threads = append(threads, threadFor(t.cfg, *st, b, byName))
 	}
 	return threads, byName, nil
+}
+
+// threadFor joins one bead with its agent, by name, and what the last gh pass
+// knows of its PRs and runs.
+func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thread {
+	th := Thread{Bead: b, Linear: linearKey(b, cfg.LinearPrefixes)}
+	if a, ok := byName[agentName(b.ID)]; ok {
+		th.Agent = &a
+	}
+	if pr, ok := st.PRs[b.ID]; ok {
+		th.PR = &pr
+		th.Checks = summarizeChecks(pr.Checks)
+		th.Reviews = reviewsNotBy(pr.Reviews, st.Login)
+		th.BotReviews = botReviews(pr.Reviews)
+	}
+	th.Merged = st.MergedPRs[b.ID]
+	th.Runs = st.Runs[b.ID]
+	return th
 }
 
 func (t Ticker) refreshPRs(st *TickerState, active []Bead) {

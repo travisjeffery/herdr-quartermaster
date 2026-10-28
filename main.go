@@ -41,7 +41,8 @@ Usage:
                                                        (default 7); --release reopens them
   quartermaster verify [<bead>...] [--yes]             stale beads with evidence they are already done; --yes
                                                        closes (with auto_close) or flags them like the ticker
-  quartermaster board                                  the board (runs as the plugin popup)
+  quartermaster board                                  every open bead by state: act on them, tidy up
+                                                       finished work (runs as the plugin popup)
   quartermaster ticker run|start|stop|status           the background loop: sidebar, PR follow-up, nudges
   quartermaster tick                                   one ticker pass in the foreground
   quartermaster configure [--repo PATH]                first-time setup: config, ~/.local/bin link, agent view

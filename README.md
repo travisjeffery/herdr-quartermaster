@@ -13,8 +13,9 @@ state shows in Herdr's sidebar.
 
 <sub>The coordinator in a Herdr workspace, with two workers' screens beside it
 and every thread's state in the sidebar. Made-up demo data and stand-in
-agents; [the board](docs/images/board.png) and [a thread's
-detail](docs/images/board-detail.png) look like this.</sub>
+agents; [the board](docs/images/board.png), [a thread's
+detail](docs/images/board-detail.png) and [the tidy
+view](docs/images/board-tidy.png) look like this.</sub>
 
 ## Why
 
@@ -285,7 +286,8 @@ once per head commit; otherwise the board shows
 State lives in `~/.local/state/quartermaster/`: `state.json` (the ticker's memory
 of each thread), `inbox/` and `inbox/done/` (events), `outbox/` (briefs
 waiting for an agent), `coordinator/` (its folder), `ticker.log`, and
-`digest.md` and `digest-state.json` (the last digest and what it remembers).
+`digest.md` and `digest-state.json` (the last digest and what it remembers),
+and `board.json` (the beads the board last loaded, for its first paint).
 
 ## A day with quartermaster
 
@@ -375,25 +377,67 @@ Nothing about the day lived in your head or a scratch file: every thread's
 state, question, PR and lesson is in beads, and the next morning starts with
 the same `quartermaster context`.
 
-The board (`prefix+j`) lists threads by state plus the beads you've marked
-`next` and other ready beads: `↵` focus or start, `c`/`x`/`m` start with Claude,
-Codex or Muse, `n` toggle `next`, `y` copy the id, `p` copy a thread's pending
-`RUN:` command, `/` filter, `r` refresh, `q` quit. `/` narrows the rows as
-you type, matching bead id, title, agent, state, PR number or repo and Linear
-key (every word, any case); `↵` keeps the filter and goes back to the keys
-above, which then act on the filtered rows, and `esc` clears it.
+## The board
 
-`space` (or `v`) opens a detail pane under the list for the selected bead, and
-it follows `j`/`k`: status, priority, labels, parent and the start of the
-description; the latest note in full (the needs_me question or `RUN:` command)
-with a count of earlier ones; every linked PR with its state, merge state,
-review decision and checks; the Linear key and where the issue should be; the
-agent's status and the last lines of its screen; and the bead's inbox items.
-PRs come from the ticker's last pass, so the pane never calls GitHub; the
-description and the agent's screen load in the background. In the pane `o`
-opens the PR, `l` the Linear issue (set `linear_workspace` unless the bead's
-notes link it), `s` shows `bd show` in `$PAGER`, `J`/`K` scroll, `↵` focuses
-or starts as in the list, and `esc`, `q` or `space` go back.
+![the board, driven by keys over made-up data: filter to a bead, open its detail with the question it waits on, answer the worker and confirm, then the tidy view with a stale claim marked](docs/images/board.gif)
+
+The board (`prefix+j`, or `quartermaster board`) is every bead that isn't
+closed, grouped by what it needs: needs you, merged, ready to merge, review,
+rolling out, checks failing, idle, working, blocked, no agent, then the beads
+labelled `next` and the backlog. Each row has the id, priority, the agent
+(`●` working, `○` idle, `!` at an approval prompt), how long since the bead
+last changed, its state with PR, checks and Linear key, and the title; the
+line under the list is the selected bead's latest note. It fits 80 columns.
+
+It opens instantly: the first paint is the beads the board last loaded
+(`board.json` in the state dir) with live agents, and the title says how old
+they are until bd answers. bd costs a second or more a call and calls queue
+behind every worker's, so the board makes one `bd list` per refresh, in the
+background: every 30 seconds and after each action. Agents refresh every two
+seconds. Nothing waits on GitHub; PRs and checks are the ticker's last pass.
+
+Moving around: `j`/`k`, `^d`/`^u` a page, `g`/`G` top and bottom, `]`/`[`
+(or `tab`) the next or previous section, `:` jumps to a bead by id, `s` sorts
+sections by priority, most recent or oldest activity, and `/` filters as you
+type, matching id, title, status, agent, state, PR, Linear key and labels
+(every word, any case); `↵` keeps the filter and `esc` clears it. `?` lists
+every key.
+
+Moving work forward, on the selected bead:
+
+- `a` adds a note; `n` toggles `next`; `S` sets the status, `P` the priority.
+- `A` answers the worker: you type the reply, confirm it, and it goes to the
+  agent with `herdr agent prompt`. Only an idle agent is prompted, checked
+  again just before sending. A worker at an approval prompt (`!`) is never
+  answered from the board; `↵` focuses it so you can.
+- `↵` focuses the bead's agent, or starts one; `c`/`x`/`m` start Claude, Codex
+  or Muse; `R` resumes an exited agent in its worktree.
+- `+` creates a child task; `C` closes the bead with a reason.
+- `y` copies the id, `p` a pending `RUN:` command, `o` opens the PR, `l` the
+  Linear issue (set `linear_workspace` unless the bead's notes link it), `b`
+  shows `bd show` in `$PAGER`.
+
+Starting, resuming, answering, creating and closing ask `y/n` first. Writes
+show on the board at once and the reload after them confirms what bd has.
+
+`space` (or `v`) opens a detail pane under the list that follows `j`/`k`:
+status, priority, labels, parent, created and updated, the description; what a
+needs_me bead waits on (the question and its options or the `RUN:` command, in
+full) and whether `A` can answer it; the note history; every linked PR with its
+merge state, review decision and checks; workflow runs; the Linear key and
+where the issue should be; the agent's last screen lines; and the bead's inbox
+items. `J`/`K` scroll it, `esc` closes it.
+
+`T` opens the tidy view: what looks finished, each with its evidence. Stale
+claims (in progress, untouched a week, no agent, worktree or PR), beads the
+verify pass flagged as likely done or closed itself, and closed beads still
+holding a worktree or an agent, with the worktree's path, branch and anything
+that makes removing it unsafe (dirty, unpushed commits, an agent inside).
+`space` marks items and `*` marks all; `C` closes them with a reason, `u`
+releases stale claims back to open (with a note), `d` runs `quartermaster
+resolve` (never `--force`; a worktree that isn't safe to remove is refused),
+and `i` marks their inbox items handled. Each action applies to the marked
+items it fits, or the selected one, and confirms first.
 
 ## Getting started
 
@@ -724,7 +768,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster report [--since 24h\|7d\|DATE]` | Markdown summary of what shipped, what's in flight and what needs you. |
 | `quartermaster digest [--deliver T,...] [--always]` | Every open bead by state and what changed since the last run, written to `digest.md`; notifies when something changed or needs you. See [Hourly digest](#hourly-digest). |
 | `quartermaster digest show\|install\|uninstall` | Page the last digest (the plugin's `digest` action); install or remove the hourly systemd timer. |
-| `quartermaster board` | The board popup (`prefix+j`). |
+| `quartermaster board` | The board popup (`prefix+j`): every open bead by state, acting on them, and the tidy view. See [The board](#the-board). |
 | `quartermaster ticker run\|start\|stop\|status`, `quartermaster tick` | The background loop, or one pass of it in the foreground. `status` shows the herdr socket it follows. |
 | `quartermaster configure [--repo PATH]` | First-time setup: write the config, link `~/.local/bin/quartermaster` (and `qm`), install the agent view. Safe to run again. |
 | `quartermaster unconfigure` | Stop the ticker and remove the agent view and sidebar tokens. |
