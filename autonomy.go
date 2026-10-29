@@ -22,8 +22,8 @@ const (
 )
 
 // AutonomyConfig is the [autonomy] table. Enabled is the lasting kill switch;
-// `quartermaster autonomy off` is the quick one. Merge, Apply and Decide turn
-// off one kind of step for every autonomous bead.
+// `quartermaster autonomy off` is the quick one. Merge, Apply, Decide and
+// Install turn off one kind of step for every autonomous bead.
 type AutonomyConfig struct {
 	Enabled bool `toml:"enabled"`
 	// Default makes every bead autonomous unless it is labeled supervised.
@@ -31,10 +31,13 @@ type AutonomyConfig struct {
 	Merge   bool `toml:"merge"`
 	Apply   bool `toml:"apply"`
 	Decide  bool `toml:"decide"`
+	// Install lets a bead in quartermaster's own repo install its merged PR:
+	// pull, build, restart the ticker. See selfRepo.
+	Install bool `toml:"install"`
 }
 
 // autonomyActions are the steps `autonomy check --action` asks about.
-var autonomyActions = []string{"decide", "merge", "apply"}
+var autonomyActions = []string{"decide", "merge", "apply", "install"}
 
 func (a AutonomyConfig) allows(action string) bool {
 	switch action {
@@ -44,6 +47,8 @@ func (a AutonomyConfig) allows(action string) bool {
 		return a.Merge
 	case "apply":
 		return a.Apply
+	case "install":
+		return a.Install
 	}
 	return true
 }
@@ -79,13 +84,24 @@ func autonomous(a AutonomyConfig, b Bead, stopped bool, action string) (bool, st
 
 var errNotAutonomous = errors.New("not autonomous")
 
+// selfRepo is quartermaster's own repository. Only its beads may install
+// without TJ: installing a merged PR there is a local pull, build and ticker
+// restart, not a deploy. Every other repo's installs and deploys go through
+// apply and gate plan.
+const selfRepo = "herdr-quartermaster"
+
+// installsSelf says whether b's repo is quartermaster's own.
+func (c Config) installsSelf(b Bead) bool {
+	return filepath.Base(filepath.Clean(expandHome(c.repoFor(b)))) == selfRepo
+}
+
 // autonomyCmd is `quartermaster autonomy on|off|status|check <bead>|grant
 // <bead>|revoke <bead>`. check fails (exit 1) unless the bead may take the
 // step now; a worker runs it before every step it takes without TJ, so the
 // switch reaches a running worker at its next step. grant and revoke change
 // one bead's labels mid-flight and tell its worker.
 func autonomyCmd(cfg Config, env autonomyEnv, pos []string, action string, w io.Writer) error {
-	const use = "usage: quartermaster autonomy on|off|status|check <bead> [--action decide|merge|apply]|grant <bead>|revoke <bead>"
+	const use = "usage: quartermaster autonomy on|off|status|check <bead> [--action decide|merge|apply|install]|grant <bead>|revoke <bead>"
 	if len(pos) == 0 {
 		return errors.New(use)
 	}
@@ -126,6 +142,9 @@ func autonomyCmd(cfg Config, env autonomyEnv, pos []string, action string, w io.
 		}
 		if ok, why := autonomous(cfg.Autonomy, b, autonomyStopped(), action); !ok {
 			return fmt.Errorf("%w: %s; stop for TJ as usual", errNotAutonomous, why)
+		}
+		if action == "install" && !cfg.installsSelf(b) {
+			return fmt.Errorf("%w: install covers only %s beads; other installs and deploys go through --action apply", errNotAutonomous, selfRepo)
 		}
 		what := "act"
 		if action != "" {
@@ -204,6 +223,7 @@ Autonomous mode is on for this bead: where the rules above say to stop for the u
 - A decision you have a recommendation for (` + check("decide") + `): take it and name the alternatives in the AUTO note. The next step of a staged rollout counts as a decision once the previous step's verification passed.
 - Merging (` + check("merge") + `): auto-merge as above, for drafts too once ready. For a stack, when the lower PR merges, retarget the next one (` + "`gh pr edit <url> --base <base>`" + `), and close and reopen it if its checks don't start. If auto-merge isn't allowed, merge with ` + "`gh pr merge <url> --squash --match-head-commit <sha>`" + ` only after the ticker reports it ready to merge. Never approve a PR, yours or anyone's, and never use sneaky-approve or any bot approval: required review stays human.
 - Applying a provision or deploy (` + check("apply") + `): first note the change you expect. Then write the preview as JSON (` + "`pulumi preview --json > plan.json`" + ` or ` + "`tofu show -json <planfile> > plan.json`" + `) and run ` + "`quartermaster gate plan plan.json --expect create=N,update=N`" + `. Apply only if it passes, then put its counts in the AUTO note.
+- Installing a merged PR, only for a bead in ` + selfRepo + ` (` + check("install") + `): in the main checkout the installed binary is built from (` + "`readlink -f \"$(command -v quartermaster)\"`" + ` is its ` + "`bin/quartermaster`" + `), run ` + "`git pull --ff-only`" + ` and ` + "`go build -o bin/quartermaster .`" + `, then ` + "`quartermaster ticker stop && quartermaster ticker start`" + `. Smoke-test with ` + "`quartermaster autonomy status`" + ` and a command your change touched, and put the new HEAD and the result in the AUTO note. Other repos' installs and deploys go through the apply step.
 - ` + "`/plan`" + `-style trigger comments on the user's own PRs need no check.
 Always stop for critical operations, autonomous or not. Start the needs_me question with ` + "`CRITICAL: <category>`" + `. The categories:
   - any delete or destroy, including a replace of a stateful resource
