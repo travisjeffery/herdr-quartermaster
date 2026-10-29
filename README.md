@@ -677,7 +677,21 @@ usual, after any of these:
 - that kind of step turned off in `[autonomy]`
 
 A missing `quartermaster` binary fails the check too, so a worker host without
-one never acts on its own. See
+one never acts on its own.
+
+You can grant or revoke autonomy at any stage, not only at dispatch:
+`quartermaster autonomy grant <bead>` adds `autonomous` (and removes
+`supervised`), notes the bead, and sends its worker the same grant its brief
+would have carried. `quartermaster autonomy revoke <bead>` removes
+`autonomous`, adds `supervised`, and tells the worker it stops for you again.
+`U` on the board does either for the selected bead. A worker that is working
+or at an approval prompt is never interrupted: the message waits in the outbox
+until it is idle, and a revoke also waits while the bead is at `needs_me`, so
+it can't read as your answer. A grant to an idle worker at `needs_me` lets it
+take its recommendation if the question isn't critical. An open bead gets the
+grant in its brief when it is dispatched. Either way the labels are what
+count: the worker trusts a grant only while `autonomy check` passes, and the
+ticker never grants. See
 [docs/design/autonomous-mode.md](docs/design/autonomous-mode.md).
 
 ### Worker hosts
@@ -816,6 +830,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster unconfigure` | Stop the ticker and remove the agent view and sidebar tokens. |
 | `quartermaster autonomy on\|off\|status` | The global switch for [autonomous beads](#autonomous-beads), and which beads are autonomous now. |
 | `quartermaster autonomy check <bead> [--action decide\|merge\|apply]` | Exit 0 only if the bead may take that kind of step without you right now; a worker runs it before each one. |
+| `quartermaster autonomy grant\|revoke <bead>` | Make a bead autonomous or supervised mid-flight, and tell its worker once it is idle. |
 | `quartermaster gate plan <file\|-> [--expect op=N,...]` | Exit 0 only if a `pulumi preview --json` or `tofu show -json` plan creates, updates or reads, with no delete, replace or unknown operation, and with `--expect`, exactly those counts. A plan that doesn't parse fails. |
 | `quartermaster bd-proxy --host NAME [--bd PATH]` | The forced command behind a worker host's Beads key in `authorized_keys`: runs the host's `bd` request (an allowlisted subcommand, `BEADS_DIR` pinned, one line per request in `bd-proxy.log` in the state dir). The host side is [`scripts/bd-shim`](scripts/bd-shim). See [worker hosts §5](docs/design/worker-hosts.md#5-beads-one-database-for-every-host). |
 | `quartermaster version` | Print the version. |

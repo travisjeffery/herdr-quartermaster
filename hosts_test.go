@@ -299,7 +299,7 @@ func TestDeliverOutboxOnRemoteHost(t *testing.T) {
 	if err := queueBrief("b-2", "local brief"); err != nil {
 		t.Fatal(err)
 	}
-	sent := deliverOutbox(hostsConfig(), newHerdr(), map[string]Agent{"b-2": {Name: "b-2", PaneID: "w1:p1", Status: "done"}})
+	sent := deliverOutbox(hostsConfig(), newHerdr(), map[string]Agent{"b-2": {Name: "b-2", PaneID: "w1:p1", Status: "done"}}, nil)
 	if !slices.Equal(sent, []string{"b-2", "b-1 on server"}) {
 		t.Fatalf("sent %q", sent)
 	}

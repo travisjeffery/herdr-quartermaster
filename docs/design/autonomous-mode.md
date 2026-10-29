@@ -191,10 +191,26 @@ Where the build is more specific than the recommendation:
   change the worker expected".
 - **D1 when the grant is given.** The grant goes into the brief when the bead
   is autonomous at dispatch, judged by config and label but not the stop file,
-  so turning autonomy back on reaches the worker. A bead labeled `autonomous`
-  after dispatch gets no grant until it is dispatched or briefed again.
-  Removing the label, or `autonomy off`, takes effect at the worker's next
-  check.
+  so turning autonomy back on reaches the worker. Removing the label, or
+  `autonomy off`, takes effect at the worker's next check.
+- **Mid-flight grant and revoke** (2026-10-29, backend-xoc1). TJ wanted to
+  turn autonomy on and off at any stage. `quartermaster autonomy grant <bead>`
+  adds `autonomous`, removes `supervised`, records an `AUTO:` note, and sends
+  the worker the brief's grant text behind the tag
+  `[quartermaster autonomy: granted by TJ]`. `revoke` does the reverse and
+  tells the worker it is supervised. The board's `U` key runs either.
+  - Trust: the grant is TJ-initiated (TJ runs it, or the coordinator does on
+    TJ's explicit word). The ticker never grants; it only relays a notice TJ
+    queued. Every brief says a mid-flight grant counts only while
+    `autonomy check` passes, so a forged notice grants nothing: the labels
+    are the grant, as at dispatch.
+  - Delivery: the notice is prompted straight away only to an idle or done
+    worker. Otherwise it waits as `<agent>.autonomy` in the outbox, one per
+    agent (a revoke replaces a queued grant), and the ticker sends it once
+    the worker is ready, after any queued brief. A revoke waits out
+    `needs_me`, where typing would read as TJ's answer; a grant doesn't, so
+    an idle needs_me worker can take its recommendation. An open bead gets
+    the grant in its dispatch brief, and dispatch drops any older notice.
 - **D4 on worker hosts.** The stop file lives in the desktop's state dir. A
   worker on another host whose image has no `quartermaster` binary fails the
   check (the command is missing), so it never acts on its own. Autonomy on

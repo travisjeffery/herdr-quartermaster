@@ -83,11 +83,19 @@ func (f *fakeBoard) env() boardEnv {
 		child: func(parent Bead, title string) (string, error) {
 			return parent.ID + ".1", rec("child %s %s", parent.ID, title)
 		},
-		prompt:    func(a, text string) error { return rec("prompt %s %s", a, text) },
-		dispatch:  func(id, kind string) (string, error) { return "started", rec("dispatch %s %s", id, kind) },
-		resume:    func(id string) (string, error) { return "resumed", rec("resume %s", id) },
-		resolve:   func(id string) (string, error) { return "removed", rec("resolve %s", id) },
-		release:   func(b Bead, days int) error { return rec("release %s %d", b.ID, days) },
+		prompt:   func(a, text string) error { return rec("prompt %s %s", a, text) },
+		dispatch: func(id, kind string) (string, error) { return "started", rec("dispatch %s %s", id, kind) },
+		resume:   func(id string) (string, error) { return "resumed", rec("resume %s", id) },
+		resolve:  func(id string) (string, error) { return "removed", rec("resolve %s", id) },
+		release:  func(b Bead, days int) error { return rec("release %s %d", b.ID, days) },
+		autonomy: func(id string, on bool) (string, error) {
+			add, drop := LabelAutonomous, LabelSupervised
+			if !on {
+				add, drop = drop, add
+			}
+			edit(id, func(b *Bead) { b.Labels = append(without(b.Labels, drop), add) })
+			return "autonomy set", rec("autonomy %s %v", id, on)
+		},
 		focus:     func(a string) error { return rec("focus %s", a) },
 		inboxDone: func(id string) error { return rec("dismiss %s", id) },
 		copy:      func(text string) error { return rec("copy %s", text) },
@@ -673,5 +681,41 @@ func TestGCBulkActions(t *testing.T) {
 	press(t, m, "\x1b")
 	if m.view != viewList {
 		t.Fatal("esc should leave the tidy view")
+	}
+}
+
+func TestAutonomyToggleConfirms(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	f := &fakeBoard{beads: []Bead{boardBead("bk-a", StatusInProgress, 2, LabelSupervised)}}
+	m := testModel(t, f)
+	m.cfg.Autonomy = defaultConfig().Autonomy
+	m.rebuild()
+	selectBead(t, m, "bk-a")
+	press(t, m, "U")
+	if m.ask == nil || !strings.Contains(m.ask.prompt, "grant autonomy to bk-a") {
+		t.Fatalf("no grant confirmation: %+v", m.ask)
+	}
+	press(t, m, "n")
+	if len(f.calls) != 0 {
+		t.Fatalf("declined grant ran: %v", f.calls)
+	}
+	press(t, m, "U")
+	press(t, m, "y")
+	if !slices.Equal(f.calls, []string{"autonomy bk-a true"}) {
+		t.Fatalf("calls %v", f.calls)
+	}
+	if r := m.sel(); r == nil || !strings.Contains(r.line, "auto") {
+		t.Fatalf("no auto marker after the grant: %+v", r)
+	}
+	press(t, m, "U")
+	if m.ask == nil || !strings.Contains(m.ask.prompt, "revoke autonomy on bk-a") {
+		t.Fatalf("no revoke confirmation: %+v", m.ask)
+	}
+	press(t, m, "y")
+	if !slices.Equal(f.calls, []string{"autonomy bk-a true", "autonomy bk-a false"}) {
+		t.Fatalf("calls %v", f.calls)
+	}
+	if r := m.sel(); r == nil || strings.Contains(r.line, "auto") {
+		t.Fatalf("auto marker after the revoke: %+v", r)
 	}
 }
