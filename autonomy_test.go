@@ -75,12 +75,36 @@ func TestAutonomyStopFile(t *testing.T) {
 	}
 }
 
+func TestInstallsSelf(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Repo = "~/src/oscilar/backend"
+	cfg.Repos = map[string]string{"herdr-quartermaster": "~/src/herdr-quartermaster/", "infra": "~/src/oscilar/infra"}
+	cases := []struct {
+		labels []string
+		want   bool
+	}{
+		{[]string{"repo:herdr-quartermaster"}, true},
+		{[]string{"repo:infra"}, false},
+		{nil, false},
+		{[]string{"repo:unknown"}, false},
+	}
+	for _, c := range cases {
+		if got := cfg.installsSelf(Bead{Labels: c.labels}); got != c.want {
+			t.Errorf("%v: got %v, want %v", c.labels, got, c.want)
+		}
+	}
+	cfg.Repo = "/home/x/herdr-quartermaster"
+	if !cfg.installsSelf(Bead{}) {
+		t.Error("default repo herdr-quartermaster does not install")
+	}
+}
+
 func TestAutonomyStatus(t *testing.T) {
 	a := defaultConfig().Autonomy
 	a.Apply = false
 	active := []Bead{{ID: "a-1", Labels: []string{LabelAutonomous}}, {ID: "a-2"}}
 	got := autonomyStatus(a, false, active)
-	for _, want := range []string{"autonomy: on", "steps: decide, merge\n", "autonomous now: a-1\n"} {
+	for _, want := range []string{"autonomy: on", "steps: decide, merge, install\n", "autonomous now: a-1\n"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("status missing %q:\n%s", want, got)
 		}
@@ -108,6 +132,9 @@ func TestBriefGrant(t *testing.T) {
 		"quartermaster autonomy check backend-ab12 --action decide",
 		"quartermaster autonomy check backend-ab12 --action merge",
 		"quartermaster autonomy check backend-ab12 --action apply",
+		"quartermaster autonomy check backend-ab12 --action install",
+		"only for a bead in herdr-quartermaster",
+		"quartermaster ticker stop && quartermaster ticker start",
 		"quartermaster gate plan plan.json",
 		"--match-head-commit",
 		"Never approve a PR",

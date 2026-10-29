@@ -173,7 +173,7 @@ func defaultConfig() Config {
 		StaleDays:        3,
 		VerifyMax:        20,
 		GHMinRemaining:   1000,
-		Autonomy:         AutonomyConfig{Enabled: true, Merge: true, Apply: true, Decide: true},
+		Autonomy:         AutonomyConfig{Enabled: true, Merge: true, Apply: true, Decide: true, Install: true},
 	}
 }
 

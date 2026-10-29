@@ -28,6 +28,7 @@ TJ's answer, so none can be spoofed into one.
 | "go step N" in a staged rollout | quartermaster rules | **Yes**: go when the previous step verified |
 | Merge once approved and green | quartermaster rules + GitHub | **Yes**: auto-merge exists; add stacked PRs |
 | Provision/deploy apply | quartermaster rules | **Yes**, only when the preview passes the critical check |
+| Installing a merged herdr-quartermaster PR (pull, build, ticker restart) | quartermaster rules | **Yes**, for beads in herdr-quartermaster only (see "Self-install") |
 | `/plan-…` comment triggers on TJ's own PRs | quartermaster rules | **Yes** (a comment on our own PR) |
 | Required human review (org ruleset) | org policy | **No.** Never `/sneaky-approve` or bot self-approval. Radar approve mode (INF-2114) is the legitimate route |
 | Claude Code permission prompts, auto-mode classifier | Claude Code | **No.** Never answered or bypassed; see "Standing authorization" |
@@ -69,6 +70,7 @@ The options as they were put to TJ. The outcome and how the build differs are in
   merge = true                # merge own PRs once approved + required checks green
   apply = true                # run provision/deploy applies that pass the critical check
   decide = true               # answer own needs_me questions that have a recommendation
+  install = true              # install own merged herdr-quartermaster PR (added later; see "Self-install")
   ```
 
   Dispatch writes the grant into the brief only when the bead is autonomous.
@@ -211,6 +213,18 @@ Where the build is more specific than the recommendation:
     `needs_me`, where typing would read as TJ's answer; a grant doesn't, so
     an idle needs_me worker can take its recommendation. An open bead gets
     the grant in its dispatch brief, and dispatch drops any older notice.
+- **Self-install** (2026-10-29, backend-ivi2). TJ let an autonomous bead in
+  herdr-quartermaster install its own merged PR, which backend-xoc1 had
+  already done without a rule. `autonomy check <id> --action install` passes
+  only for a bead whose repo is herdr-quartermaster (by the repo path's base
+  name, `selfRepo`) and while `[autonomy] install` is on. The steps are a
+  local pull, `go build -o bin/quartermaster .` in the main checkout the
+  installed binary is built from, `ticker stop && ticker start`, and a smoke
+  test; the AUTO note records the new HEAD and the result. It is not a deploy:
+  nothing leaves the machine, and a bad build is undone by checking out the
+  previous commit and building again. Other repos' installs and deploys still
+  go through apply and `gate plan`, and supervised beads still leave the
+  install to TJ as a `RUN:`.
 - **D4 on worker hosts.** The stop file lives in the desktop's state dir. A
   worker on another host whose image has no `quartermaster` binary fails the
   check (the command is missing), so it never acts on its own. Autonomy on
