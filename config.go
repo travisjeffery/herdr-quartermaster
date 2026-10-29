@@ -80,6 +80,10 @@ type Config struct {
 	// Agents holds per-kind settings ([agents.muse]), for workers and the
 	// coordinator alike.
 	Agents map[string]AgentConfig `toml:"agents"`
+
+	// Autonomy is what a bead labeled autonomous may do without TJ; see
+	// docs/design/autonomous-mode.md.
+	Autonomy AutonomyConfig `toml:"autonomy"`
 }
 
 type AgentConfig struct {
@@ -169,6 +173,7 @@ func defaultConfig() Config {
 		StaleDays:        3,
 		VerifyMax:        20,
 		GHMinRemaining:   1000,
+		Autonomy:         AutonomyConfig{Enabled: true, Merge: true, Apply: true, Decide: true},
 	}
 }
 

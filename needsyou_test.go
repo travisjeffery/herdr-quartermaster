@@ -63,7 +63,7 @@ func TestBoardStatusShowsTheSelectedCommand(t *testing.T) {
 }
 
 func TestBriefAsksForRunNotes(t *testing.T) {
-	s := brief(bead(StatusInProgress), "tj/x", "/w/x", "", "")
+	s := brief(bead(StatusInProgress), "tj/x", "/w/x", "", "", false)
 	if !strings.Contains(s, `bd note backend-ab12 "RUN: <exact command>"`) || !strings.Contains(s, "bd update backend-ab12 --status in_progress") {
 		t.Fatalf("brief lacks the RUN rule:\n%s", s)
 	}
@@ -138,7 +138,7 @@ func TestResumeLeavesSnapshotInProgress(t *testing.T) {
 }
 
 func TestBriefAsksToResumeWhenAnswered(t *testing.T) {
-	s := brief(bead(StatusInProgress), "tj/x", "/w/x", "", "")
+	s := brief(bead(StatusInProgress), "tj/x", "/w/x", "", "", false)
 	if !strings.Contains(s, "When the user answers you, directly in this pane or otherwise, run `bd update backend-ab12 --status in_progress` first.") {
 		t.Fatalf("brief lacks the resume rule:\n%s", s)
 	}

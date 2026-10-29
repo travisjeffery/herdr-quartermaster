@@ -136,6 +136,7 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 // knows of its PRs and runs.
 func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thread {
 	th := Thread{Bead: b, Linear: linearKey(b, cfg.LinearPrefixes)}
+	th.Auto, _ = autonomous(cfg.Autonomy, b, autonomyStopped(), "")
 	if a, ok := byName[agentName(b.ID)]; ok {
 		th.Agent = &a
 	}

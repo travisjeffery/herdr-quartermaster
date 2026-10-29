@@ -1,0 +1,12 @@
+{
+  "config": {"aws:region": "us-east-1"},
+  "steps": [
+    {"op": "same", "urn": "urn:pulumi:prod::infra::pulumi:pulumi:Stack::infra-prod"},
+    {"op": "update", "urn": "urn:pulumi:prod::infra::aws:iam/role:Role::deployer",
+     "oldState": {"type": "aws:iam/role:Role"}, "newState": {"type": "aws:iam/role:Role"}},
+    {"op": "create", "urn": "urn:pulumi:prod::infra::oscilar:Service$aws:cloudwatch/logGroup:LogGroup::svc-logs",
+     "newState": {"type": "aws:cloudwatch/logGroup:LogGroup"}}
+  ],
+  "duration": 1234567890,
+  "changeSummary": {"same": 1, "update": 1, "create": 1}
+}

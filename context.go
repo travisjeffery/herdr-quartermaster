@@ -209,6 +209,12 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   prompts.
 - A needs_me bead's question is in its latest note. Relay it to TJ verbatim with
   the options; when they answer, prompt the worker and it resets the status.
+- A thread marked "auto" is autonomous: its worker decides on its own
+  recommendation, merges, and runs applies that pass `+"`quartermaster gate plan`"+`, and leaves
+  an "AUTO:" note for each. When it is needs_me, the step is critical (its note
+  starts "CRITICAL:") or the worker has no recommendation. Relay it like any other
+  and never answer it for TJ. Label a bead `+"`autonomous`"+` only when TJ says so;
+  `+"`quartermaster autonomy off`"+` pauses every autonomous worker at its next step.
 - A needs_me bead with a "RUN:" note is waiting on a command only TJ can run.
   Relay the command verbatim in a code block, prefixed with `+"`!`"+` so TJ can paste
   it as is; when they report the result, prompt the worker with it.

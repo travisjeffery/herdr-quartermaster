@@ -89,6 +89,9 @@ type digestState struct {
 	At    time.Time           `json:"at"`
 	Beads map[string]Section  `json:"beads"`
 	PRs   map[string]DigestPR `json:"prs"`
+	// Auto is how many AUTO: notes each open bead had, to tell which steps
+	// its worker took without TJ since.
+	Auto map[string]int `json:"auto,omitempty"`
 }
 
 func digestPath() string      { return filepath.Join(stateDir(), "digest.md") }
@@ -302,7 +305,7 @@ func buildDigest(in digestInputs, prev digestState, prefixes []string, now time.
 	for _, b := range in.open {
 		byID[b.ID] = b
 	}
-	next := digestState{At: now, Beads: map[string]Section{}, PRs: map[string]DigestPR{}}
+	next := digestState{At: now, Beads: map[string]Section{}, PRs: map[string]DigestPR{}, Auto: map[string]int{}}
 	prOwner := map[string]string{}
 	for _, b := range in.open {
 		var blockers []string
@@ -331,6 +334,9 @@ func buildDigest(in digestInputs, prev digestState, prefixes []string, now time.
 		}
 		s := sectionFor(b, pr, blockers, agent)
 		next.Beads[b.ID] = s
+		if n := len(autoNotes(b.Notes)); n > 0 {
+			next.Auto[b.ID] = n
+		}
 		d.Sections[s] = append(d.Sections[s], DigestItem{
 			Bead: b, Section: s, PR: pr, OpenPRs: open, Blockers: blockers, Agent: agent,
 			Linear: linearKey(b, prefixes), Stale: staleFor(s, b, now),
@@ -349,7 +355,28 @@ func buildDigest(in digestInputs, prev digestState, prefixes []string, now time.
 		})
 	}
 	d.Changes = digestChanges(prev, next, byID, prOwner, in.closed)
+	d.Changes = append(d.Changes, autoChanges(prev, append(slices.Clone(in.open), in.closed...))...)
 	return d, next
+}
+
+// autoChanges are the AUTO: notes added since the last digest, one change
+// each, so every step a worker took without TJ is in front of them once.
+// Notes have no timestamps: what is new is what lies past the last count. The
+// first digest has nothing to compare with, so it reports nothing.
+func autoChanges(prev digestState, beads []Bead) []string {
+	if prev.At.IsZero() {
+		return nil
+	}
+	var out []string
+	for _, b := range beads {
+		notes := autoNotes(b.Notes)
+		if seen := prev.Auto[b.ID]; seen < len(notes) {
+			for _, n := range notes[seen:] {
+				out = append(out, b.ID+" "+n)
+			}
+		}
+	}
+	return out
 }
 
 // digestChanges is what moved since the last digest. The first digest has

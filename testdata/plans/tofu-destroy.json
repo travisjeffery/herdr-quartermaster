@@ -1,0 +1,10 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.8.5",
+  "resource_changes": [
+    {"address": "aws_s3_bucket.logs", "type": "aws_s3_bucket", "change": {"actions": ["delete"]}},
+    {"address": "aws_db_instance.main", "type": "aws_db_instance", "change": {"actions": ["delete", "create"]}},
+    {"address": "aws_lambda_function.f", "type": "aws_lambda_function", "change": {"actions": ["create", "delete"]}},
+    {"address": "aws_iam_role.old", "type": "aws_iam_role", "change": {"actions": ["forget"]}}
+  ]
+}
