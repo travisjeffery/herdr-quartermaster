@@ -76,10 +76,10 @@ func TestContextLinearSectionOmittedWithoutKeys(t *testing.T) {
 
 func TestBriefNamesLinearIssue(t *testing.T) {
 	b := Bead{ID: "backend-a1", Title: "ENG-1102: root the hosts"}
-	if got := brief(b, "tj/x", "/w", "ENG-1102", ""); !strings.Contains(got, "Linear issue: ENG-1102. Prefix the PR title with `ENG-1102: `") {
+	if got := brief(b, "tj/x", "/w", "ENG-1102", "", false); !strings.Contains(got, "Linear issue: ENG-1102. Prefix the PR title with `ENG-1102: `") {
 		t.Errorf("got %q", got)
 	}
-	if got := brief(b, "tj/x", "/w", "", ""); strings.Contains(got, "Linear issue") {
+	if got := brief(b, "tj/x", "/w", "", "", false); strings.Contains(got, "Linear issue") {
 		t.Errorf("got %q", got)
 	}
 }

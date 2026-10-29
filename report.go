@@ -30,12 +30,19 @@ type InFlight struct {
 	State string
 }
 
+// AutoSteps are the steps a bead's worker took without TJ: its AUTO: notes.
+type AutoSteps struct {
+	Bead  Bead
+	Notes []string
+}
+
 type Report struct {
 	Since    time.Time
 	Shipped  []Shipped
 	Unbeaded []MergedPR
 	InFlight []InFlight
 	NeedsYou []Bead
+	Auto     []AutoSteps
 	Warnings []string
 }
 
@@ -162,6 +169,13 @@ func buildReport(since time.Time, closed, active []Bead, merged []MergedPR, st T
 		}
 		r.InFlight = append(r.InFlight, f)
 	}
+	// Notes carry no time, so a bead touched in the window shows all of its
+	// AUTO: notes.
+	for _, b := range beads {
+		if notes := autoNotes(b.Notes); len(notes) > 0 && !b.UpdatedAt.Before(since) {
+			r.Auto = append(r.Auto, AutoSteps{Bead: b, Notes: notes})
+		}
+	}
 	sort.SliceStable(r.InFlight, func(i, j int) bool { return r.InFlight[i].Bead.ID < r.InFlight[j].Bead.ID })
 	sort.SliceStable(r.NeedsYou, func(i, j int) bool { return r.NeedsYou[i].ID < r.NeedsYou[j].ID })
 	return r
@@ -229,6 +243,18 @@ func renderReport(r Report, now time.Time) string {
 	}
 	for _, b := range r.NeedsYou {
 		fmt.Fprintf(&s, "- **%s** (`%s`): %s\n", oneLine(b.Title), b.ID, lastNote(b.Notes, 300))
+	}
+
+	// Only autonomous beads have these, so the section shows only when there
+	// are some.
+	if len(r.Auto) > 0 {
+		fmt.Fprintf(&s, "\n## Done without you (%d)\n\n", len(r.Auto))
+		for _, a := range r.Auto {
+			fmt.Fprintf(&s, "- **%s** (`%s`)\n", oneLine(a.Bead.Title), a.Bead.ID)
+			for _, n := range a.Notes {
+				fmt.Fprintf(&s, "  - %s\n", oneLine(n))
+			}
+		}
 	}
 	return s.String()
 }

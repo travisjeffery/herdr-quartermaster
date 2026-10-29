@@ -1,7 +1,8 @@
 # Autonomous mode: carry a bead to done without TJ, except critical operations
 
-Status: **draft** (2026-10-28), waiting on TJ's decisions D1–D5 below. Nothing
-here changes behavior yet. Linear: INF-2126.
+Status: **accepted** (2026-10-28) and implemented. TJ chose the
+recommendation (R) for each of D1–D5 and adopted the standing authorization;
+see "Decisions" at the end. Linear: INF-2126.
 
 ## Summary
 
@@ -52,9 +53,9 @@ These always go to needs_me, autonomous or not:
 5. Anything Claude Code blocks or prompts for.
 6. Anything the worker is unsure about. **Unsure means critical.**
 
-## Decisions for TJ
+## Decisions (TJ chose R for each)
 
-Each has a recommendation (R). Answer by number, e.g. "D1 R, D2 b, …".
+The options as they were put to TJ. The outcome and how the build differs are in "Decisions" at the end.
 
 ### D1. Where the policy lives (config shape)
 
@@ -161,7 +162,7 @@ for. Proposed wording for `~/.claude/CLAUDE.md`:
 > writing secrets, or anything Claude Code blocks. For those, stop and set the
 > bead to needs_me.
 
-## Plan, once D1–D5 are answered
+## Plan (done in the same PR)
 
 1. `[autonomy]` config, the `autonomous` and `supervised` labels,
    `quartermaster autonomy on|off|check`, and the grant in the brief (dispatch.go).
@@ -171,3 +172,34 @@ for. Proposed wording for `~/.claude/CLAUDE.md`:
    and board.
 4. Coordinator rules: don't relay a needs_me from an autonomous bead unless it
    is tagged `CRITICAL:` or the worker has no recommendation.
+
+## Decisions
+
+2026-10-28, TJ: **all R** (D1–D5 as recommended), and yes to the CLAUDE.md
+standing authorization. That wording goes into `~/.claude/CLAUDE.md` only
+after `autonomy check` and `gate plan` are merged and installed. If the
+classifier blocks that edit, TJ gets a RUN: to make it.
+
+Where the build is more specific than the recommendation:
+
+- **D2 stateful list.** `gate plan` blocks every delete and every replace,
+  stateful or not, and any operation outside an allowlist (Pulumi `same`,
+  `create`, `update`, `read`, `refresh`, `import`; Tofu `no-op`, `create`,
+  `read`, `update`). That includes Tofu `forget`. So the stateful list only
+  labels a refusal "(stateful)" to show how serious it is, and there is no
+  config override for it. `--expect op=N,...` is the mechanical form of "the
+  change the worker expected".
+- **D1 when the grant is given.** The grant goes into the brief when the bead
+  is autonomous at dispatch, judged by config and label but not the stop file,
+  so turning autonomy back on reaches the worker. A bead labeled `autonomous`
+  after dispatch gets no grant until it is dispatched or briefed again.
+  Removing the label, or `autonomy off`, takes effect at the worker's next
+  check.
+- **D4 on worker hosts.** The stop file lives in the desktop's state dir. A
+  worker on another host whose image has no `quartermaster` binary fails the
+  check (the command is missing), so it never acts on its own. Autonomy on
+  remote hosts waits until the image carries the binary and can see the switch.
+- **D3 digest.** New `AUTO:` notes count as digest changes (`<bead> AUTO: …`),
+  so they notify like any other change. Notes carry no timestamps, so the
+  digest keeps each bead's count of AUTO notes and reports those past it. The
+  report lists every AUTO note of each bead touched in its window.

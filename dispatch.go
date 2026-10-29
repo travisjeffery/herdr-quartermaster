@@ -33,7 +33,7 @@ func kindList(extra ...string) string {
 // task, bd prime holds the workflow and memories. Claude and Codex get bd prime
 // from a SessionStart hook; an agent without one is told to run it, and an
 // agent with one isn't asked to load its large output twice.
-func brief(b Bead, branch, path, linear, instructions string) string {
+func brief(b Bead, branch, path, linear, instructions string, auto bool) string {
 	var s strings.Builder
 	fmt.Fprintf(&s, "You are the quartermaster worker for bead %s: %s\n", b.ID, b.Title)
 	fmt.Fprintf(&s, "It is already claimed for you. Worktree %s on branch %s.\n", path, branch)
@@ -51,6 +51,9 @@ func brief(b Bead, branch, path, linear, instructions string) string {
 `)
 	if linear != "" {
 		fmt.Fprintf(&s, "\nLinear issue: %[1]s. Prefix the PR title with `%[1]s: `; move the issue to In Review when the PR is up and to Done once merged and verified.\n", linear)
+	}
+	if auto {
+		s.WriteString(autonomyGrant(b.ID))
 	}
 	if strings.TrimSpace(instructions) != "" {
 		s.WriteString("\nStanding instructions:\n")
@@ -185,7 +188,10 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	}
 	tab := opened.PaneID[:strings.LastIndex(opened.PaneID, ":")] + ":t1"
 	_ = hh.TabRename(tab, shortTitle(b.Title, 34))
-	text := brief(b, branch, opened.Path, linearKey(b, cfg.LinearPrefixes), readInstructions())
+	// The stop file is left out: autonomy turned back on reaches the worker,
+	// which checks the switch before every step anyway.
+	auto, _ := autonomous(cfg.Autonomy, b, false, "")
+	text := brief(b, branch, opened.Path, linearKey(b, cfg.LinearPrefixes), readInstructions(), auto)
 	_ = hh.Run(opened.PaneID, cfg.agentEnvOn(host, kind))
 	where := opened.PaneID + onHost(host)
 	if err := hh.AgentStart(name, kind, opened.PaneID, cfg.agentArgs(kind)...); err != nil {

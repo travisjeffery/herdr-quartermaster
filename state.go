@@ -52,6 +52,8 @@ type Thread struct {
 	// Merged is every merged PR of the bead's, the pick or not, so a merge
 	// behind another open PR is still announced.
 	Merged []PR
+	// Auto is whether the bead runs without TJ right now (autonomous mode).
+	Auto bool
 }
 
 func agentReady(a *Agent) bool {
@@ -157,6 +159,9 @@ func stateLine(t Thread) string {
 	}
 	if t.Linear != "" {
 		s += " · " + t.Linear
+	}
+	if t.Auto {
+		s += " · auto"
 	}
 	return s
 }

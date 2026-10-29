@@ -14,7 +14,7 @@ func autoMergePR() *PR {
 }
 
 func TestBriefTurnsOnAutoMerge(t *testing.T) {
-	s := brief(bead(StatusInProgress), "tj/x", "/w/x", "", "")
+	s := brief(bead(StatusInProgress), "tj/x", "/w/x", "", "", false)
 	for _, want := range []string{"`gh pr merge <url> --auto --squash`", "Leave it off on drafts", "`gh pr merge <url> --disable-auto`", "note that on the bead and carry on"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("brief lacks %q:\n%s", want, s)
@@ -94,7 +94,7 @@ func TestReadyPromptWithAutoMerge(t *testing.T) {
 }
 
 func TestBriefStartsWithBdPrime(t *testing.T) {
-	s := brief(bead(StatusInProgress), "tj/x", "/w/x", "", "")
+	s := brief(bead(StatusInProgress), "tj/x", "/w/x", "", "", false)
 	prime, show := strings.Index(s, "`bd prime`"), strings.Index(s, "`bd show ")
 	if prime < 0 || show < 0 || prime > show {
 		t.Fatalf("the brief should ask for bd prime before bd show:\n%s", s)

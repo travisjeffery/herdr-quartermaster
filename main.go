@@ -48,6 +48,12 @@ Usage:
   quartermaster tick                                   one ticker pass in the foreground
   quartermaster configure [--repo PATH]                first-time setup: config, ~/.local/bin link, agent view
   quartermaster unconfigure                            stop the ticker, remove the view and sidebar tokens
+  quartermaster autonomy on|off|status                 the global switch for beads labeled autonomous
+  quartermaster autonomy check <bead> [--action A]     exit 0 only if the bead may take a step of kind A
+                                                       (decide, merge, apply) without TJ right now
+  quartermaster gate plan <file|-> [--expect op=N,...] exit 0 only if a pulumi preview --json or tofu
+                                                       show -json plan has no delete, replace or unknown op
+                                                       (and, with --expect, exactly those changes)
   quartermaster bd-proxy --host NAME [--bd PATH]       authorized_keys forced command: run a worker host's
                                                        bd request (SSH_ORIGINAL_COMMAND) on this machine's beads
   quartermaster version
@@ -107,6 +113,16 @@ func run(args []string) error {
 		fmt.Print(usage)
 		return nil
 	}
+	// gate reads only the plan it is given, so it works without a config.
+	if args[0] == "gate" {
+		fs := flag.NewFlagSet("gate", flag.ContinueOnError)
+		expect := fs.String("expect", "", "the expected changes, op=count pairs (create=2,update=1)")
+		pos, err := interspersed(fs, args[1:])
+		if err != nil {
+			return err
+		}
+		return gateCmd(pos, *expect, os.Stdin, os.Stdout)
+	}
 	// bd-proxy is sshd's forced command: no directory migration and nothing
 	// but bd's own output on stdout.
 	if args[0] == "bd-proxy" {
@@ -138,6 +154,7 @@ func run(args []string) error {
 	release := fs.Bool("release", false, "stale: set each stale claim back to open")
 	deliver := fs.String("deliver", defaultDeliver(), "digest: where to send it: desktop, slack, stdout, none (comma-separated)")
 	always := fs.Bool("always", false, "digest: notify even when nothing changed and nothing needs you")
+	actionFlag := fs.String("action", "", "autonomy check: the kind of step, decide, merge or apply")
 	pos, err := interspersed(fs, rest)
 	if err != nil {
 		return err
@@ -266,6 +283,8 @@ func run(args []string) error {
 			}
 		}
 		return err
+	case "autonomy":
+		return autonomyCmd(cfg, pos, *actionFlag, os.Stdout)
 	case "board":
 		return runBoard(cfg)
 	case "action":

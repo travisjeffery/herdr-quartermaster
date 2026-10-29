@@ -593,6 +593,13 @@ args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
 
 [agents.claude]           # per-kind environment, exported in the agent's pane before it starts
 env = ["CLAUDE_CODE_ENABLE_TELEMETRY=1", "OTEL_EXPORTER_OTLP_ENDPOINT=https://otel.example.com"]
+
+[autonomy]                # what a bead labeled autonomous may do without you (these are the defaults)
+enabled = true            # the lasting kill switch; `quartermaster autonomy off` is the quick one
+default = false           # true: every bead is autonomous unless labeled supervised
+merge = true              # merge its own PRs once approved and green
+apply = true              # run applies whose preview passes `quartermaster gate plan`
+decide = true             # take its own recommendation instead of asking
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts
@@ -637,6 +644,41 @@ its worktree, branch and PRs then live in that repository, and
 `quartermaster context` tags its thread `[infra]`. A `repo:` label naming no
 configured repository falls back to `repo` and shows as a warning in
 `quartermaster context`.
+
+### Autonomous beads
+
+A bead labeled `autonomous` when it is dispatched gets a standing grant in its
+worker's brief. Where it would stop for you, it takes its own recommendation
+instead: a decision it has a recommendation for, the next step of a staged
+rollout once the last one verified, merging its PR (auto-merge, stacks
+retargeted, `--match-head-commit` if auto-merge isn't allowed), and an apply
+whose machine-readable preview passes `quartermaster gate plan`. Each of these
+steps leaves an `AUTO:` note on the bead. The notes reach you in the digest's
+changes and in the report's "Done without you" section, and milestones also
+go to Linear. Its thread shows `· auto`.
+
+It still stops to `needs_me`, with the question starting `CRITICAL:`, for:
+- any delete or destroy, including a replace of a stateful resource
+- irreversible operations
+- money
+- messages to people outside the team
+- anything `gate plan` blocks
+- anything it isn't sure about
+
+It never approves a PR (required review stays human) and never answers
+Claude Code's permission prompts or works around its classifier.
+
+Before every such step the worker runs `quartermaster autonomy check <bead>
+--action decide|merge|apply`. The check fails, and the worker stops for you as
+usual, after any of these:
+- `quartermaster autonomy off`
+- `[autonomy] enabled = false`
+- the bead's label removed, or the label `supervised` added
+- that kind of step turned off in `[autonomy]`
+
+A missing `quartermaster` binary fails the check too, so a worker host without
+one never acts on its own. See
+[docs/design/autonomous-mode.md](docs/design/autonomous-mode.md).
 
 ### Worker hosts
 
@@ -772,6 +814,9 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster ticker run\|start\|stop\|status`, `quartermaster tick` | The background loop, or one pass of it in the foreground. `status` shows the herdr socket it follows. |
 | `quartermaster configure [--repo PATH]` | First-time setup: write the config, link `~/.local/bin/quartermaster` (and `qm`), install the agent view. Safe to run again. |
 | `quartermaster unconfigure` | Stop the ticker and remove the agent view and sidebar tokens. |
+| `quartermaster autonomy on\|off\|status` | The global switch for [autonomous beads](#autonomous-beads), and which beads are autonomous now. |
+| `quartermaster autonomy check <bead> [--action decide\|merge\|apply]` | Exit 0 only if the bead may take that kind of step without you right now; a worker runs it before each one. |
+| `quartermaster gate plan <file\|-> [--expect op=N,...]` | Exit 0 only if a `pulumi preview --json` or `tofu show -json` plan creates, updates or reads, with no delete, replace or unknown operation, and with `--expect`, exactly those counts. A plan that doesn't parse fails. |
 | `quartermaster bd-proxy --host NAME [--bd PATH]` | The forced command behind a worker host's Beads key in `authorized_keys`: runs the host's `bd` request (an allowlisted subcommand, `BEADS_DIR` pinned, one line per request in `bd-proxy.log` in the state dir). The host side is [`scripts/bd-shim`](scripts/bd-shim). See [worker hosts §5](docs/design/worker-hosts.md#5-beads-one-database-for-every-host). |
 | `quartermaster version` | Print the version. |
 

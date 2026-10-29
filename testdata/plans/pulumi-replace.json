@@ -1,0 +1,12 @@
+{
+  "steps": [
+    {"op": "update", "urn": "urn:pulumi:prod::infra::aws:iam/role:Role::deployer"},
+    {"op": "replace", "urn": "urn:pulumi:prod::infra::aws:rds/instance:Instance::main",
+     "oldState": {"type": "aws:rds/instance:Instance"}, "newState": {"type": "aws:rds/instance:Instance"}},
+    {"op": "create-replacement", "urn": "urn:pulumi:prod::infra::aws:rds/instance:Instance::main"},
+    {"op": "delete-replaced", "urn": "urn:pulumi:prod::infra::aws:rds/instance:Instance::main"},
+    {"op": "delete", "urn": "urn:pulumi:prod::infra::aws:sns/topic:Topic::alerts",
+     "oldState": {"type": "aws:sns/topic:Topic"}}
+  ],
+  "changeSummary": {"update": 1, "replace": 1, "delete": 1}
+}
