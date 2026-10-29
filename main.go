@@ -51,6 +51,8 @@ Usage:
   quartermaster autonomy on|off|status                 the global switch for beads labeled autonomous
   quartermaster autonomy check <bead> [--action A]     exit 0 only if the bead may take a step of kind A
                                                        (decide, merge, apply) without TJ right now
+  quartermaster autonomy grant|revoke <bead>           label a bead autonomous or supervised mid-flight and
+                                                       tell its worker once it is idle
   quartermaster gate plan <file|-> [--expect op=N,...] exit 0 only if a pulumi preview --json or tofu
                                                        show -json plan has no delete, replace or unknown op
                                                        (and, with --expect, exactly those changes)
@@ -284,7 +286,7 @@ func run(args []string) error {
 		}
 		return err
 	case "autonomy":
-		return autonomyCmd(cfg, pos, *actionFlag, os.Stdout)
+		return autonomyCmd(cfg, liveAutonomyEnv(cfg, h.on(cfg.coordSocket())), pos, *actionFlag, os.Stdout)
 	case "board":
 		return runBoard(cfg)
 	case "action":

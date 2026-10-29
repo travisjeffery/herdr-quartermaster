@@ -154,6 +154,9 @@ func openRow(cfg Config, st TickerState, b Bead, live map[string]bool) boardRow 
 	if key != "" {
 		parts = append(parts, key)
 	}
+	if ok, _ := autonomous(cfg.Autonomy, b, autonomyStopped(), ""); ok {
+		parts = append(parts, "auto")
+	}
 	line := strings.Join(parts, " · ")
 	var urls []string
 	for _, pr := range prs {

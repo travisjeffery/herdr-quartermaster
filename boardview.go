@@ -326,6 +326,7 @@ func helpLines(gc bool) []string {
 		"  a         add a note                        A   answer an idle worker (confirms)",
 		"  n         toggle the next label             S   set status",
 		"  P         set priority                      +   create a child task (confirms)",
+		"  U         grant or revoke autonomy (confirms); the worker is told when idle",
 		"  C         close with a reason (confirms)",
 		"  o l       open the PR / Linear issue        y p copy the id / RUN command",
 		"",

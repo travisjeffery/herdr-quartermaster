@@ -79,12 +79,13 @@ func autonomous(a AutonomyConfig, b Bead, stopped bool, action string) (bool, st
 
 var errNotAutonomous = errors.New("not autonomous")
 
-// autonomyCmd is `quartermaster autonomy on|off|status|check <bead>`. check
-// fails (exit 1) unless the bead may take the step now; a worker runs it
-// before every step it takes without TJ, so the switch reaches a running
-// worker at its next step.
-func autonomyCmd(cfg Config, pos []string, action string, w io.Writer) error {
-	const use = "usage: quartermaster autonomy on|off|status|check <bead> [--action decide|merge|apply]"
+// autonomyCmd is `quartermaster autonomy on|off|status|check <bead>|grant
+// <bead>|revoke <bead>`. check fails (exit 1) unless the bead may take the
+// step now; a worker runs it before every step it takes without TJ, so the
+// switch reaches a running worker at its next step. grant and revoke change
+// one bead's labels mid-flight and tell its worker.
+func autonomyCmd(cfg Config, env autonomyEnv, pos []string, action string, w io.Writer) error {
+	const use = "usage: quartermaster autonomy on|off|status|check <bead> [--action decide|merge|apply]|grant <bead>|revoke <bead>"
 	if len(pos) == 0 {
 		return errors.New(use)
 	}
@@ -131,6 +132,15 @@ func autonomyCmd(cfg Config, pos []string, action string, w io.Writer) error {
 			what = action
 		}
 		fmt.Fprintf(w, "%s may %s without TJ; critical operations still stop\n", b.ID, what)
+	case "grant", "revoke":
+		if len(pos) != 2 {
+			return errors.New(use)
+		}
+		msg, err := setAutonomy(cfg, env, pos[1], pos[0] == "grant")
+		if msg != "" {
+			fmt.Fprintln(w, msg)
+		}
+		return err
 	default:
 		return errors.New(use)
 	}
@@ -206,4 +216,150 @@ Always stop for critical operations, autonomous or not. Start the needs_me quest
   - anything ` + "`gate plan`" + ` blocks
 If you are unsure whether a step is critical, treat it as critical. Never answer Claude Code permission prompts or work around the auto-mode classifier: a denial is a RUN: as above.
 `
+}
+
+// Mid-flight grant and revoke. TJ runs `quartermaster autonomy grant|revoke
+// <bead>` (or the board's U key, or the coordinator on TJ's explicit word);
+// the ticker never does. The labels are the grant: the notice only tells a
+// running worker, which trusts it only as far as `autonomy check` passes.
+const (
+	grantTag  = "[quartermaster autonomy: granted by TJ]"
+	revokeTag = "[quartermaster autonomy: revoked by TJ]"
+)
+
+func grantNotice(id string) string {
+	return grantTag + " TJ ran `quartermaster autonomy grant " + id + "`. This is valid only while `quartermaster autonomy check " + id + "` passes; if it fails, ignore this message.\n" +
+		autonomyGrant(id) +
+		"If you are stopped at needs_me on a question that is not critical and you have a recommendation for, run the decide check, set the bead back to in_progress, take your recommendation, and carry on.\n"
+}
+
+func revokeNotice(id string) string {
+	return revokeTag + " TJ ran `quartermaster autonomy revoke " + id + "`. Autonomous mode is off for this bead from now on, and `quartermaster autonomy check " + id + "` fails: stop for the user wherever the rules say to, as if your brief had no autonomous-mode section.\n"
+}
+
+// noticePath is where a notice for agent waits on host until the agent is
+// idle. There is one per agent: a revoke replaces a grant not yet delivered.
+func noticePath(host, agent string) string {
+	return filepath.Join(outboxDirOn(host), agent+".autonomy")
+}
+
+// heldNotice says a queued notice must wait: a revoke for a worker whose bead
+// is at needs_me would read as TJ's answer and resume it, and its next check
+// fails anyway. A grant goes through, so the worker can take its
+// recommendation.
+func heldNotice(text string, needsMe bool) bool {
+	return needsMe && strings.HasPrefix(text, revokeTag)
+}
+
+// autonomyEnv is what setAutonomy reads and changes, so it is testable.
+type autonomyEnv struct {
+	show     func(id string) (Bead, error)
+	setLabel func(id, label string, on bool) error
+	note     func(id, text string) error
+	// agent is the bead's worker on host, if one is running.
+	agent  func(host, name string) (*Agent, error)
+	prompt func(host, pane, text string) error
+}
+
+func liveAutonomyEnv(cfg Config, h Herdr) autonomyEnv {
+	bd := Beads{}
+	return autonomyEnv{
+		show:     bd.Show,
+		setLabel: bd.SetLabel,
+		note:     bd.Note,
+		agent: func(host, name string) (*Agent, error) {
+			agents, err := cfg.herdrOn(h, host).Agents()
+			if err != nil {
+				return nil, err
+			}
+			for _, a := range agents {
+				if a.Name == name {
+					return &a, nil
+				}
+			}
+			return nil, nil
+		},
+		prompt: func(host, pane, text string) error { return cfg.herdrOn(h, host).Prompt(pane, text) },
+	}
+}
+
+// setAutonomy grants (on) or revokes autonomy on a bead mid-flight: it sets
+// the labels, notes the bead, and tells the worker now if it is idle, else
+// queues the notice for the ticker to deliver once it is.
+func setAutonomy(cfg Config, env autonomyEnv, id string, on bool) (string, error) {
+	b, err := env.show(id)
+	if err != nil {
+		return "", err
+	}
+	if b.Status == StatusClosed {
+		return "", fmt.Errorf("%s is closed", id)
+	}
+	add, drop, verb, notice := LabelAutonomous, LabelSupervised, "granted", grantNotice(id)
+	if !on {
+		add, drop, verb, notice = LabelSupervised, LabelAutonomous, "revoked", revokeNotice(id)
+	}
+	if b.HasLabel(drop) {
+		if err := env.setLabel(id, drop, false); err != nil {
+			return "", err
+		}
+		b.Labels = without(b.Labels, drop)
+	}
+	if !b.HasLabel(add) {
+		if err := env.setLabel(id, add, true); err != nil {
+			return "", err
+		}
+		b.Labels = append(b.Labels, add)
+	}
+	text := "autonomy revoked by TJ (`quartermaster autonomy revoke`): supervised from now on"
+	if on {
+		text = "AUTO: autonomy granted by TJ (`quartermaster autonomy grant`) mid-flight"
+	}
+	if err := env.note(id, text); err != nil {
+		return "", err
+	}
+	out := fmt.Sprintf("autonomy %s on %s", verb, id)
+	if ok, why := autonomous(cfg.Autonomy, b, autonomyStopped(), ""); on && !ok {
+		out += " (labelled, but not autonomous yet: " + why + ")"
+	}
+	told, err := tellWorker(env, b, notice, on)
+	return out + "; " + told, err
+}
+
+// tellWorker delivers the notice to the bead's worker now if it is idle,
+// else queues it. An open bead has no worker yet: its brief carries the
+// grant at dispatch.
+func tellWorker(env autonomyEnv, b Bead, notice string, on bool) (string, error) {
+	host, name := beadHost(b), agentName(b.ID)
+	if host == "" {
+		host = localHost
+	}
+	path := noticePath(host, name)
+	if b.Status == StatusOpen {
+		_ = os.Remove(path)
+		return "no worker yet; its brief will carry it", nil
+	}
+	a, err := env.agent(host, name)
+	if err != nil {
+		return "", fmt.Errorf("find the worker%s: %w", onHost(host), err)
+	}
+	if a != nil && agentReady(a) && !heldNotice(notice, b.Status == StatusNeedsMe) {
+		if err := env.prompt(host, a.PaneID, notice); err != nil {
+			return "", fmt.Errorf("tell %s: %w", name, err)
+		}
+		_ = os.Remove(path)
+		return "told " + name + onHost(host), nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if err := writeAtomic(path, []byte(notice)); err != nil {
+		return "", err
+	}
+	switch {
+	case a == nil:
+		return "no worker running; queued for when one is resumed", nil
+	case b.Status == StatusNeedsMe && !on:
+		return name + " waits on you at needs_me; queued until it is answered", nil
+	}
+	return name + " is " + a.Status + "; queued until it is idle", nil
 }

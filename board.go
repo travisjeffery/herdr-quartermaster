@@ -96,6 +96,7 @@ type boardEnv struct {
 	resume      func(id string) (string, error)
 	resolve     func(id string) (string, error)
 	release     func(b Bead, days int) error
+	autonomy    func(id string, on bool) (string, error)
 	focus       func(agent string) error
 	inboxDone   func(id string) error
 	copy        func(text string) error
@@ -138,6 +139,9 @@ func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 			return strings.TrimSpace(string(out)), err
 		},
 		prompt: h.Prompt,
+		autonomy: func(id string, on bool) (string, error) {
+			return setAutonomy(cfg, liveAutonomyEnv(cfg, h), id, on)
+		},
 		dispatch: func(id, kind string) (string, error) {
 			return dispatch(cfg, h, id, DispatchOpts{Kind: kind, Focus: true})
 		},
@@ -768,6 +772,30 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 		return []cmd{func() msg {
 			return doneMsg{text: id + " " + word, err: m.env.setLabel(id, LabelNext, on), reload: true}
 		}}
+	case "U":
+		// Off when the bead runs on its label or the default; supervised
+		// beats both, as in autonomous.
+		on := r.bead.HasLabel(LabelSupervised) || !(r.bead.HasLabel(LabelAutonomous) || m.cfg.Autonomy.Default)
+		q := "grant autonomy to " + id + ": it goes ahead without you except critical operations?"
+		if !on {
+			q = "revoke autonomy on " + id + ": it stops for you again?"
+		}
+		m.ask = confirm(q, func() []cmd {
+			add, drop := LabelAutonomous, LabelSupervised
+			if !on {
+				add, drop = drop, add
+			}
+			m.local(id, func(b *Bead) {
+				b.Labels = without(b.Labels, drop)
+				if !b.HasLabel(add) {
+					b.Labels = append(b.Labels, add)
+				}
+			})
+			return []cmd{func() msg {
+				text, err := m.env.autonomy(id, on)
+				return doneMsg{text: text, err: err, reload: true}
+			}}
+		})
 	case "S":
 		statuses := map[string]string{"o": StatusOpen, "i": StatusInProgress, "b": StatusBlocked, "m": StatusNeedsMe}
 		m.ask = &ask{prompt: id + " status: o open · i in_progress · b blocked · m needs_me", keys: "oibm", then: func(a string) []cmd {
