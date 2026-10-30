@@ -1,0 +1,40 @@
+ ▐▛███▛█   Claude Code v2.1.295
+▝▜██████▀  Haiku 5.5 · Claude Team
+ ▝▝   ▝▝   ~/src/example-project
+
+
+❯ Use the Bash tool to run exactly: mkdir -p out2 && touch out2/hello.txt   Do nothing else.
+
+● Bash(mkdir -p out2 && touch out2/hello.txt)
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Cooked for 1s · done 3:11 PM
+
+❯ Use the Write tool to create notes2.md containing the single line: hello. Do nothing else.
+
+● Write(notes2.md)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Create file
+ notes2.md
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  1 hello
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to create notes2.md?
+ ❯ 1. Yes
+   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend
+
+
+
+
+
+
+
+
+
+
+
+

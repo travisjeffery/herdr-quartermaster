@@ -404,6 +404,9 @@ func (t Ticker) once(st *TickerState) error {
 		id := th.Bead.ID
 		current[id] = true
 		prev, seen := st.Threads[id]
+		if th.Agent != nil && th.Agent.Status == "blocked" {
+			th.Prompt = t.readPrompt(th.Agent.PaneID)
+		}
 		out := transition(th, prev, !seen, now)
 		if out.Resume {
 			if err := t.resume(id); err != nil {
@@ -459,6 +462,20 @@ func (t Ticker) once(st *TickerState) error {
 		t.verify(st, now)
 	}
 	t.nudgeCoordinator(st, agents, now)
+	return nil
+}
+
+// readPrompt is the approval prompt a pane shows, nil when there is none or
+// it can't be read.
+func (t Ticker) readPrompt(pane string) *ApprovalPrompt {
+	screen, err := t.herdr.Read(pane, promptReadLines, callTimeout)
+	if err != nil {
+		t.log.Printf("read prompt in %s: %v", pane, err)
+		return nil
+	}
+	if p, ok := parsePrompt(screen); ok {
+		return &p
+	}
 	return nil
 }
 

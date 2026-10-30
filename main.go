@@ -53,6 +53,11 @@ Usage:
                                                        (decide, merge, apply) without TJ right now
   quartermaster autonomy grant|revoke <bead>           label a bead autonomous or supervised mid-flight and
                                                        tell its worker once it is idle
+  quartermaster prompt <bead>                          the approval prompt the bead's worker is showing, with
+                                                       its options and a hash that names it
+  quartermaster answer <bead> <choice> --expect HASH   answer that prompt (choice: option number or label) only
+                [--by WHO]                             if it is still the one with HASH; waits for it to clear
+                                                       and notes the answer on the bead (WHO: coordinator, TJ)
   quartermaster gate plan <file|-> [--expect op=N,...] exit 0 only if a pulumi preview --json or tofu
                                                        show -json plan has no delete, replace or unknown op
                                                        (and, with --expect, exactly those changes)
@@ -157,6 +162,8 @@ func run(args []string) error {
 	deliver := fs.String("deliver", defaultDeliver(), "digest: where to send it: desktop, slack, stdout, none (comma-separated)")
 	always := fs.Bool("always", false, "digest: notify even when nothing changed and nothing needs you")
 	actionFlag := fs.String("action", "", "autonomy check: the kind of step, decide, merge or apply")
+	expect := fs.String("expect", "", "answer: the hash of the prompt being answered, from quartermaster prompt")
+	by := fs.String("by", "coordinator", "answer: who chose the answer, for the bead note")
 	pos, err := interspersed(fs, rest)
 	if err != nil {
 		return err
@@ -287,6 +294,24 @@ func run(args []string) error {
 		return err
 	case "autonomy":
 		return autonomyCmd(cfg, liveAutonomyEnv(cfg, h.on(cfg.coordSocket())), pos, *actionFlag, os.Stdout)
+	case "prompt":
+		if len(pos) != 1 {
+			return fmt.Errorf("usage: quartermaster prompt <bead>")
+		}
+		out, err := showPrompt(livePromptEnv(cfg, h.on(cfg.coordSocket())), pos[0])
+		if err != nil {
+			return err
+		}
+		fmt.Print(out)
+	case "answer":
+		if len(pos) != 2 {
+			return fmt.Errorf("usage: quartermaster answer <bead> <choice> --expect <hash> [--by coordinator|TJ]")
+		}
+		msg, err := answerPrompt(livePromptEnv(cfg, h.on(cfg.coordSocket())), pos[0], pos[1], *expect, *by)
+		if msg != "" {
+			fmt.Println(msg)
+		}
+		return err
 	case "board":
 		return runBoard(cfg)
 	case "action":

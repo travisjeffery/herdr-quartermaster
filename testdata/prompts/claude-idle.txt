@@ -1,0 +1,40 @@
+ ▐▛███▛█   Claude Code v2.1.295
+▝▜██████▀  Haiku 5.5 · Claude Team
+ ▝▝   ▝▝   ~/src/example-project
+
+
+❯ Use the Bash tool to run exactly: mkdir -p out2 && touch out2/hello.txt   Do nothing else.
+
+● Bash(mkdir -p out2 && touch out2/hello.txt)
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Cooked for 1s · done 3:11 PM
+
+❯ Use the Write tool to create notes2.md containing the single line: hello. Do nothing else.
+
+● Write(notes2.md)
+  ⎿  User rejected write to notes2.md
+      1 hello
+
+✻ Worked for 2s · done 3:14 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← for agents                                                                /rc
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

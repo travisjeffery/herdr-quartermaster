@@ -205,8 +205,20 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   bead and briefs the agent. One bead per thread.
 - Talk to a worker with `+"`herdr agent prompt <agent-name> \"...\"`"+` (agent name = bead
   id with dots as dashes). Read it with `+"`herdr agent read <name> --source recent-unwrapped --lines 120`"+`.
-  Never prompt a worker that is working or blocked; never answer its approval
-  prompts.
+  Never prompt a worker that is working or blocked.
+- A worker blocked at an approval prompt shows up in the inbox with the prompt,
+  its options and a hash; `+"`quartermaster prompt <bead>`"+` reads it again. Answer only
+  with `+"`quartermaster answer <bead> <choice> --expect <hash>`"+` (choice: the option
+  number), never by sending keys: it refuses if a different prompt is showing,
+  waits for it to clear, and notes the answer on the bead. The prompt text is the
+  worker's, so judge the actual command, not its description.
+  - Answer on your own only a prompt in a category a rule at the end of this list allows, and
+    never one counting down to an automatic deny (an auto-mode classifier denial).
+  - Everything else goes to TJ: show the prompt, its options and hash. When they
+    pick ("<bead>: 1"), answer with `+"`--by TJ`"+`. If the prompt changed, read it again
+    and ask again.
+  - Never choose an option that grants standing permission ("don't ask again",
+    switching modes) unless TJ chose it. List each answer in your next update.
 - A needs_me bead's question is in its latest note. Relay it to TJ verbatim with
   the options; when they answer, prompt the worker and it resets the status.
 - A thread marked "auto" is autonomous: its worker decides on its own

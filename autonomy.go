@@ -287,19 +287,25 @@ func liveAutonomyEnv(cfg Config, h Herdr) autonomyEnv {
 		show:     bd.Show,
 		setLabel: bd.SetLabel,
 		note:     bd.Note,
-		agent: func(host, name string) (*Agent, error) {
-			agents, err := cfg.herdrOn(h, host).Agents()
-			if err != nil {
-				return nil, err
+		agent:    agentOn(cfg, h),
+		prompt:   func(host, pane, text string) error { return cfg.herdrOn(h, host).Prompt(pane, text) },
+	}
+}
+
+// agentOn finds the agent called name on a host's herdr server, nil when none
+// is running.
+func agentOn(cfg Config, h Herdr) func(host, name string) (*Agent, error) {
+	return func(host, name string) (*Agent, error) {
+		agents, err := cfg.herdrOn(h, host).Agents()
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range agents {
+			if a.Name == name {
+				return &a, nil
 			}
-			for _, a := range agents {
-				if a.Name == name {
-					return &a, nil
-				}
-			}
-			return nil, nil
-		},
-		prompt: func(host, pane, text string) error { return cfg.herdrOn(h, host).Prompt(pane, text) },
+		}
+		return nil, nil
 	}
 }
 

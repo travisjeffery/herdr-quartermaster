@@ -54,6 +54,9 @@ type Thread struct {
 	Merged []PR
 	// Auto is whether the bead runs without TJ right now (autonomous mode).
 	Auto bool
+	// Prompt is the approval prompt a blocked agent is showing, when the
+	// ticker could read it.
+	Prompt *ApprovalPrompt
 }
 
 func agentReady(a *Agent) bool {
@@ -195,6 +198,9 @@ type Snapshot struct {
 	// AutoMerge is the URL of the open PR last seen with auto-merge on, so the
 	// worker hears once when GitHub turns it off.
 	AutoMerge string `json:"auto_merge,omitempty"`
+	// PromptHash is the approval prompt last announced, so each prompt a
+	// blocked agent shows reaches the inbox once.
+	PromptHash string `json:"prompt_hash,omitempty"`
 }
 
 type EventKind string
@@ -249,6 +255,9 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 			s.ReadySince = now
 		}
 	}
+	if t.Prompt != nil {
+		s.PromptHash = t.Prompt.Hash
+	}
 	s.Merged, s.MergedTracked = slices.Clone(prev.Merged), true
 	for _, pr := range mergedPRs(t) {
 		if !slices.Contains(s.Merged, pr.URL) {
@@ -285,11 +294,22 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 		o.Resume = true
 		ev(EventResumed, "%s went back to work after needs_me; set it to in_progress", id)
 	}
-	if g == GroupNeedsYou && prev.Group != GroupNeedsYou {
+	// A blocked agent can move from one prompt to the next between ticks.
+	newPrompt := t.Prompt != nil && t.Prompt.Hash != prev.PromptHash
+	if g == GroupNeedsYou && (prev.Group != GroupNeedsYou || newPrompt) {
 		o.Notify = true
-		if t.Agent != nil && t.Agent.Status == "blocked" {
+		switch {
+		case t.Prompt != nil:
+			p := t.Prompt
+			countdown := ""
+			if p.Countdown != "" {
+				countdown = ", auto-denies in " + p.Countdown
+			}
+			ev(EventNeedsYou, "%s is at an approval prompt [%s]: %s (%s%s); answer with `quartermaster answer %s <choice> --expect %s`",
+				id, p.Hash, p.Summary(), p.Choices(), countdown, id, p.Hash)
+		case t.Agent != nil && t.Agent.Status == "blocked":
 			ev(EventNeedsYou, "%s is waiting at an approval or question prompt", id)
-		} else {
+		default:
 			ev(EventNeedsYou, "%s is marked needs_me; its latest note holds the question", id)
 		}
 	}
