@@ -719,6 +719,9 @@ ticker never grants. See
 Workers can run on other machines, each running a headless herdr server that
 the desktop's herdr reaches as a saved machine (`herdr machine add --label
 server server.local`); see [docs/design/worker-hosts.md](docs/design/worker-hosts.md).
+That design is superseded by [docs/design/cloud-workers.md](docs/design/cloud-workers.md)
+(proposed): remote workers as Claude Code and Codex cloud sessions, or Muse on
+a codespace driven over MSP, instead of LAN machines.
 Only dispatch and queued briefs know about hosts so far; the ticker, resume,
 resolve and sweep still act on `local`.
 
