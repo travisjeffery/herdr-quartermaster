@@ -1,7 +1,10 @@
 # Worker hosts: running workers on more than one machine
 
-Status: **accepted** (2026-10-15), not yet implemented. Nothing here changes
-behavior until the phases below land. The decisions are recorded at the end.
+Status: **superseded** (2026-10-30) by [cloud-workers.md](cloud-workers.md):
+remote workers run as cloud sessions instead of on LAN machines. Kept for its
+reasoning; §16 of the new design lists what carries over (the bead as the
+record of where a thread runs, `bd-proxy`'s allowlist, `needs:` labels). Was
+accepted 2026-10-15; the Beads proxy and `dispatch --host` were built.
 
 ## Summary
 
