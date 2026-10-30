@@ -2,7 +2,7 @@
 
 Status: **superseded** (2026-10-30) by [cloud-workers.md](cloud-workers.md):
 remote workers run as cloud sessions instead of on LAN machines. Kept for its
-reasoning; §16 of the new design lists what carries over (the bead as the
+reasoning; §18 of the new design lists what carries over (the bead as the
 record of where a thread runs, `bd-proxy`'s allowlist, `needs:` labels). Was
 accepted 2026-10-15; the Beads proxy and `dispatch --host` were built.
 
