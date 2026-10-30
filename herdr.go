@@ -311,6 +311,13 @@ func (h Herdr) Read(target string, lines int, timeout time.Duration) (string, er
 	return string(out), err
 }
 
+// SendKeys presses keys in an agent's pane: names such as enter, down and esc,
+// or literal characters.
+func (h Herdr) SendKeys(target string, keys ...string) error {
+	_, err := h.call(callTimeout, append([]string{"agent", "send-keys", target}, keys...)...)
+	return err
+}
+
 func (h Herdr) Rename(pane, name string) error {
 	_, err := h.call(callTimeout, "agent", "rename", pane, name)
 	return err

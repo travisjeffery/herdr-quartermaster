@@ -204,6 +204,20 @@ once per head commit; otherwise the board shows
   sets the bead back to `in_progress` with the note `auto: agent resumed after
   needs_me`, which keeps the question in the history. The ticker holds its own
   prompts to a `needs_me` thread until then, so they never count as your answer.
+- **Approval prompts.** For a worker stopped at a permission prompt, the
+  ticker reads the prompt off its screen. The inbox item has its title, the
+  command or file, the options, any auto-deny countdown, and a short hash of
+  the prompt text: `backend-ab12 is at an approval prompt [bff9292a]: Bash
+  command: … (1 Yes · 2 … · 3 No)`. A new prompt on the same worker is a new
+  item. `quartermaster prompt <bead>` reads it again. `quartermaster answer
+  <bead> <choice> --expect <hash>` answers it, but first reads the screen
+  again and refuses if the prompt there has a different hash, so an answer
+  never lands on a prompt that replaced the one it was meant for. It sends the
+  option's digit (or moves the cursor and presses enter in an unnumbered
+  menu), waits for the prompt to clear, and notes `PROMPT ANSWERED: <choice>
+  to <prompt> [<hash>] by <coordinator|TJ>` on the bead. The coordinator
+  answers on its own only for the categories its `coordinator_rules` allow,
+  and relays the rest to you.
 - **Commands only you can run** (a classifier denial, an interactive login, a
   production change) come back as a `RUN: <command>` note on a `needs_me`
   bead. The sidebar shows `needs you · run command`, the coordinator relays it
@@ -837,6 +851,8 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster autonomy on\|off\|status` | The global switch for [autonomous beads](#autonomous-beads), and which beads are autonomous now. |
 | `quartermaster autonomy check <bead> [--action decide\|merge\|apply\|install]` | Exit 0 only if the bead may take that kind of step without you right now; a worker runs it before each one. |
 | `quartermaster autonomy grant\|revoke <bead>` | Make a bead autonomous or supervised mid-flight, and tell its worker once it is idle. |
+| `quartermaster prompt <bead>` | The approval prompt the bead's worker is showing: its text, options, auto-deny countdown, and a hash that names it. Exits 1 when none is showing. |
+| `quartermaster answer <bead> <choice> --expect HASH [--by WHO]` | Answer that prompt with an option number or label, only if it is still the prompt with `HASH`. Waits for it to clear and notes the answer on the bead, crediting `WHO` (default `coordinator`). |
 | `quartermaster gate plan <file\|-> [--expect op=N,...]` | Exit 0 only if a `pulumi preview --json` or `tofu show -json` plan creates, updates or reads, with no delete, replace or unknown operation, and with `--expect`, exactly those counts. A plan that doesn't parse fails. |
 | `quartermaster bd-proxy --host NAME [--bd PATH]` | The forced command behind a worker host's Beads key in `authorized_keys`: runs the host's `bd` request (an allowlisted subcommand, `BEADS_DIR` pinned, one line per request in `bd-proxy.log` in the state dir). The host side is [`scripts/bd-shim`](scripts/bd-shim). See [worker hosts §5](docs/design/worker-hosts.md#5-beads-one-database-for-every-host). |
 | `quartermaster version` | Print the version. |
