@@ -285,6 +285,66 @@ so `quartermaster resume` can restart the bead on Claude; it loses the pi
 conversation, not the work, which the notes and commits carry. Removing `pi`
 from `kinds` is not needed to roll back.
 
+## Muse models on pi
+
+Can pi run on Muse, the model the `muse` worker kind uses? Yes, without an
+extension. What is unsettled is authentication.
+
+**pi already has a `meta` provider.** pi 1.5.0's built-in catalog includes
+provider `meta` at `https://api.meta.ai/v1`, using the OpenAI Responses API
+(`openai-responses`), with `muse-spark-1.1`, `1.2`, `1.3` (plus `-contributor`
+variants) and `muse-wonder-1.0` (1M context, 131K output). `pi --list-models`
+hides it because it lists only models whose provider has credentials, and
+`pi auth check --provider meta` reports `credentials_not_configured`.
+
+**The model the Muse CLI uses is missing.** Muse is configured with
+`muse-wonder-full-1.0`; pi's catalog has `muse-wonder-1.0` but not the
+`-full` id. A `models` entry under `providers.meta` in
+`~/.pi/agent/models.json` adds it and inherits the provider's base URL and
+API. Custom endpoints in general work the same way (`models.json` for any
+OpenAI-, Anthropic- or Google-compatible API, or `pi.registerProvider` in an
+extension for custom auth or discovery).
+
+**Auth is API-key only in pi.** pi's `meta` provider reads `META_API_KEY`
+and has no `/login` flow. The Muse subscription login (`muse login`, an
+OAuth device-code flow) leaves both an access token and a Meta "Model API
+key" in `~/.config/muse/auth.json`, and Muse authenticates to
+`api.meta.ai` with that key. (Muse's own `META_API_KEY` override uses the
+same key type.) So there are two routes:
+
+1. Reuse the subscription's key: in `models.json`, set the `meta`
+   provider's `apiKey` to a `!command` that reads the key from Muse's auth
+   file each time it is needed, so pi picks up a rotated key without a copy
+   on disk. Untested. Open: whether calls from pi count against the Muse
+   Code subscription allowance (currently "Max", 3% of the window and 18% of
+   the week used) or are billed separately, and whether the subscription
+   terms allow a client other than Muse. A key Muse refreshes or revokes on
+   logout would break pi mid-run.
+2. A separate Meta Model API key, exported as `META_API_KEY` in the pi pane
+   through `[agents.pi] env`. Simpler, pay-as-you-go (catalog price for
+   `muse-wonder-1.0`: $4 in / $20 out per million tokens).
+
+The API's shape is consistent with this: unauthenticated requests to
+`/v1/models`, `/v1/chat/completions` and `/v1/responses` all return
+OpenAI-style `invalid_api_key` errors, and `/v1/messages` an Anthropic-style
+one. That proves nothing about routing (an unknown path gives the same 401),
+so the deciding check is one authenticated call:
+`pi -p --model meta/muse-wonder-1.0 "reply ok"` once a key is set.
+
+**Fallback: Muse Spark Open on Fireworks.** pi's catalog also has
+`fireworks/accounts/fireworks/models/muse-spark-open`: the open-weights Spark
+model via Fireworks' Anthropic-compatible endpoint, 1M context, 131K output,
+$1.25 in / $4.25 out per million tokens. It needs a Fireworks API key, and
+none is configured (`pi auth check --provider fireworks`:
+`credentials_not_configured`; no `FIREWORKS_*` variable set). It is a Spark
+model, not Wonder, so expect it to be weaker than what Muse workers run
+today. It also bills to a separate Fireworks account. Use it only if neither
+Meta route is acceptable.
+
+Recommendation: `meta/muse-wonder-1.0`, or `muse-wonder-full-1.0` added
+through `models.json`, with route 1 if TJ confirms the subscription covers
+pi, otherwise route 2.
+
 ## 7. Effort and open questions
 
 | Step | Size |
@@ -301,7 +361,9 @@ Open questions for TJ:
    `openai` (API key) ready; `anthropic` is not configured. Which model for
    workers and which for the coordinator? An Anthropic model needs an API key
    or a sign-in in pi, and its usage is billed apart from the Claude Code
-   subscription.
+   subscription. For Muse, see [Muse models on pi](#muse-models-on-pi): reuse
+   the Muse subscription's Model API key (if its terms and billing allow), a
+   separate Meta key, or Muse Spark Open on Fireworks with a Fireworks key?
 2. **Must-have guardrails before the pilot.** Proposed minimum: the reused
    hooks, ask rules with prompts quartermaster can answer, the unattended
    timeout, and denied writes under `~/.pi/`. Is the model judge required
