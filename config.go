@@ -29,9 +29,6 @@ type Config struct {
 	// on Herdr 0.9.1 a prompt merges with whatever the user has half-typed.
 	IdleSeconds int  `toml:"idle_seconds"`
 	Nudge       bool `toml:"nudge"`
-	// Remove a bead's worktree once its PR merged, the bead is closed and its
-	// agent is idle. Off by default: removal closes the workspace.
-	AutoResolve bool `toml:"auto_resolve"`
 	// Only keys with these team prefixes count as Linear issues; empty accepts
 	// any key outside a small denylist.
 	LinearPrefixes []string `toml:"linear_prefixes"`
@@ -44,9 +41,6 @@ type Config struct {
 	VerifyMinutes int `toml:"verify_minutes"`
 	// StaleDays is how long a bead goes untouched before verify checks it.
 	StaleDays int `toml:"stale_days"`
-	// AutoClose lets verify close a bead on strong evidence; off, it only
-	// flags it to the coordinator.
-	AutoClose bool `toml:"auto_close"`
 	// VerifyMax caps the GitHub calls a verify pass makes beyond its probes.
 	VerifyMax int `toml:"verify_max"`
 	// GHMinRemaining skips a verify pass while fewer GitHub GraphQL points
@@ -81,8 +75,9 @@ type Config struct {
 	// coordinator alike.
 	Agents map[string]AgentConfig `toml:"agents"`
 
-	// Autonomy is what a bead labeled autonomous may do without TJ; see
-	// docs/design/autonomous-mode.md.
+	// Autonomy is the dial: how far beads go without TJ; see
+	// docs/design/autonomy-dial.md. It also decides what auto_close and
+	// auto_resolve did: the ticker closes and resolves at level 3 and above.
 	Autonomy AutonomyConfig `toml:"autonomy"`
 }
 
@@ -173,7 +168,7 @@ func defaultConfig() Config {
 		StaleDays:        3,
 		VerifyMax:        20,
 		GHMinRemaining:   1000,
-		Autonomy:         AutonomyConfig{Enabled: true, Merge: true, Apply: true, Decide: true, Install: true},
+		Autonomy:         AutonomyConfig{Level: 4, Max: maxStanding, Widespread: 5},
 	}
 }
 
@@ -307,8 +302,12 @@ func migrateDir(legacy, dir string) []string {
 
 func loadConfig() (Config, error) {
 	cfg := defaultConfig()
-	_, err := toml.DecodeFile(filepath.Join(configDir(), "config.toml"), &cfg)
+	md, err := toml.DecodeFile(filepath.Join(configDir(), "config.toml"), &cfg)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return cfg, err
+	}
+	cfg.Autonomy.migrate(md.IsDefined("autonomy", "level"))
+	if err := cfg.Autonomy.validate(); err != nil {
 		return cfg, err
 	}
 	cfg.Repo, cfg.BeadsDir = expandHome(cfg.Repo), expandHome(cfg.BeadsDir)

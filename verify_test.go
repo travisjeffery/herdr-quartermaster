@@ -135,9 +135,14 @@ func (f *fakeVerify) env() verifyEnv {
 	}
 }
 
+// vcfg is the default config, with the global level just below the one that
+// auto-closes unless autoClose.
 func vcfg(autoClose bool) Config {
 	c := defaultConfig()
-	c.AutoClose = autoClose
+	c.Autonomy.Level = classHousekeeping
+	if !autoClose {
+		c.Autonomy.Level--
+	}
 	return c
 }
 
@@ -168,16 +173,16 @@ func TestVerifyLinearDoneClosesWithAutoClose(t *testing.T) {
 	}
 }
 
-func TestVerifyFlagOnlyByDefault(t *testing.T) {
+func TestVerifyFlagOnlyBelowLevel3(t *testing.T) {
 	f := newFake(withNote(x0w5(), "Linear: INF-994"))
 	f.issues["INF-994"] = linearIssue{Key: "INF-994", State: "completed", Name: "Done"}
 	st := TickerState{}
-	lines := pass(t, f, defaultConfig(), &st, vNow)
+	lines := pass(t, f, vcfg(false), &st, vNow)
 	if len(f.closedN) != 0 {
-		t.Fatalf("closed %v with auto_close off", f.closedN)
+		t.Fatalf("closed %v at level 2", f.closedN)
 	}
-	if len(f.events) != 1 || f.events[0].Kind != EventLikelyStale || !strings.Contains(f.events[0].Summary, "auto_close is off") {
-		t.Fatalf("events = %+v, want one likely_stale saying auto_close is off", f.events)
+	if len(f.events) != 1 || f.events[0].Kind != EventLikelyStale || !strings.Contains(f.events[0].Summary, "level is below 3") {
+		t.Fatalf("events = %+v, want one likely_stale saying the level is below 3", f.events)
 	}
 	if !strings.Contains(strings.Join(lines, "\n"), "backend-x0w5 flag") {
 		t.Fatalf("lines = %q", lines)

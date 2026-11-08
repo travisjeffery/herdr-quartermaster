@@ -140,7 +140,7 @@ it was verified>"`). A `rolling-out` bead is finished first, then closed. The
 ticker sees the bead close and writes a `closed` event, and the coordinator
 runs `quartermaster resolve <bead>`: that removes the bead's worktree and its
 workspace, closing the worker's pane, and deletes the local branch if the PR
-merged. With `auto_resolve = true` the ticker resolves on its own once the PR
+merged. At autonomy level 3 or above the ticker resolves on its own once the PR
 has merged, the bead is closed and the agent is idle.
 
 Other cases:
@@ -270,8 +270,8 @@ once per head commit; otherwise the board shows
   5. a closed bead has the same title, or the same Linear key outside its
      own family.
 
-  Strong evidence closes the bead with a reason citing it, but only with
-  `auto_close = true`: (1); (2) unless the title is rollout-shaped or the notes
+  Strong evidence closes the bead with a reason citing it, but only at
+  autonomy level 3 or above: (1); (2) unless the title is rollout-shaped or the notes
   after the last PR say work remains; and (4) once a run it links has failed
   and a later run of that workflow passed. A `rolling-out`, `needs_me` or epic
   bead, or one with open children, is never closed. Everything else becomes a
@@ -590,14 +590,12 @@ tick_seconds = 15         # how often the ticker checks threads
 gh_seconds = 60           # how often it checks PRs
 idle_seconds = 60         # it only types into an agent idle this long
 nudge = true              # prompt the coordinator when there's news
-auto_resolve = false      # remove a merged, closed bead's worktree automatically
 repos = { infra = "~/src/infra", model = "~/src/model" }
 linear_prefixes = ["ENG"] # Linear team keys to recognise; empty accepts any KEY-123
 linear_workspace = "acme" # linear.app/<this>/issue/KEY: where the board's `l` opens issues
 herdr_socket = "~/.config/herdr/herdr.sock"  # the herdr server the coordinator runs on
 verify_minutes = 60       # how often to re-check stale beads; 0 turns it off
 stale_days = 3            # a bead untouched this long is checked
-auto_close = false        # close beads on strong evidence; off, they are only flagged
 verify_max = 20           # GitHub calls a pass may make beyond its probes
 gh_min_remaining = 1000   # skip a pass below this many GraphQL points left
 coordinator_rules = ["Ask before touching the staging cluster."]  # extra bullets under the coordinator's Rules
@@ -608,13 +606,16 @@ args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
 [agents.claude]           # per-kind environment, exported in the agent's pane before it starts
 env = ["CLAUDE_CODE_ENABLE_TELEMETRY=1", "OTEL_EXPORTER_OTLP_ENDPOINT=https://otel.example.com"]
 
-[autonomy]                # what a bead labeled autonomous may do without you (these are the defaults)
-enabled = true            # the lasting kill switch; `quartermaster autonomy off` is the quick one
-default = false           # true: every bead is autonomous unless labeled supervised
-merge = true              # merge its own PRs once approved and green
-apply = true              # run applies whose preview passes `quartermaster gate plan`
-decide = true             # take its own recommendation instead of asking
-install = true            # install its own merged herdr-quartermaster PR (pull, build, restart the ticker)
+[autonomy]                # the 0-9 dial (docs/design/autonomy-dial.md; these are the defaults)
+level = 4                 # the global level for beads without an autonomy:N label; 3+ also auto-closes
+                          # and auto-resolves (was auto_close/auto_resolve)
+max = 7                   # the ceiling for standing levels; 8 and 9 only by lease (`autonomy level 8 <bead> --for 4h`)
+prod = []                 # globs naming production targets; an apply elsewhere is class 6, here (or with
+                          # no target or no patterns) 7
+widespread = 5            # deletes past this are class 9
+merge_class = {}          # e.g. { infra = 7 }: a repo whose main deploys on merge
+# Read for one release: default = true is level = 7; enabled = false caps max at 2;
+# decide, install, merge or apply = false cap max at 1, 2, 3 or 5.
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts
@@ -838,7 +839,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster inbox done [<bead>...]` | Mark inbox items handled (all of them if no bead is given). |
 | `quartermaster resume [<bead>...] [--agent K]` | Restart exited workers in their worktrees, continuing their last conversation. |
 | `quartermaster stale [--days N] [--release]` | List claims with no agent, worktree or PR untouched N days (7); `--release` reopens them. |
-| `quartermaster verify [<bead>...] [--yes]` | Stale beads with evidence their work is done. Lists what a pass would do; `--yes` acts like the ticker (closes only with `auto_close`). |
+| `quartermaster verify [<bead>...] [--yes]` | Stale beads with evidence their work is done. Lists what a pass would do; `--yes` acts like the ticker (closes only at autonomy level 3+). |
 | `quartermaster resolve <bead> [--force]` | Remove a finished bead's worktree, and its branch if the PR merged. |
 | `quartermaster sweep [--yes]` | List finished worktrees across every repo; `--yes` removes only the safe ones. |
 | `quartermaster report [--since 24h\|7d\|DATE]` | Markdown summary of what shipped, what's in flight and what needs you. |
@@ -848,9 +849,11 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster ticker run\|start\|stop\|status`, `quartermaster tick` | The background loop, or one pass of it in the foreground. `status` shows the herdr socket it follows. |
 | `quartermaster configure [--repo PATH]` | First-time setup: write the config, link `~/.local/bin/quartermaster` (and `qm`), install the agent view. Safe to run again. |
 | `quartermaster unconfigure` | Stop the ticker and remove the agent view and sidebar tokens. |
-| `quartermaster autonomy on\|off\|status` | The global switch for [autonomous beads](#autonomous-beads), and which beads are autonomous now. |
-| `quartermaster autonomy check <bead> [--action decide\|merge\|apply\|install]` | Exit 0 only if the bead may take that kind of step without you right now; a worker runs it before each one. |
-| `quartermaster autonomy grant\|revoke <bead>` | Make a bead autonomous or supervised mid-flight, and tell its worker once it is idle. |
+| `quartermaster autonomy level` | The dial: global level, max, leases, and each active bead's effective level. Advisory: workers hold their own credentials. |
+| `quartermaster autonomy level N\|- [<bead>...] [--for D]` | Set the global level, or beads' own (label `autonomy:N`) and tell their workers; `-` goes back to the global level. 8 is a lease (`--for`, default 4h); 9 only on beads, with `--for`. The ticker puts an expired lease back. |
+| `quartermaster autonomy check <bead> [--class N \| --action A [--target T]]` | Exit 0 only if the bead may take a step of that class without you right now; a worker runs it before each one. |
+| `quartermaster autonomy on\|off` | Off caps every bead at level 2 until on. |
+| `quartermaster autonomy grant\|revoke <bead>` | Level 7 or 2 on a bead (the old `autonomous`/`supervised` labels, still read as those levels). |
 | `quartermaster prompt <bead>` | The approval prompt the bead's worker is showing: its text, options, auto-deny countdown, and a hash that names it. Exits 1 when none is showing. |
 | `quartermaster answer <bead> <choice> --expect HASH [--by WHO]` | Answer that prompt with an option number or label, only if it is still the prompt with `HASH`. Waits for it to clear and notes the answer on the bead, crediting `WHO` (default `coordinator`). |
 | `quartermaster gate plan <file\|-> [--expect op=N,...]` | Exit 0 only if a `pulumi preview --json` or `tofu show -json` plan creates, updates or reads, with no delete, replace or unknown operation, and with `--expect`, exactly those counts. A plan that doesn't parse fails. |

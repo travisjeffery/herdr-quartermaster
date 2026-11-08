@@ -219,6 +219,7 @@ const (
 	EventLikelyStale  EventKind = "likely_stale"
 	EventAutoClosed   EventKind = "auto_closed"
 	EventAutoMergeOff EventKind = "auto_merge_off"
+	EventLeaseExpired EventKind = "lease_expired"
 )
 
 type Event struct {

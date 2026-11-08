@@ -140,7 +140,11 @@ func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 		},
 		prompt: h.Prompt,
 		autonomy: func(id string, on bool) (string, error) {
-			return setAutonomy(cfg, liveAutonomyEnv(cfg, h), id, on)
+			n := levelSupervised
+			if on {
+				n = levelAutonomous
+			}
+			return setLevel(cfg, liveAutonomyEnv(cfg, h), id, n, 0, "TJ", time.Now())
 		},
 		dispatch: func(id, kind string) (string, error) {
 			return dispatch(cfg, h, id, DispatchOpts{Kind: kind, Focus: true})
@@ -773,24 +777,19 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 			return doneMsg{text: id + " " + word, err: m.env.setLabel(id, LabelNext, on), reload: true}
 		}}
 	case "U":
-		// Off when the bead runs on its label or the default; supervised
-		// beats both, as in autonomous.
-		on := r.bead.HasLabel(LabelSupervised) || !(r.bead.HasLabel(LabelAutonomous) || m.cfg.Autonomy.Default)
+		// Grant (level 7) below the autonomous level, revoke (level 2) at it.
+		lvl, _ := m.cfg.beadLevel(r.bead, false)
+		on := lvl < levelAutonomous
 		q := "grant autonomy to " + id + ": it goes ahead without you except critical operations?"
 		if !on {
 			q = "revoke autonomy on " + id + ": it stops for you again?"
 		}
 		m.ask = confirm(q, func() []cmd {
-			add, drop := LabelAutonomous, LabelSupervised
+			n := levelAutonomous
 			if !on {
-				add, drop = drop, add
+				n = levelSupervised
 			}
-			m.local(id, func(b *Bead) {
-				b.Labels = without(b.Labels, drop)
-				if !b.HasLabel(add) {
-					b.Labels = append(b.Labels, add)
-				}
-			})
+			m.local(id, func(b *Bead) { b.Labels = withLevel(b.Labels, n) })
 			return []cmd{func() msg {
 				text, err := m.env.autonomy(id, on)
 				return doneMsg{text: text, err: err, reload: true}
