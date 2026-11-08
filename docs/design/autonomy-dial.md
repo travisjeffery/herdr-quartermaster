@@ -1,75 +1,107 @@
 # Autonomy dial: one 0–9 level, set by where an action lands
 
-Status: **proposed** (2026-11-08), third draft. D2 is decided (see
-"Decisions so far"); nothing is built until TJ decides the rest. Builds on [autonomous-mode.md](autonomous-mode.md),
-whose trust model it keeps.
+Status: **proposed** (2026-11-08), fourth draft. Some decisions are made
+(see "Decisions so far"); nothing is built until TJ decides the rest. This
+draft folds in two independent designs written in parallel without reading
+this one: the **Muse design** (`autonomy-dial-muse.md`) and the **Codex
+design** (`autonomy-dial-codex.md`). Ideas taken from them are credited
+where they appear. This doc stays the base because it builds on today's code
+(`autonomy.go`, `gate.go`, `prompt.go`, `dispatch.go`, `context.go`) and the
+trust model of [autonomous-mode.md](autonomous-mode.md).
 
 ## Summary
 
 Today autonomy is on or off per bead (`autonomous` / `supervised` labels),
-with four switches in `[autonomy]` (`decide`, `merge`, `apply`, `install`)
-and a separate set of coordinator rules. Each rule is about **who** acts
-(the worker, the coordinator) and **which capability** (decide, merge).
+with four switches in `[autonomy]` (`decide`, `merge`, `apply`, `install`),
+`auto_close` and `auto_resolve`, and prose rules for the coordinator. Those
+are five overlapping dials, and each one is about **who** acts or **which
+capability** it uses.
 
-This design replaces all of that with one number from 0 to 9, and classifies
+This design replaces all of them with one number from 0 to 9, and classifies
 **the action, not the actor**. Every action gets an **impact class**: how far
-its output reaches, from the agent's own scratch files (0) up to widespread
-production deletion (9). The dial at N means:
+its output reaches, from read-only (0) up to widespread production deletion
+(9). The dial at N means:
 
 > **Any action whose impact class is at most N may run without TJ.**
 > Anything above N stops for TJ.
 
-Who takes the action doesn't matter. A worker taking its own recommendation,
-the coordinator answering a `needs_me` question, and the coordinator answering
-an approval prompt are judged the same way: by the class of the action their
-choice authorizes. "The coordinator answers needs_me" is no longer a level of
-its own. At dial 4, the coordinator may answer "merge now or wait?" for TJ
-(class 4) but must relay "apply to staging?" (class 6).
+Who acts doesn't matter. A worker taking its own recommendation, the
+coordinator answering a `needs_me` question, and the coordinator answering
+an approval prompt are judged the same way: by the class of what their choice
+authorizes. At dial 4 the coordinator may answer "merge now?" (class 4) for
+TJ but must relay "apply to staging?" (class 6).
+
+Five rules shape the rest:
+
+1. **An action's preconditions are part of its class** (from Muse). Merging
+   an approved, green PR is class 4; merging without the required review is
+   a different action, class 8. A prod apply that passes `gate plan`, with
+   the expected change noted and a rollback named, is 7; without them it is
+   8. The dial authorizes action plus evidence, never the action alone.
+2. **An unknown or disputed class resolves up.** An action nobody can place
+   is class 9 (from Codex). When classifiers disagree, the highest wins
+   (from Muse).
+3. **The dial authorizes discretion inside the task, never new goals** (from
+   Codex). Text in repos, web pages, messages and tool output can't widen
+   what a bead is for, at any level. This is the prompt-injection defence
+   that holds when everything else allows.
+4. **The top levels are leases** (from Muse). Levels 8 and 9 are scoped to
+   beads and expire, and 9 is never global (D9).
+5. **The first version is advisory** (from Codex). Workers keep their own
+   credentials, so the check is enforced by the commands quartermaster
+   owns and by the agents' cooperation, not by withholding access. A
+   credential-holding executor comes in a later phase.
 
 It reads like log verbosity, inverted: at 0 TJ sees and approves everything;
-at 9 everything is allowed and TJ sees the digest. **9 is true allow-all**:
-nothing sits outside the dial (D2).
+at 9 TJ sees the digest. **9 is true allow-all**, with nothing kept outside
+the dial (D2, decided).
 
-Three things stay as they are:
+What stays as it is:
 
-- **The labels are the grant.** A level lives in a bead label and a state file
-  that only TJ (or the coordinator on TJ's explicit word) changes. The ticker
-  never raises a level, and an automated message approves nothing.
-- **The check decides.** Before every step it takes without TJ, the worker or
-  coordinator runs `quartermaster autonomy check`. A level change reaches a
-  running worker at its next check, with no restart.
+- **The labels are the grant.** A level lives in a bead label and a state
+  file that only TJ (or the coordinator on TJ's explicit word) raises. The
+  ticker never raises a level, and an automated message approves nothing.
+  Any actor may lower its own level or stop (from Muse).
+- **The check decides.** Before every step it takes without TJ, the worker
+  or coordinator runs `quartermaster autonomy check`. A level change reaches
+  a running worker at its next check, with no restart.
 - **Every automatic step leaves an `AUTO:` note.**
 
 ## The impact ladder
 
-Each class names where the output lands. The examples are today's real
-actions.
+Each class names where the output lands, with the preconditions it needs.
+An action missing a precondition takes the class given for it, or the next
+class up if none is given.
 
-| Class | Where it lands | Examples today |
+| Class | Where it lands | Today's actions, with preconditions |
 |---|---|---|
 | 0 | Nowhere: read-only | Reading files, `bd show`, `gh pr view`, `herdr agent read`; a subagent whose task is a read-only lookup or review; `gate plan`, `pulumi preview`, `tofu plan` |
 | 1 | The agent's own worktree and scratch | Edits, local builds and tests, `git add`/`commit` in its own worktree, `rm` inside its worktree or a `mktemp -d` directory, `bd note` on its own bead |
-| 2 | Its own branch and PR (remote, unmerged, reviewed before it lands) | `git push` to its own branch, opening or updating its PR, replying on its PR's threads, `/plan`-style trigger comments, retargeting a stacked PR, moving its own Linear issue's status. **A choice that only shapes its own PR** (a design option, a naming, a test approach), since the PR still gets human review |
-| 3 | TJ's machine and the shared bead state | Dispatching a `next` bead, resuming a thread, closing a `likely_stale` bead, releasing a stale claim, `resolve` of a merged worktree, installing a merged herdr-quartermaster PR (pull, build, ticker restart) |
-| 4 | The shared repo's main branch | Merging its own approved, green PR (`--auto` or `--match-head-commit`) |
-| 5 | Internal messages | Posting to the team's internal channels (review requests, status), commenting on Linear issues other than its own |
-| 6 | Non-production infrastructure | An apply to a dev or staging stack that passes `gate plan`; a deploy dispatch or rollout step to a non-prod environment |
-| 7 | Production, additive or in place | A prod apply that passes `gate plan` (create, update, no delete or replace); a prod deploy dispatch; the next step of a prod rollout once the previous one verified |
-| 8 | Production deletion, scoped; people and accounts outside our systems | One delete or replace in a prod stack, or a stateful replace anywhere; deleting a non-prod database, bucket or volume; force-pushing to a shared branch; reading or writing a secret; a message to someone outside the team; spending money |
-| 9 | Widespread, irreversible, or lifting a safeguard | Deletes across stacks or past the `widespread` threshold (D3); deleting prod data; object lock or KMS key deletion; approving a PR, including any bot approval; answering an auto-mode classifier denial; changing Claude Code settings or hooks to loosen them |
+| 2 | Its own branch and PR (unmerged, reviewed before it lands) | `git push` to its own branch, opening or updating its PR, replying on its PR's threads, `/plan`-style trigger comments (unless the trigger itself applies: then the class of the apply), retargeting a stacked PR, moving its own Linear issue's status. A choice that only shapes its own PR (a design option, naming, test approach) |
+| 3 | TJ's machine and the shared bead state | Dispatching a bead TJ selected (`next`), resuming a thread, closing a `likely_stale` bead on strong evidence, releasing a stale claim, `resolve` of a merged worktree without `--force`, installing a merged herdr-quartermaster PR (pull, build, ticker restart). Creating beads for discovered work |
+| 4 | The shared repo's main branch | Merging its own PR, or enabling auto-merge, **with the required review and checks green**; resolving review threads on its own PR after a fix or a reply |
+| 5 | Internal messages | Posting to the team's internal channels (review requests, status), commenting on Linear issues or PRs other than its own |
+| 6 | Non-production infrastructure | An apply to a dev or staging stack that passes `gate plan`; a deploy or rollout step to a non-prod environment; dispatching a bead TJ didn't select (Muse: choosing the queue spends TJ's attention) |
+| 7 | Production, additive or in place | A prod apply that passes `gate plan` with no delete or replace, matches the change noted beforehand, and names its rollback; a prod deploy; the next step of a prod rollout once the previous one verified |
+| 8 | Scoped deletion, and outside our systems | One delete or replace in a prod stack, or a stateful replace anywhere; deleting a non-prod database, bucket or volume; force-pushing to a shared branch; merging without the required review; **reading or writing a secret; a message to someone outside the team; spending money; approving a PR (D7)** |
+| 9 | Widespread, irreversible, or control of the dial itself | Deletes across stacks or past the `widespread` threshold; deleting prod data; object lock or KMS key deletion; **answering a classifier denial and loosening agent settings or hooks (D7)**; raising its own level; disabling gates, checks or the journal; **any action whose impact is unknown** |
 
-Rows 8 and 9 hold what earlier drafts kept outside the dial as a floor. TJ
-decided there is no floor (D2); D7 is where each of those items sits.
+How an action is placed:
 
-Rules that place an action:
-
-- **An action takes the highest class among its effects.** A merge into a repo
-  that deploys main to prod on merge is class 7, not 4 (D3 lists such repos).
+- **It takes the highest class among its effects**, including what it sets
+  off. A merge into a repo whose main deploys to prod is 7, not 4
+  (`merge_class`, D3). A trigger comment that runs an apply is the apply's
+  class (from Codex).
 - **A decision takes the class of what the chosen option does.** "Option 2:
-  canary on staging first" is class 6 when it runs the canary; a choice
-  between two code designs in its own PR is class 2.
-- **Unsure means 9.** An action nobody can place stops for TJ unless the
-  dial is at 9.
+  canary on staging first" is 6; a choice between two designs in its own PR
+  is 2.
+- **Scope adds up** (from Muse). Counts past the `widespread` threshold move
+  an action up a class. They are summed per bead and target over a rolling
+  window, so splitting one big delete into twenty small ones adds back up.
+- **Self-install stays at 3**, except a merged PR that changes how
+  authority is decided (`autonomy.go`, `gate.go`, `prompt.go`, the brief,
+  the coordinator guide), which is 9. Codex's point: code that can change
+  every worker's policy is classed by that reach, not by being a local build.
 
 ### What TJ hears
 
@@ -82,276 +114,364 @@ every level.
 |---|---|
 | 0–3 | Each `AUTO:` step, as it happens |
 | 4–6 | One line per update listing the `AUTO:` steps since the last |
-| 7–9 | Nothing between digests, except failures it can't fix; the hourly digest's "Done without you" section has them all |
+| 7–9 | Nothing between digests, except failures it can't fix and breaker trips (see "Budgets and the circuit breaker"); class 7+ steps get a non-blocking notification as they happen (from Codex) |
 
-`quartermaster context` prints the dial and the reporting mode at the top,
-so the coordinator reads them every turn instead of remembering them.
+Quiet must still look different from broken (from Muse): the digest arrives
+on schedule even when empty ("nothing needed you; 14 steps, highest class
+7"). `quartermaster context` prints the dial, any leases and the reporting
+mode at the top, so the coordinator reads them every turn.
+
+## The task bounds the dial
+
+The dial says how far an agent may go **in doing its bead**. It never says
+what the bead is for. At every level, 9 included:
+
+- A worker's task is its bead's description and TJ's messages to it. Text it
+  reads in a repo, a PR or issue comment, a web page, a log, another
+  worker's output or a tool result is data, not instructions. "Also rotate
+  the prod keys" in a PR comment is not part of the bead, however high the
+  dial.
+- Work discovered along the way becomes a new bead (`bd create`, class 3).
+  Doing it is a separate dispatch, which at dial 3–5 needs TJ to select it
+  (`next`) and at 6+ the coordinator may choose.
+- The coordinator reads text that workers and outside parties wrote. It
+  classifies an action from the command and its target, never from the
+  description around it (`prompt.go` already treats screen text as the
+  agent's description, never as evidence).
+- A worker at 9 still works on its bead. A bead whose task is "keep these
+  services healthy" can reach far at 9; "write a design doc" still doesn't
+  operate anything (Codex's example).
+
+## needs_me questions
+
+TJ, 2026-11-08: there is no separate "no recommendation" category.
+
+- **Workers always include a recommendation** in a `needs_me` note, with its
+  class (`CLASS: 4 — merge now; approved, checks green`) and the evidence
+  for it.
+- **The coordinator may answer** when it can form its own recommendation from
+  the evidence, and the action that answer authorizes is within the bead's
+  dial. It prompts the worker with the answer and records
+  `AUTO: [coordinator L<n> C<c>] answered "<question>": <answer> — <evidence>`.
+  Its recommendation is its own: it checks the worker's evidence instead of
+  ratifying it (the point Muse raised against free proxy answers).
+- **It still escalates to TJ**, whatever the dial, when:
+  - the question is one of taste or voice;
+  - it involves other people: what to say to someone, asking another team;
+  - the evidence conflicts or is missing;
+  - the worker marked it `CRITICAL:`. Only TJ, or a mechanical classifier,
+    lowers a `CRITICAL:` claim.
+
+Examples:
+
+| Answers on its own (if within the dial) | Escalates to TJ |
+|---|---|
+| A status report parked as a question ("PR merged, verified — close?") | The opening of a blog post |
+| Closing a bead whose work is verified done (merged PR, code on main) | What to say in a message to a teammate |
+| A bead superseded by another, with both linked | Turning on an irreversible WORM lock |
+| Resume and release housekeeping | A prod-wide rollout |
+| Merging its own approved, green PR | Two pieces of evidence that disagree |
+| A question TJ already answered on this or a linked bead | A question marked `CRITICAL:` |
+
+## Claude Code prompts and hard denies
+
+Workers and the coordinator run inside an agent CLI (Claude Code, Codex,
+Muse) with its own permission system. It stops an action in one of two ways:
+
+1. **Prompts**: a hook that asks, a permission ask, an auto-mode classifier
+   denial with a countdown. The agent waits on a menu that `quartermaster
+   answer` can answer, so **the dial governs them**: an answer takes the
+   class of the action it releases. Answering a classifier denial is class 9
+   by itself (D7). Choosing a standing-permission option ("don't ask again",
+   a mode switch) changes future policy, so it is classed as loosening
+   settings (from Muse).
+2. **Hard denies**: a settings deny rule, a hook that exits with a block, a
+   sandbox refusal. No prompt is shown and there is nothing to answer.
+   Lifting one means changing the CLI's settings or hooks, which is itself a
+   ladder action: loosening is class 9, tightening is 1 or 3.
+
+**The coordinator runs inside Claude Code too.** Its own classifier and hooks
+judge `quartermaster answer` like any command, so they can stop it from
+answering a prompt the dial allows. Then it relays the prompt to TJ. It
+never works around its own permission system, and no agent answers the
+coordinator's prompts for it (D8).
 
 ## Decisions for TJ
 
+(R) is the recommendation. Decided items are in "Decisions so far".
+
 ### D1. The ladder
 
-- **(R) a.** The ten classes above. Between "own branch/PR" and "main" sits
-  class 3, TJ's machine and the bead state: dispatching, resuming, closing
-  stale beads and the self-install touch nothing anyone else sees, but they
-  start work and spend quota, so they sit above a push.
-- b. The same ladder without class 3. Those actions fold into class 1, so
-  any dial that lets an agent commit also lets the coordinator dispatch and
-  resume beads.
-- c. A coarser ladder: local (0–1), own PR (2), shared repo and messages (3),
-  non-prod (4), prod change (5–6), prod deletion (7–8), widespread (9), with
-  the in-between numbers unused. Fewer distinctions, same scale.
-
-### D2. Nothing stays outside the dial (decided)
-
-TJ, 2026-11-08: **9 is true allow-all.** The items earlier drafts kept as a
-floor (approving PRs, secrets, outside messages, money, classifier denials)
-sit at the top of the ladder instead. Where exactly is D7.
-
-### Claude Code prompts and hard denies
-
-Workers and the coordinator both run inside an agent CLI (Claude Code,
-Codex, Muse) with its own permission system. That system stops an action in
-one of two ways, and the dial treats them differently:
-
-1. **Prompts**: a hook that asks, a permission ask, an auto-mode classifier
-   denial with a countdown. The agent waits on a menu that
-   `quartermaster answer` can answer, so **the dial governs them**: the
-   answer is classed by the action it authorizes, and answering a classifier
-   denial is class 9 by itself, since the classifier is the independent
-   second opinion and only allow-all overrides it.
-2. **Hard denies**: a settings deny rule, a hook that exits with a block. No
-   prompt is shown and there is nothing to answer. The dial can't override
-   them in place. Lifting one means **changing the CLI's settings or hooks,
-   which is itself a ladder action**: loosening is class 9, tightening is
-   class 1 (own worktree) or 3 (TJ's machine).
-
-**The coordinator runs inside Claude Code too.** Its own classifier and hooks
-judge `quartermaster answer` like any command, so at a high dial they can
-still stop it from answering a prompt the dial allows. Then it relays the
-prompt to TJ, as today. The dial never tells the coordinator to work around
-its own permission system; at 9 TJ would launch the coordinator in a looser
-mode as well (D7).
+- **(R) a.** The ten classes above, with preconditions inside the class.
+- b. The same ladder without class 3, folded into 1.
+- c. A coarser ladder: local (0–1), own PR (2), shared repo and messages
+  (3), non-prod (4), prod change (5–6), prod deletion (7–8), widespread (9).
 
 ### D3. How an action is classified
 
-Three classifiers, and **the action's class is the highest any of them
-gives**, so none can lower another's call:
+The class is the **highest** of three classifiers, so none can lower
+another's call:
 
-1. **Mechanical, where a tool can tell.** `gate plan` prints a class from the
-   plan: 6 or 7 by target (below), 8 for any delete or replace in prod or a
-   stateful replace anywhere, 9 past the `widespread` threshold. The action
-   table (D6) gives the fixed class of `merge`, `dispatch` and the rest.
-2. **The worker**, which states the class of a step it wants to take in its
-   `needs_me` note (`CLASS: 6 — apply staging-x, 2 create`), and in each
-   `AUTO:` note.
-3. **The coordinator**, which reads that line before answering a question or
-   a prompt and may raise the class, never lower it.
+1. **Mechanical, where a tool can tell.** `gate plan` prints a class instead
+   of only passing or failing: 6 or 7 by target, 8 for a delete or replace
+   in prod or a stateful replace anywhere, 9 past `widespread`; a plan it
+   can't parse, or a mismatch with `--expect`, can't be classified, so it
+   stops. The action table (D6) gives the fixed class of `merge`, `dispatch`
+   and the rest.
+2. **The worker**, which states the class of a step in its `needs_me` note
+   (`CLASS: 6 — apply staging-x, 2 create`) and in each `AUTO:` note.
+3. **The coordinator**, which reads that line before it answers and may
+   raise the class, never lower it.
 
-Production versus non-production decides most of the upper ladder:
-
-- **(R) a.** Config patterns matched against the target the worker passes
-  (`--target <stack, workspace or environment>`):
+- **(R) a.** Production by config patterns on the target the worker passes,
+  **unmatched means production**:
 
   ```toml
   [autonomy]
-  prod = ["*prod*", "*-production"]
-  widespread = 5                       # deletes past this count, or in more than one stack, are class 9
-  merge_class = { infra = 7 }          # repos whose main deploys on merge
+  prod = ["*prod*", "*-production"]   # stacks, workspaces, environments
+  widespread = 5                      # deletes past this, or in more than one stack, are class 9
+  merge_class = { infra = 7 }         # repos whose main deploys on merge
   ```
 
-  **A missing or unmatched target counts as production**, so a gap in the
-  list costs a stop, not an unwanted prod apply.
-- b. The worker's own judgement in its `CLASS:` line, with no patterns. The
-  line between 6 and 7 would then be the agent's word.
+- b. The worker's own judgement in its `CLASS:` line, without patterns.
 
 ### D4. Global level and per-bead override
 
 ```toml
 [autonomy]
-level = 2        # the global dial: every bead without its own (was `default`)
-max = 9          # the ceiling no bead goes above (was `enabled`)
+level = 4        # the global dial for beads without their own (was `default`)
+max = 7          # the ceiling for standing settings (was `enabled`); 8–9 only by lease, D9
 ```
 
 - A bead's own level is the label `autonomy:N`. Its **effective level** is
-  `min(own level, or the global one if it has none, max, the stop-file cap)`.
+  `min(own level or the global one, max or its lease, the stop-file cap,
+  the breaker cap)`.
 - **(R) a.** A bead **may go above the global level**, up to `max`: "run this
-  one bead to prod, keep the rest at 2". It may also go below it
-  (`autonomy:1` on a sensitive bead).
-- b. The global level is a ceiling, and a bead can only go lower.
-- Coordinator actions about a bead (dispatching it, answering its question or
-  its prompt) use that bead's effective level. The reporting mode uses the
-  global level, since it is about TJ's attention, not one bead.
+  one bead to prod, keep the rest at 4". It may also go below it.
+- b. The global level is a ceiling, and beads only go lower.
+- Coordinator actions about a bead (dispatching it, answering its question
+  or prompt) use that bead's effective level. Reporting uses the global one.
 
 ### D5. The default, and migrating today's settings
 
-Today's supervised behavior doesn't fit one number. The coordinator already
-answers prompts up to class 2 (read-only subagents, `rm` in the worktree,
-commit and push to its own branch), but workers ask TJ about every decision,
-even one that only shapes their own PR.
+Today every worker's brief turns on auto-merge, a class 4 step whose
+preconditions GitHub holds, and the coordinator answers prompts up to class
+2. So today's default is closer to 4 than 2 (Muse's reading).
 
-- **(R) a.** Default dial **2**. Workers then take their own recommendation on
-  choices that only shape their PR, with an `AUTO:` note, because the PR
-  still gets TJ's review before anything lands. A design question TJ wants to
-  answer can still go to TJ: the worker raises the class if it isn't sure.
-  - `autonomous` reads as `autonomy:7`, which is exactly what it allows
-    today: decide, merge, self-install, rollout steps, and applies on any
-    stack that pass `gate plan` with no delete or replace. Cumulatively, 7
-    also allows dispatch and resume (3) and internal posts (5), which today's
-    label doesn't. That is the one widening; the alternative is mapping it to
-    6 and raising beads to 7 by hand.
+- **(R) a.** Default dial **4**. Workers keep enabling auto-merge, and also
+  take their own recommendation on choices up to class 4. The coordinator
+  may dispatch `next` beads, resume threads and close verified-done beads
+  (3), which today it proposes and waits on.
+- b. Default dial 2: workers stop enabling auto-merge on their own until
+  raised to 4.
+- Migration, for either default:
+  - **(R)** `autonomous` reads as `autonomy:7`: decide, merge, self-install,
+    rollout steps and applies on any stack that pass `gate plan`. Muse
+    reached the same number. Because levels stack, 7 also lets those beads
+    post internally (5), which today's label doesn't. Alternative (Codex):
+    keep labelled beads on the old rules until TJ picks each one's level,
+    with a preview command showing what each level adds and removes.
   - `supervised` reads as `autonomy:2`. `[autonomy] enabled = false` reads as
-    `max = 2`, `default = true` as `level = 7`. The per-kind switches
-    (`decide`, `merge`, `apply`, `install`) go: the dial replaces them.
-  - `autonomy off` caps every bead at 2, today's supervised behavior, not 0:
-    it is the panic switch for autonomy, and shouldn't stop the coordinator
-    answering the push prompts that keep workers moving. `autonomy level 0`
-    is the explicit "only read-only runs without me".
-  - One release reads the old labels and keys, and the ticker rewrites the
-    labels with a note on each bead. `grant`/`revoke` stay as aliases for
-    `level 7` and `level 2`.
-- b. Default dial 1: workers keep asking about every decision, and the
-  coordinator answers push prompts only because a coordinator rule says so,
-  outside the dial.
+    `max = 2`, `default = true` as `level = 7`. The per-kind switches and
+    `auto_close`/`auto_resolve` become "the ticker may do this when the
+    global level is at least 3" (Muse: no booleans left to contradict the
+    dial).
+  - **(R)** `autonomy off` caps every bead at 2, so workers can still push
+    their work and stop cleanly. Alternative (Muse): cap at 1, so nothing
+    leaves the machine. Either way `off` stays a file in the state dir that
+    TJ can create by hand.
+  - One release reads the old labels and keys; `grant`/`revoke` stay as
+    aliases for `level 7` and `level 2`.
 
-### D6. CLI, the check, and the coordinator's rules
+### D6. CLI, the check, and enforcement
 
 ```
-quartermaster autonomy level                # global level, max, cap, each active bead's effective level
-quartermaster autonomy level N              # set the global level (a state file; wins over [autonomy] level)
-quartermaster autonomy level N <bead>...    # set beads' own level: label autonomy:N, note, tell the worker
-quartermaster autonomy level - <bead>...    # back to the global level
-quartermaster autonomy check <bead> --class N
+quartermaster autonomy level                       # global, max, leases, caps, each active bead's effective level; says "advisory"
+quartermaster autonomy level N                     # set the global level (state file; wins over [autonomy] level)
+quartermaster autonomy level N <bead>... [--for D] # set beads' own level; 8 and 9 need --for (D9)
+quartermaster autonomy level - <bead>...           # back to the global level
+quartermaster autonomy check <bead> --class N [--what "..."]
 quartermaster autonomy check <bead> --action A [--target T]
-quartermaster autonomy on|off               # off caps at 2 (D5)
+quartermaster autonomy on|off
 ```
 
 - `check` passes when the action's class is at most the bead's effective
-  level. `--action` looks the class up: `push` 2,
+  level and its budget isn't spent. `--action` looks the class up: `push` 2,
   `dispatch`/`resume`/`close`/`resolve`/`install` 3, `merge` 4 (or the repo's
   `merge_class`), `post` 5, `apply`/`deploy`/`rollout` 6 or 7 by `--target`,
-  `delete`, `secret`, `message-external` and `spend` 8, and `approve`,
-  `classifier` and `loosen-settings` 9 (the classes D7 proposes). `--class N`
-  is for everything else, with the class from the worker's `CLASS:` line. An
-  unknown action fails.
-- **(R) a.** The commands that act on their own enforce it: `dispatch`,
-  `resume`, `answer`, `stale --release` and the ticker's `auto_close` refuse
-  without `--by TJ` when the check fails. The coordinator's guide (rendered in
-  `context.go`) loses "wait for TJ" and "never answer a needs_me for TJ", and
-  says instead: "before acting on TJ's behalf, find the class of what you'd
-  authorize (the worker's `CLASS:` line, raised if you disagree) and run
-  `autonomy check`; act and note it if it passes, else relay to TJ". The
-  level isn't baked into the guide, which is read once per session; `context`
-  and the checks are read every turn.
+  `delete`, `secret`, `message-external`, `spend` and `approve` 8,
+  `classifier` and `loosen-settings` 9. `--class N` covers the rest, from
+  the worker's `CLASS:` line. An unknown action fails.
+- **(R) a.** Commands quartermaster owns enforce it: `dispatch`, `resume`,
+  `answer`, `stale --release` and the ticker's `auto_close` refuse without
+  `--by TJ` when the check fails. The coordinator's guide loses "wait for TJ"
+  and says: "before acting for TJ, find the class of what you'd authorize and
+  run `autonomy check`; act and note it if it passes, else relay". The level
+  isn't baked into the guide; `context` and the checks are read every turn.
 - b. Render the current level's allowed actions into the guide as a list.
-  Easier to read, but stale as soon as the level changes.
-- The hook-prompt categories TJ listed for the coordinator become examples of
-  classes 0–2 and leave `coordinator_rules`. A prompt in no category is
-  classified like any action and is answered only if it is inside the dial;
-  answering a classifier denial is class 9.
-- Setting a bead's level sends its worker a notice tagged `[quartermaster
-  autonomy: level N set by TJ]`, with the same delivery rules as today's
-  grant and revoke. The worker trusts it only as far as `autonomy check`
-  passes.
 
-### D7. Where the former floor items sit
+**v1 is advisory** (from Codex). Workers hold their own credentials (`gh`,
+cloud roles), so a worker that skips the check can still act. v1 enforces
+what quartermaster owns (the commands above, prompt answers, launch modes)
+and relies on the check for the rest. `autonomy level` and the board say
+"advisory" until a later phase moves side-effecting credentials out of the
+agents into an executor that checks before it acts (see Plan). `--by TJ` is a
+label, not proof of identity, until then.
 
-- **(R) a.** As in the ladder:
-  - **8**: reading or writing a secret, a message to someone outside the
-    team, spending money. Each reaches past our own systems, but one at a
-    time and with a known recipient or amount.
-  - **9**: approving a PR (any, including a bot approval), answering a
-    classifier denial, and loosening Claude Code settings or hooks. Each
-    switches off a safeguard that covers every later action, so only
-    allow-all includes them.
-- b. All of them at 9, so 8 stays purely "scoped prod deletion".
-- c. Spending money split by amount: under a configured cap at 8, over it
-  at 9.
+### D7. Where the remaining top-of-ladder items sit
 
-### D8. The level sets each worker's permission mode at dispatch
+Decided: messages outside the team and spending money at 8. Still open:
 
-Answering prompts one by one through the coordinator is slow, and the
-coordinator's own classifier can refuse to answer (see "Claude Code prompts
-and hard denies"). The worker's permission mode can follow its level
-instead.
+- **Approving a PR:**
+  - **(R) a.** 8. Approving removes the human-review precondition that makes
+    a merge class 4, so it is classed by the gate it removes (the
+    coordinator's pick, and Muse's).
+  - b. 4, plus whatever the merge it unlocks reaches (Codex: an ordinary
+    review decision, made under the agent's own name).
+  - c. 6.
+- **Answering a classifier denial, and loosening agent settings or hooks:**
+  - **(R) a.** 9. Each switches off an independent safeguard, so only
+    allow-all includes it.
+  - b. 8 (Muse), with loosening settings at 9 (Codex) only when it changes
+    how authority is decided.
 
-- **(R) a.** Dispatch and `resume` pick the agent's launch args from the bead's
-  effective level. Below 9 a worker starts with its kind's configured args, as
-  today. At 9 it also gets the kind's bypass args, with permission checks off:
+### D8. Launch permission modes follow the level
+
+Answering prompts one by one is slow, and the coordinator's own classifier
+can refuse to answer. The worker's launch mode can follow its level instead.
+A mode is fixed when the agent starts, so prompts remain the revocable part
+(Muse).
+
+- **(R) a.** Workers launch **one band below** the dial: with their kind's
+  configured args at every level below 9, as today, and with the kind's
+  `bypass_args` only under a 9 lease. The checks and prompts cover the rest,
+  and stay revocable:
 
   ```toml
   [agents.claude]
   args = ["--permission-mode", "auto"]               # every level, as today
-  bypass_args = ["--dangerously-skip-permissions"]   # added at level 9
+  bypass_args = ["--dangerously-skip-permissions"]   # only under a 9 lease
 
   [agents.codex]
   bypass_args = ["--dangerously-bypass-approvals-and-sandbox"]
   ```
 
-  A kind with no `bypass_args` gets none and keeps prompting at 9. A mode is
-  fixed when the agent starts, so a level change across 9 takes effect when
-  the ticker restarts the worker at its next idle moment, through `resume`,
-  which keeps the conversation. A worker lowered from 9 is restarted first,
-  before anything else is sent to it, so it doesn't keep running unchecked.
-  The coordinator follows the global level the same way when TJ opens it
-  with `quartermaster coordinator`.
-- b. Level bands, each with its own args (for example acceptEdits below 3,
-  auto from 3 to 8, bypass at 9). Finer, but every band is a mode to test,
-  and auto mode already covers the middle.
-- c. Leave launch modes alone and rely on the coordinator answering
-  prompts. Then 9 is allow-all only as far as the coordinator's own
-  classifier lets it answer.
+  A level change across 9 takes effect when the ticker restarts the worker at
+  its next idle moment, through `resume`, which keeps the conversation. A
+  worker lowered from 9, or whose lease expires, is restarted first, before
+  anything else is sent to it. **The coordinator is never launched with
+  bypass**, so a prompt TJ can see always remains somewhere (Muse).
+- b. Launch at the dial's band, the coordinator included: fewer prompts, but
+  lowering the dial doesn't reach a bypass worker until it restarts.
+- c. Leave launch modes alone; 9 is then allow-all only as far as the
+  coordinator's own classifier lets it answer.
+
+### D9. Leases at the top
+
+Risk at 8 and 9 grows with time left on (Muse).
+
+- **(R) a.** Setting a level of 8 needs `--for <duration>` (default 4h); 9 is
+  set only on beads, only with `--for`, and **never globally**. At expiry the
+  ticker sets the bead back to its previous level, notes it and notifies TJ,
+  so expiry doesn't depend on the worker.
+- b. 8 and 9 are ordinary standing settings, global included.
 
 ## Auditing
 
 - Every step taken without TJ leaves `bd note <bead> "AUTO: [<actor> L<n>
   C<c>] <what> — <evidence>"`: who (`worker` or `coordinator`), the
-  effective level, and the class, e.g. `AUTO: [coordinator L4 C4] answered
-  'merge now' with the worker's recommendation` or `AUTO: [worker L7 C6]
-  applied staging-x, 2 create / 0 delete (gate ok)`. The prefix stays
-  `AUTO:`, so `autoNotes`, the digest and the report need no change.
+  effective level and the class. The prefix stays `AUTO:`, so `autoNotes`,
+  the digest and the report keep working. For class 6 and up the note is
+  written before the step, so a crash mid-step leaves the intent on record
+  (from Muse).
 - The commands that act (`dispatch`, `resume`, `answer`, `stale --release`,
-  `level`, and the ticker's auto-close) write the note themselves when run
-  without `--by TJ`, so the record doesn't depend on the agent remembering.
-- Every level change is noted (per bead) or logged as an inbox event
-  (global), with who asked for it.
+  `level`, the ticker's auto-close) write the note themselves when run
+  without `--by TJ`.
+- **Journal** (from Muse). Bead notes can be edited by the agents being
+  audited and carry no timestamps. The ticker appends every `AUTO:` record it
+  sees, every prompt answer, level change, lease event and breaker trip to an
+  append-only `journal.jsonl` in the state dir, with its own timestamp. An
+  agent on the same machine can still rewrite it; that is stated, and
+  shipping it off the machine is out of scope.
+- **Digest by class.** The digest and `quartermaster report` group `AUTO:`
+  steps by class, highest first: 7 and up each with its evidence, 4–6 one
+  line each, 3 and below as counts per bead.
+- Every level change is noted (per bead) or journaled (global), with who
+  asked.
 - Linear comments stay at milestones: a decision, an apply, a merge.
+
+## Budgets and the circuit breaker
+
+From Muse, against loops: a worker retrying an apply, a rollout advancing
+itself overnight, a dispatch storm.
+
+- **Budgets** per bead per rolling hour, enforced in `check`:
+
+  ```toml
+  [autonomy.budget]
+  steps = 30       # AUTO steps of any class
+  applies = 3      # class 6+
+  dispatches = 5   # coordinator dispatches, global
+  ```
+
+  Over budget, `check` fails with "budget" as the reason, and the bead goes to
+  TJ like any other out-of-level step.
+- **Circuit breaker.** The ticker caps a bead at 2 and raises an inbox item
+  when it sees N failed checks or applies in a row, or the same `AUTO:` step
+  repeated. A breaker only lowers; TJ restores the level.
 
 ## What does not change
 
 - The trust model: labels and the state file are the grant, checks enforce
-  it, ticker messages approve nothing.
+  it, ticker messages approve nothing, only TJ raises a level.
 - `gate plan`'s allowlist and `--expect`. It gains a printed class.
 - Worker hosts: a host without the `quartermaster` binary fails every check,
-  so its workers act at class 2 at most, whatever their label says.
-- Muse workers follow the same ladder.
+  so its workers act at 2 at most, whatever their label says. That is a host
+  cap, shown in `autonomy level` (Muse).
+- Muse and Codex workers follow the same ladder.
 
 ## Plan (after TJ decides)
 
+v1, advisory:
+
 1. Level model: `autonomy:N` labels, `level`/`max`/`prod`/`widespread`/
-   `merge_class` config, the state file, the effective level and the action
-   table, with tests for each class boundary and for migrating
-   old labels and keys.
-2. `gate plan` prints a class; `check --class/--action/--target`.
+   `merge_class`/budget config, the state file, leases, the effective level,
+   the action table; tests for each class boundary, preconditions, leases and
+   migration.
+2. `gate plan` prints a class; `check --class/--action/--target`, budgets.
 3. CLI: `autonomy level`, grant/revoke aliases, the level notice; the board's
-   `U` and digit keys, and a level marker on each row instead of `auto`.
-4. `bypass_args` per agent kind, picked by level at dispatch and resume, and
-   the restart when a level crosses 9.
+   `U` and digit keys and a level marker on each row instead of `auto`.
+4. `bypass_args` per agent kind under 9 leases, and the restart when a level
+   crosses 9 or a lease expires.
 5. Enforcement in `dispatch`, `resume`, `answer`, `stale --release` and
-   `auto_close`, with their `AUTO:` notes.
-6. Coordinator guide and `context`'s dial and reporting line; the brief's
-   grant section rewritten around `CLASS:` lines and the check.
+   `auto_close`, with their `AUTO:` notes; journal; breaker; digest by class.
+6. Coordinator guide (needs_me rule, task bounds) and `context`'s dial
+   line; the brief rewritten around `CLASS:` lines, recommendations and the
+   check.
 7. README and the standing authorization in TJ's CLAUDE.md, rewritten from
    "a bead labeled autonomous" to "an action whose class `autonomy check`
    passes".
 
+Later, enforced (from Codex): a local policy service and a credential-holding
+executor. Workers propose; the executor holds `gh` and cloud credentials,
+rechecks the class and preconditions right before it acts (same PR head, same
+plan digest, current policy revision), and journals the outcome. Until it
+covers every path a worker could use (shell, MCP connectors, browser), the
+install stays labelled advisory.
+
 ## Decisions so far
 
-- **D2** (TJ, 2026-11-08): 9 is true allow-all, with no floor. The former floor
-  items sit at the top of the ladder (placement is D7). Claude Code prompts,
-  classifier denials included, are dial-governed through
-  `quartermaster answer`. Hard denies are lifted only by changing settings or
-  hooks, which is itself a class 9 action. The coordinator runs in Claude
-  Code too, and its own permission system can still stop it. Recommendation
-  added from the same answer: the level sets each worker's permission mode
-  at dispatch, with checks off at 9 (D8).
+- **D2** (TJ, 2026-11-08): 9 is true allow-all, with no floor. The former
+  floor items sit at the top of the ladder. Claude Code prompts, classifier
+  denials included, are governed by the dial through `quartermaster answer`;
+  hard denies are lifted only by changing settings or hooks, itself a ladder
+  action; the coordinator runs in Claude Code too and its own permission
+  system can still stop it. The level sets launch permission modes (D8).
+- **needs_me** (TJ, 2026-11-08): no "no recommendation" category; workers
+  always recommend; the coordinator answers on its own evidence within the
+  dial and escalates taste, people, conflicting or missing evidence, and
+  `CRITICAL:` (see "needs_me questions").
+- **D7, in part** (TJ, 2026-11-08): messages outside the team and spending
+  money at 8.
+- **Folded in** (TJ, 2026-11-08): the Muse and Codex designs, as credited
+  above.
