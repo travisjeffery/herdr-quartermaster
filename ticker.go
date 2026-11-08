@@ -136,7 +136,10 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 // knows of its PRs and runs.
 func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thread {
 	th := Thread{Bead: b, Linear: linearKey(b, cfg.LinearPrefixes)}
-	th.Auto, _ = autonomous(cfg.Autonomy, b, autonomyStopped(), "")
+	lvl, _ := cfg.beadLevel(b, autonomyStopped())
+	// shortcut: "auto" is still the pre-dial autonomous level until the board
+	// shows each bead's level.
+	th.Auto = lvl >= levelAutonomous
 	if a, ok := byName[agentName(b.ID)]; ok {
 		th.Agent = &a
 	}
@@ -395,6 +398,16 @@ func (t Ticker) once(st *TickerState) error {
 	for _, th := range threads {
 		needsMe[agentName(th.Bead.ID)] = th.Bead.Status == StatusNeedsMe
 	}
+	events, err := expireLeases(t.cfg, liveAutonomyEnv(t.cfg, t.herdr), now)
+	if err != nil {
+		t.log.Printf("autonomy leases: %v", err)
+	}
+	for _, e := range events {
+		t.log.Printf("%s: %s", orDash(e.Bead), e.Summary)
+		if err := writeEvent(e); err != nil {
+			t.log.Printf("inbox: %v", err)
+		}
+	}
 	for _, name := range deliverOutbox(t.cfg, t.herdr, agents, needsMe) {
 		t.log.Printf("delivered queued brief to %s", name)
 	}
@@ -506,7 +519,7 @@ func (t Ticker) leftActive(st *TickerState, id string, prev Snapshot, agents map
 		if prev.PRState == "MERGED" {
 			summary += fmt.Sprintf(" after PR #%d merged", prev.PRNumber)
 		}
-		if t.cfg.AutoResolve && prev.PRState == "MERGED" && (!hasAgent || agentReady(&a)) {
+		if lvl, _ := t.cfg.beadLevel(b, autonomyStopped()); lvl >= classHousekeeping && prev.PRState == "MERGED" && (!hasAgent || agentReady(&a)) {
 			if res, err := resolve(t.cfg, t.herdr, id, false); err != nil {
 				summary += "; auto-resolve failed: " + err.Error()
 			} else {

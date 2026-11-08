@@ -95,7 +95,7 @@ func ensureConfig(path, repoFlag, workspaceCwd string, toplevel func(dir string)
 func configTemplate(repo string) string {
 	return fmt.Sprintf(`repo = %q
 # See the README for everything else: branch_prefix, worker_agent, repos,
-# linear_prefixes, tick_seconds, idle_seconds, nudge, auto_resolve.
+# linear_prefixes, tick_seconds, idle_seconds, nudge, [autonomy].
 `, repo)
 }
 

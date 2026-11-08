@@ -41,18 +41,22 @@ Usage:
   quartermaster stale [--days N] [--release]           claims with no agent or worktree untouched N days
                                                        (default 7); --release reopens them
   quartermaster verify [<bead>...] [--yes]             stale beads with evidence they are already done; --yes
-                                                       closes (with auto_close) or flags them like the ticker
+                                                       closes (at autonomy level 3+) or flags them like the ticker
   quartermaster board                                  every open bead by state: act on them, tidy up
                                                        finished work (runs as the plugin popup)
   quartermaster ticker run|start|stop|status           the background loop: sidebar, PR follow-up, nudges
   quartermaster tick                                   one ticker pass in the foreground
   quartermaster configure [--repo PATH]                first-time setup: config, ~/.local/bin link, agent view
   quartermaster unconfigure                            stop the ticker, remove the view and sidebar tokens
-  quartermaster autonomy on|off|status                 the global switch for beads labeled autonomous
-  quartermaster autonomy check <bead> [--action A]     exit 0 only if the bead may take a step of kind A
-                                                       (decide, merge, apply) without TJ right now
-  quartermaster autonomy grant|revoke <bead>           label a bead autonomous or supervised mid-flight and
-                                                       tell its worker once it is idle
+  quartermaster autonomy level                         the dial: global level, max, leases, each active
+                                                       bead's effective level (advisory)
+  quartermaster autonomy level N|- [<bead>...]         set the global level, or beads' own and tell their
+                [--for D]                              workers; - goes back to the global/config level;
+                                                       8 needs --for (default 4h), 9 only on beads with --for
+  quartermaster autonomy check <bead> [--class N]      exit 0 only if the bead may take a step of class N
+                [--action A [--target T]]              (or action A, on target T) without TJ right now
+  quartermaster autonomy on|off                        off caps every bead at level 2 until on
+  quartermaster autonomy grant|revoke <bead>           level 7 or 2 on a bead (the old autonomous/supervised)
   quartermaster prompt <bead>                          the approval prompt the bead's worker is showing, with
                                                        its options and a hash that names it
   quartermaster answer <bead> <choice> --expect HASH   answer that prompt (choice: option number or label) only
@@ -161,7 +165,10 @@ func run(args []string) error {
 	release := fs.Bool("release", false, "stale: set each stale claim back to open")
 	deliver := fs.String("deliver", defaultDeliver(), "digest: where to send it: desktop, slack, stdout, none (comma-separated)")
 	always := fs.Bool("always", false, "digest: notify even when nothing changed and nothing needs you")
-	actionFlag := fs.String("action", "", "autonomy check: the kind of step, decide, merge or apply")
+	actionFlag := fs.String("action", "", "autonomy check: the kind of step, from the action table (merge, apply, ...)")
+	classFlag := fs.Int("class", -1, "autonomy check: the step's impact class, 0-9")
+	targetFlag := fs.String("target", "", "autonomy check: the stack or environment an apply, deploy or rollout lands on")
+	forFlag := fs.Duration("for", 0, "autonomy level: how long a level 8 or 9 lease lasts (8 defaults to 4h)")
 	expect := fs.String("expect", "", "answer: the hash of the prompt being answered, from quartermaster prompt")
 	by := fs.String("by", "coordinator", "answer: who chose the answer, for the bead note")
 	pos, err := interspersed(fs, rest)
@@ -293,7 +300,8 @@ func run(args []string) error {
 		}
 		return err
 	case "autonomy":
-		return autonomyCmd(cfg, liveAutonomyEnv(cfg, h.on(cfg.coordSocket())), pos, *actionFlag, os.Stdout)
+		o := autonomyOpts{Class: *classFlag, Action: *actionFlag, Target: *targetFlag, For: *forFlag}
+		return autonomyCmd(cfg, liveAutonomyEnv(cfg, h.on(cfg.coordSocket())), pos, o, os.Stdout)
 	case "prompt":
 		if len(pos) != 1 {
 			return fmt.Errorf("usage: quartermaster prompt <bead>")

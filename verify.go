@@ -185,7 +185,7 @@ func decide(b Bead, ev []evidence, openChildren int, autoClose bool) verdict {
 	case why != "":
 		v.Why = why
 	case !autoClose:
-		v.Why = "auto_close is off"
+		v.Why = "its autonomy level is below 3"
 	default:
 		v.Action = "close"
 	}
@@ -909,7 +909,8 @@ func verifyPass(cfg Config, env verifyEnv, st *TickerState, ids []string, act bo
 		if w.full {
 			m.FullAt = now
 		}
-		v := decide(w.b, orderedEvidence(m.Evidence), children[w.b.ID], cfg.AutoClose)
+		lvl, _ := cfg.beadLevel(w.b, autonomyStopped())
+		v := decide(w.b, orderedEvidence(m.Evidence), children[w.b.ID], lvl >= classHousekeeping)
 		if !act || v.line() != m.Line {
 			lines = append(lines, v.line())
 		}
