@@ -1,7 +1,7 @@
 # Autonomy dial: one 0–9 level, set by where an action lands
 
-Status: **proposed** (2026-11-08), fourth draft. Some decisions are made
-(see "Decisions so far"); nothing is built until TJ decides the rest. This
+Status: **accepted** (2026-11-08), not yet implemented. TJ chose the
+recommendation (R) for every decision; see "Decisions" at the end. This
 draft folds in two independent designs written in parallel without reading
 this one: the **Muse design** (`autonomy-dial-muse.md`) and the **Codex
 design** (`autonomy-dial-codex.md`). Ideas taken from them are credited
@@ -198,7 +198,8 @@ coordinator's prompts for it (D8).
 
 ## Decisions for TJ
 
-(R) is the recommendation. Decided items are in "Decisions so far".
+The options as they were put to TJ; (R) is the recommendation. The outcome
+is in "Decisions" at the end.
 
 ### D1. The ladder
 
@@ -430,7 +431,7 @@ itself overnight, a dispatch storm.
   cap, shown in `autonomy level` (Muse).
 - Muse and Codex workers follow the same ladder.
 
-## Plan (after TJ decides)
+## Plan
 
 v1, advisory:
 
@@ -459,19 +460,33 @@ plan digest, current policy revision), and journals the outcome. Until it
 covers every path a worker could use (shell, MCP connectors, browser), the
 install stays labelled advisory.
 
-## Decisions so far
+## Decisions
 
-- **D2** (TJ, 2026-11-08): 9 is true allow-all, with no floor. The former
-  floor items sit at the top of the ladder. Claude Code prompts, classifier
-  denials included, are governed by the dial through `quartermaster answer`;
-  hard denies are lifted only by changing settings or hooks, itself a ladder
-  action; the coordinator runs in Claude Code too and its own permission
-  system can still stop it. The level sets launch permission modes (D8).
-- **needs_me** (TJ, 2026-11-08): no "no recommendation" category; workers
-  always recommend; the coordinator answers on its own evidence within the
-  dial and escalates taste, people, conflicting or missing evidence, and
-  `CRITICAL:` (see "needs_me questions").
-- **D7, in part** (TJ, 2026-11-08): messages outside the team and spending
-  money at 8.
-- **Folded in** (TJ, 2026-11-08): the Muse and Codex designs, as credited
-  above.
+2026-11-08, TJ: **all R** on D1–D9, on top of the decisions made while the
+draft evolved:
+
+- **D1** the ten-class ladder, with preconditions inside the class.
+- **D2** 9 is true allow-all, with no floor. Former floor items sit at the
+  top of the ladder. Claude Code prompts, classifier denials included, are
+  governed by the dial through `quartermaster answer`; hard denies are lifted
+  only by changing settings or hooks, itself a ladder action. The coordinator
+  runs in Claude Code too, and its own permission system can still stop it.
+- **D3** the class is the highest of `gate plan`, the worker's `CLASS:` line
+  and the coordinator's read; production by `[autonomy] prod` patterns, with
+  an unmatched target counting as production.
+- **D4** a bead may go above the global level, up to `max`.
+- **D5** default dial 4; `autonomous` reads as 7, `supervised` as 2;
+  `autonomy off` caps at 2.
+- **D6** the commands quartermaster owns enforce the check; the coordinator
+  guide points at it instead of carrying the level. v1 is labelled advisory.
+- **D7** messages outside the team, spending money and approving a PR at 8;
+  answering a classifier denial and loosening agent settings or hooks at 9.
+- **D8** workers launch one band below the dial: `bypass_args` only under a
+  9 lease, and the coordinator is never launched with bypass.
+- **D9** 8 and 9 are leases (8 defaults to 4h); 9 is set only on beads,
+  never globally.
+- **needs_me**: no "no recommendation" category. Workers always recommend;
+  the coordinator answers on its own evidence within the dial and escalates
+  taste or voice, other people, conflicting or missing evidence, and
+  `CRITICAL:`.
+- The Muse and Codex designs are folded in, as credited above.
