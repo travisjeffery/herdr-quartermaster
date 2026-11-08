@@ -62,9 +62,11 @@ Usage:
   quartermaster answer <bead> <choice> --expect HASH   answer that prompt (choice: option number or label) only
                 [--by WHO]                             if it is still the one with HASH; waits for it to clear
                                                        and notes the answer on the bead (WHO: coordinator, TJ)
-  quartermaster gate plan <file|-> [--expect op=N,...] exit 0 only if a pulumi preview --json or tofu
-                                                       show -json plan has no delete, replace or unknown op
-                                                       (and, with --expect, exactly those changes)
+  quartermaster gate plan <file|-> [--expect op=N,...] print a pulumi preview --json or tofu show -json
+                [--target T]                           plan's class on target T (6/7 by [autonomy] prod, 8
+                                                       delete/replace in prod or stateful, 9 widespread or
+                                                       unknown op); exit 0 only for no delete, replace or
+                                                       unknown op (and, with --expect, exactly those changes)
   quartermaster bd-proxy --host NAME [--bd PATH]       authorized_keys forced command: run a worker host's
                                                        bd request (SSH_ORIGINAL_COMMAND) on this machine's beads
   quartermaster version
@@ -124,15 +126,21 @@ func run(args []string) error {
 		fmt.Print(usage)
 		return nil
 	}
-	// gate reads only the plan it is given, so it works without a config.
+	// gate works without a config: the default [autonomy] has no prod
+	// patterns, so every target is production.
 	if args[0] == "gate" {
 		fs := flag.NewFlagSet("gate", flag.ContinueOnError)
 		expect := fs.String("expect", "", "the expected changes, op=count pairs (create=2,update=1)")
+		target := fs.String("target", "", "the stack, workspace or environment the plan applies to")
 		pos, err := interspersed(fs, args[1:])
 		if err != nil {
 			return err
 		}
-		return gateCmd(pos, *expect, os.Stdin, os.Stdout)
+		cfg, err := loadConfig()
+		if err != nil && !errors.Is(err, errNoRepo) {
+			cfg = defaultConfig()
+		}
+		return gateCmd(pos, *expect, *target, cfg.Autonomy, os.Stdin, os.Stdout)
 	}
 	// bd-proxy is sshd's forced command: no directory migration and nothing
 	// but bd's own output on stdout.

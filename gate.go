@@ -16,7 +16,10 @@ import (
 // an infrastructure preview before applying it. It passes only a plan that
 // creates, updates or reads: any delete, any replace, any operation it does
 // not know, a plan that does not parse, and a plan that differs from the
-// change the worker expected all fail. Failing means stop for TJ.
+// change the worker expected all fail. Failing means stop for TJ, unless
+// `quartermaster autonomy check <bead> --class N` passes for the class it
+// prints (docs/design/autonomy-dial.md, D3). A plan it can't parse, or one
+// that differs from --expect, gets no class: stop for TJ.
 
 // planSafe are the only operations a plan may contain and still pass: Pulumi
 // step ops and OpenTofu actions alike.
@@ -34,6 +37,14 @@ var statefulHints = []string{
 	"opensearch", "elasticsearch", "redshift", "backup", "ecr", "snapshot", "clickhouse",
 }
 
+// planDestructive are the delete and replace operations a plan can be classed
+// by. Any other operation outside planSafe is unknown, so class 9.
+var planDestructive = []string{"delete", "replace", "create-replacement", "delete-replaced", "discard", "discard-replaced"}
+
+// planDeletes each remove one resource; a Pulumi replace's other steps name
+// the same resource again, so they are not counted toward widespread.
+var planDeletes = []string{"delete", "replace", "discard"}
+
 type PlanChange struct {
 	Op       string
 	Type     string
@@ -48,6 +59,10 @@ type PlanCheck struct {
 	// Problems are reasons the plan fails that are not a single change: it
 	// errored, or it differs from what was expected.
 	Problems []string
+	// Target, Prod and Class are set by classify.
+	Target string
+	Prod   bool
+	Class  int
 }
 
 func (c PlanCheck) ok() bool { return len(c.Blocked) == 0 && len(c.Problems) == 0 }
@@ -56,6 +71,33 @@ func (c *PlanCheck) add(op, typ, name string) {
 	c.Counts[op]++
 	if !slices.Contains(planSafe, op) {
 		c.Blocked = append(c.Blocked, PlanChange{Op: op, Type: typ, Name: name, Stateful: stateful(typ)})
+	}
+}
+
+// classify sets the plan's impact class on target: 6 or 7 by target; 8 for a
+// delete or replace in production, or of a stateful (or untyped) resource
+// anywhere; 7 for one elsewhere; 9 past a.Widespread deletes or for an
+// operation it doesn't know. One plan is one stack, so deletes across stacks
+// are left to the budgets.
+func (c *PlanCheck) classify(a AutonomyConfig, target string) {
+	c.Target, c.Class = target, a.targetClass(target)
+	c.Prod = c.Class == 7
+	deletes := 0
+	for _, b := range c.Blocked {
+		switch {
+		case !slices.Contains(planDestructive, b.Op):
+			c.Class = 9
+		case c.Prod || b.Stateful || b.Type == "":
+			c.Class = max(c.Class, 8)
+		default:
+			c.Class = max(c.Class, 7)
+		}
+		if slices.Contains(planDeletes, b.Op) {
+			deletes++
+		}
+	}
+	if deletes > a.Widespread {
+		c.Class = 9
 	}
 }
 
@@ -233,11 +275,17 @@ func renderPlanCheck(c PlanCheck) string {
 		counts = append(counts, fmt.Sprintf("%d %s", c.Counts[op], op))
 	}
 	fmt.Fprintf(&s, "plan: %s, %s\n", c.Format, orDash(strings.Join(counts, ", ")))
-	if c.ok() {
+	switch {
+	case len(c.Problems) > 0:
+		s.WriteString("REFUSED: no class for this plan; stop for TJ\n")
+	case c.ok():
+		fmt.Fprintf(&s, "class: %d (%s)\n", c.Class, targetWord(c))
 		s.WriteString("ok: no delete, replace or unknown operation\n")
 		return s.String()
+	default:
+		fmt.Fprintf(&s, "class: %d (%s)\n", c.Class, targetWord(c))
+		fmt.Fprintf(&s, "BLOCKED: go ahead only if `quartermaster autonomy check <bead> --class %d` passes, else stop for TJ (CRITICAL: delete/replace)\n", c.Class)
 	}
-	s.WriteString("BLOCKED: stop for TJ (CRITICAL: delete/replace)\n")
 	for _, p := range c.Problems {
 		fmt.Fprintf(&s, "- %s\n", p)
 	}
@@ -251,13 +299,26 @@ func renderPlanCheck(c PlanCheck) string {
 	return s.String()
 }
 
+// targetWord says how classify read the target.
+func targetWord(c PlanCheck) string {
+	switch {
+	case c.Target == "":
+		return "no --target, so production"
+	case c.Prod:
+		return c.Target + ": production"
+	}
+	return c.Target + ": not production"
+}
+
 var errGateBlocked = errors.New("gate: plan blocked")
 
-// gateCmd is `quartermaster gate plan <file|-> [--expect op=n,...]`. It exits
-// nonzero unless the plan passes.
-func gateCmd(pos []string, expect string, stdin io.Reader, w io.Writer) error {
+// gateCmd is `quartermaster gate plan <file|-> [--expect op=n,...] [--target
+// T]`. It prints the plan's class and exits nonzero unless the plan passes:
+// class 7 or below, as before the dial, so a worker that only checks the
+// exit status still stops at every delete.
+func gateCmd(pos []string, expect, target string, a AutonomyConfig, stdin io.Reader, w io.Writer) error {
 	if len(pos) != 2 || pos[0] != "plan" {
-		return errors.New("usage: quartermaster gate plan <file|-> [--expect create=N,update=N,...]")
+		return errors.New("usage: quartermaster gate plan <file|-> [--expect create=N,update=N,...] [--target <stack>]")
 	}
 	var data []byte
 	var err error
@@ -280,6 +341,7 @@ func gateCmd(pos []string, expect string, stdin io.Reader, w io.Writer) error {
 		}
 		c.expect(want)
 	}
+	c.classify(a, target)
 	fmt.Fprint(w, renderPlanCheck(c))
 	if !c.ok() {
 		return errGateBlocked
