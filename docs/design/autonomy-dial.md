@@ -1,7 +1,7 @@
 # Autonomy dial: one 0–9 level, set by where an action lands
 
-Status: **proposed** (2026-11-08), second draft. Nothing is built until TJ
-decides D1–D6 below. Builds on [autonomous-mode.md](autonomous-mode.md),
+Status: **proposed** (2026-11-08), third draft. D2 is decided (see
+"Decisions so far"); nothing is built until TJ decides the rest. Builds on [autonomous-mode.md](autonomous-mode.md),
 whose trust model it keeps.
 
 ## Summary
@@ -27,7 +27,8 @@ its own. At dial 4, the coordinator may answer "merge now or wait?" for TJ
 (class 4) but must relay "apply to staging?" (class 6).
 
 It reads like log verbosity, inverted: at 0 TJ sees and approves everything;
-at 9 TJ sees only what's left outside the dial (see D2) and the digest.
+at 9 everything is allowed and TJ sees the digest. **9 is true allow-all**:
+nothing sits outside the dial (D2).
 
 Three things stay as they are:
 
@@ -54,8 +55,11 @@ actions.
 | 5 | Internal messages | Posting to the team's internal channels (review requests, status), commenting on Linear issues other than its own |
 | 6 | Non-production infrastructure | An apply to a dev or staging stack that passes `gate plan`; a deploy dispatch or rollout step to a non-prod environment |
 | 7 | Production, additive or in place | A prod apply that passes `gate plan` (create, update, no delete or replace); a prod deploy dispatch; the next step of a prod rollout once the previous one verified |
-| 8 | Production deletion, scoped | One delete or replace in a prod stack, or a stateful replace anywhere; deleting a non-prod database, bucket or volume; force-pushing to a shared branch |
-| 9 | Widespread or irreversible | Deletes across stacks or past the `widespread` threshold (D3); deleting prod data; object lock or KMS key deletion |
+| 8 | Production deletion, scoped; people and accounts outside our systems | One delete or replace in a prod stack, or a stateful replace anywhere; deleting a non-prod database, bucket or volume; force-pushing to a shared branch; reading or writing a secret; a message to someone outside the team; spending money |
+| 9 | Widespread, irreversible, or lifting a safeguard | Deletes across stacks or past the `widespread` threshold (D3); deleting prod data; object lock or KMS key deletion; approving a PR, including any bot approval; answering an auto-mode classifier denial; changing Claude Code settings or hooks to loosen them |
+
+Rows 8 and 9 hold what earlier drafts kept outside the dial as a floor. TJ
+decided there is no floor (D2); D7 is where each of those items sits.
 
 Rules that place an action:
 
@@ -65,7 +69,7 @@ Rules that place an action:
   canary on staging first" is class 6 when it runs the canary; a choice
   between two code designs in its own PR is class 2.
 - **Unsure means 9.** An action nobody can place stops for TJ unless the
-  dial is at 9, and with D2 (a) not even then if it touches the floor.
+  dial is at 9.
 
 ### What TJ hears
 
@@ -98,31 +102,36 @@ so the coordinator reads them every turn instead of remembering them.
   non-prod (4), prod change (5–6), prod deletion (7–8), widespread (9), with
   the in-between numbers unused. Fewer distinctions, same scale.
 
-### D2. Does anything stay outside the dial, even at 9?
+### D2. Nothing stays outside the dial (decided)
 
-This is the open question. Some actions don't fit "how far does it reach":
-approving PRs, secrets, messaging people outside the team, spending money,
-and anything Claude Code blocks.
+TJ, 2026-11-08: **9 is true allow-all.** The items earlier drafts kept as a
+floor (approving PRs, secrets, outside messages, money, classifier denials)
+sit at the top of the ladder instead. Where exactly is D7.
 
-- **(R) a.** **Yes, a floor outside the dial**: no level lifts it.
-  - **Approving a PR**, including any bot approval. Required review is the
-    org's control on what reaches main; lifting it makes class 4 unreviewed.
-  - **Reading or writing secrets.** The blast radius of a leaked secret isn't
-    knowable when it's read.
-  - **Anything Claude Code blocks or prompts for that TJ hasn't listed**, and
-    every auto-mode classifier denial. Quartermaster can't lift these anyway:
-    Claude Code enforces them. Placing them on the dial would only promise
-    something it can't deliver.
-  - **Messaging people outside the team** and **spending money.** Both act
-    on people and accounts outside the systems the ladder measures, and
-    neither can be taken back.
+### Claude Code prompts and hard denies
 
-  At 9 TJ hears only about the floor and the digest. 9 then means "anything
-  inside our systems, including widespread prod deletion".
-- b. A smaller floor: approving PRs, secrets and Claude Code blocks only.
-  Outside messages go on the ladder at 8 and spending money at 9.
-- c. No floor except what Claude Code itself enforces: 9 lifts everything
-  else, including PR approval and secrets.
+Workers and the coordinator both run inside an agent CLI (Claude Code,
+Codex, Muse) with its own permission system. That system stops an action in
+one of two ways, and the dial treats them differently:
+
+1. **Prompts**: a hook that asks, a permission ask, an auto-mode classifier
+   denial with a countdown. The agent waits on a menu that
+   `quartermaster answer` can answer, so **the dial governs them**: the
+   answer is classed by the action it authorizes, and answering a classifier
+   denial is class 9 by itself, since the classifier is the independent
+   second opinion and only allow-all overrides it.
+2. **Hard denies**: a settings deny rule, a hook that exits with a block. No
+   prompt is shown and there is nothing to answer. The dial can't override
+   them in place. Lifting one means **changing the CLI's settings or hooks,
+   which is itself a ladder action**: loosening is class 9, tightening is
+   class 1 (own worktree) or 3 (TJ's machine).
+
+**The coordinator runs inside Claude Code too.** Its own classifier and hooks
+judge `quartermaster answer` like any command, so at a high dial they can
+still stop it from answering a prompt the dial allows. Then it relays the
+prompt to TJ, as today. The dial never tells the coordinator to work around
+its own permission system; at 9 TJ would launch the coordinator in a looser
+mode as well (D7).
 
 ### D3. How an action is classified
 
@@ -218,11 +227,13 @@ quartermaster autonomy on|off               # off caps at 2 (D5)
 ```
 
 - `check` passes when the action's class is at most the bead's effective
-  level and the action isn't on the floor. `--action` looks the class up:
-  `push` 2, `dispatch`/`resume`/`close`/`resolve`/`install` 3, `merge` 4
-  (or the repo's `merge_class`), `post` 5, `apply`/`deploy`/`rollout` 6 or 7
-  by `--target`, `delete` 8. `--class N` is for everything else, with the
-  class from the worker's `CLASS:` line. An unknown action fails.
+  level. `--action` looks the class up: `push` 2,
+  `dispatch`/`resume`/`close`/`resolve`/`install` 3, `merge` 4 (or the repo's
+  `merge_class`), `post` 5, `apply`/`deploy`/`rollout` 6 or 7 by `--target`,
+  `delete`, `secret`, `message-external` and `spend` 8, and `approve`,
+  `classifier` and `loosen-settings` 9 (the classes D7 proposes). `--class N`
+  is for everything else, with the class from the worker's `CLASS:` line. An
+  unknown action fails.
 - **(R) a.** The commands that act on their own enforce it: `dispatch`,
   `resume`, `answer`, `stale --release` and the ticker's `auto_close` refuse
   without `--by TJ` when the check fails. The coordinator's guide (rendered in
@@ -236,12 +247,60 @@ quartermaster autonomy on|off               # off caps at 2 (D5)
   Easier to read, but stale as soon as the level changes.
 - The hook-prompt categories TJ listed for the coordinator become examples of
   classes 0–2 and leave `coordinator_rules`. A prompt in no category is
-  classified like any action and is answered only if it is inside the dial
-  and not on the floor; a classifier denial is always the floor.
+  classified like any action and is answered only if it is inside the dial;
+  answering a classifier denial is class 9.
 - Setting a bead's level sends its worker a notice tagged `[quartermaster
   autonomy: level N set by TJ]`, with the same delivery rules as today's
   grant and revoke. The worker trusts it only as far as `autonomy check`
   passes.
+
+### D7. Where the former floor items sit
+
+- **(R) a.** As in the ladder:
+  - **8**: reading or writing a secret, a message to someone outside the
+    team, spending money. Each reaches past our own systems, but one at a
+    time and with a known recipient or amount.
+  - **9**: approving a PR (any, including a bot approval), answering a
+    classifier denial, and loosening Claude Code settings or hooks. Each
+    switches off a safeguard that covers every later action, so only
+    allow-all includes them.
+- b. All of them at 9, so 8 stays purely "scoped prod deletion".
+- c. Spending money split by amount: under a configured cap at 8, over it
+  at 9.
+
+### D8. The level sets each worker's permission mode at dispatch
+
+Answering prompts one by one through the coordinator is slow, and the
+coordinator's own classifier can refuse to answer (see "Claude Code prompts
+and hard denies"). The worker's permission mode can follow its level
+instead.
+
+- **(R) a.** Dispatch and `resume` pick the agent's launch args from the bead's
+  effective level. Below 9 a worker starts with its kind's configured args, as
+  today. At 9 it also gets the kind's bypass args, with permission checks off:
+
+  ```toml
+  [agents.claude]
+  args = ["--permission-mode", "auto"]               # every level, as today
+  bypass_args = ["--dangerously-skip-permissions"]   # added at level 9
+
+  [agents.codex]
+  bypass_args = ["--dangerously-bypass-approvals-and-sandbox"]
+  ```
+
+  A kind with no `bypass_args` gets none and keeps prompting at 9. A mode is
+  fixed when the agent starts, so a level change across 9 takes effect when
+  the ticker restarts the worker at its next idle moment, through `resume`,
+  which keeps the conversation. A worker lowered from 9 is restarted first,
+  before anything else is sent to it, so it doesn't keep running unchecked.
+  The coordinator follows the global level the same way when TJ opens it
+  with `quartermaster coordinator`.
+- b. Level bands, each with its own args (for example acceptEdits below 3,
+  auto from 3 to 8, bypass at 9). Finer, but every band is a mode to test,
+  and auto mode already covers the middle.
+- c. Leave launch modes alone and rely on the coordinator answering
+  prompts. Then 9 is allow-all only as far as the coordinator's own
+  classifier lets it answer.
 
 ## Auditing
 
@@ -270,16 +329,29 @@ quartermaster autonomy on|off               # off caps at 2 (D5)
 ## Plan (after TJ decides)
 
 1. Level model: `autonomy:N` labels, `level`/`max`/`prod`/`widespread`/
-   `merge_class` config, the state file, the effective level, the action
-   table and the floor, with tests for each class boundary and for migrating
+   `merge_class` config, the state file, the effective level and the action
+   table, with tests for each class boundary and for migrating
    old labels and keys.
 2. `gate plan` prints a class; `check --class/--action/--target`.
 3. CLI: `autonomy level`, grant/revoke aliases, the level notice; the board's
    `U` and digit keys, and a level marker on each row instead of `auto`.
-4. Enforcement in `dispatch`, `resume`, `answer`, `stale --release` and
+4. `bypass_args` per agent kind, picked by level at dispatch and resume, and
+   the restart when a level crosses 9.
+5. Enforcement in `dispatch`, `resume`, `answer`, `stale --release` and
    `auto_close`, with their `AUTO:` notes.
-5. Coordinator guide and `context`'s dial and reporting line; the brief's
+6. Coordinator guide and `context`'s dial and reporting line; the brief's
    grant section rewritten around `CLASS:` lines and the check.
-6. README and the standing authorization in TJ's CLAUDE.md, rewritten from
+7. README and the standing authorization in TJ's CLAUDE.md, rewritten from
    "a bead labeled autonomous" to "an action whose class `autonomy check`
    passes".
+
+## Decisions so far
+
+- **D2** (TJ, 2026-11-08): 9 is true allow-all, with no floor. The former floor
+  items sit at the top of the ladder (placement is D7). Claude Code prompts,
+  classifier denials included, are dial-governed through
+  `quartermaster answer`. Hard denies are lifted only by changing settings or
+  hooks, which is itself a class 9 action. The coordinator runs in Claude
+  Code too, and its own permission system can still stop it. Recommendation
+  added from the same answer: the level sets each worker's permission mode
+  at dispatch, with checks off at 9 (D8).
