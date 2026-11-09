@@ -201,6 +201,9 @@ type Snapshot struct {
 	// PromptHash is the approval prompt last announced, so each prompt a
 	// blocked agent shows reaches the inbox once.
 	PromptHash string `json:"prompt_hash,omitempty"`
+	// Relaunch marks a worker asked to exit so it can be resumed in the
+	// launch mode its level calls for.
+	Relaunch bool `json:"relaunch,omitempty"`
 }
 
 type EventKind string
@@ -245,7 +248,7 @@ type Outcome struct {
 const resumeNote = "auto: agent resumed after needs_me"
 
 func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
-	s := Snapshot{Group: classify(t), Reviews: t.Reviews, BotReviews: len(t.BotReviews), ReviewsSplit: true, Runs: runStates(t.Runs), Failing: t.Checks.Failing, Pending: freshPending(t, prev.Pending), NeedsMe: t.Bead.Status == StatusNeedsMe, ReadyKey: prev.ReadyKey}
+	s := Snapshot{Group: classify(t), Reviews: t.Reviews, BotReviews: len(t.BotReviews), ReviewsSplit: true, Runs: runStates(t.Runs), Failing: t.Checks.Failing, Pending: freshPending(t, prev.Pending), NeedsMe: t.Bead.Status == StatusNeedsMe, ReadyKey: prev.ReadyKey, Relaunch: prev.Relaunch}
 	if t.Agent != nil {
 		s.AgentStatus, s.AgentSeq = t.Agent.Status, t.Agent.Seq
 		switch {
@@ -401,7 +404,8 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 	if t.Agent != nil && agentReady(t.Agent) && turned && g != GroupNeedsYou {
 		ev(EventFinished, "%s finished a turn (%s)", id, stateLine(t))
 	}
-	if t.Agent == nil && prev.AgentStatus != "" {
+	// A relaunch asked it to exit, and the ticker resumes it itself.
+	if t.Agent == nil && prev.AgentStatus != "" && !prev.Relaunch {
 		ev(EventAgentGone, "%s's agent exited while the bead is still %s", id, t.Bead.Status)
 	}
 	return o

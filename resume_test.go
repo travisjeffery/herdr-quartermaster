@@ -201,28 +201,42 @@ func TestKindList(t *testing.T) {
 
 func TestAgentArgs(t *testing.T) {
 	var cfg Config
-	if got := strings.Join(cfg.agentArgs("muse"), " "); got != "--disable-sandbox --permission-profile :auto-review" {
+	if got := strings.Join(cfg.agentArgs("muse", false), " "); got != "--disable-sandbox --permission-profile :auto-review" {
 		t.Errorf("muse default args = %q", got)
 	}
-	if got := strings.Join(cfg.agentArgs("muse", resumeArgs["muse"]...), " "); got != "--disable-sandbox --permission-profile :auto-review resume --last" {
+	if got := strings.Join(cfg.agentArgs("muse", false, resumeArgs["muse"]...), " "); got != "--disable-sandbox --permission-profile :auto-review resume --last" {
 		t.Errorf("muse resume args = %q", got)
 	}
-	if got := cfg.agentArgs("claude"); len(got) != 0 {
+	if got := cfg.agentArgs("claude", false); len(got) != 0 {
 		t.Errorf("claude has no default args, got %q", got)
 	}
 	cfg.Agents = map[string]AgentConfig{"muse": {Args: []string{}}, "codex": {Args: []string{"-m", "x"}}}
-	if got := cfg.agentArgs("muse"); len(got) != 0 {
+	if got := cfg.agentArgs("muse", false); len(got) != 0 {
 		t.Errorf("an empty [agents.muse] args clears the default, got %q", got)
 	}
-	if got := strings.Join(cfg.agentArgs("codex", resumeArgs["codex"]...), " "); got != "-m x resume --last" {
+	if got := strings.Join(cfg.agentArgs("codex", false, resumeArgs["codex"]...), " "); got != "-m x resume --last" {
 		t.Errorf("codex args = %q", got)
+	}
+	// Bypass args go after the configured args and before a subcommand.
+	if got := strings.Join(cfg.agentArgs("codex", true, resumeArgs["codex"]...), " "); got != "-m x --dangerously-bypass-approvals-and-sandbox resume --last" {
+		t.Errorf("codex bypass args = %q", got)
+	}
+	if got := strings.Join(cfg.agentArgs("claude", true, "--continue"), " "); got != "--dangerously-skip-permissions --continue" {
+		t.Errorf("claude bypass args = %q", got)
+	}
+	if got := cfg.agentArgs("muse", true); len(got) != 0 {
+		t.Errorf("muse has no bypass default, got %q", got)
+	}
+	cfg.Agents["claude"] = AgentConfig{BypassArgs: []string{}}
+	if got := cfg.agentArgs("claude", true); len(got) != 0 {
+		t.Errorf("an empty bypass_args keeps claude off bypass, got %q", got)
 	}
 }
 
 func TestAgentArgsFromConfigFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("QUARTERMASTER_CONFIG_DIR", dir)
-	conf := "repo = \"/r\"\n[agents.muse]\nargs = [\"--disable-sandbox\", \"--sandbox-network\", \"enabled\"]\n[agents.claude]\nargs = [\"--model\", \"opus\"]\n"
+	conf := "repo = \"/r\"\n[agents.muse]\nargs = [\"--disable-sandbox\", \"--sandbox-network\", \"enabled\"]\n[agents.claude]\nargs = [\"--model\", \"opus\"]\nbypass_args = []\n"
 	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(conf), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -230,11 +244,11 @@ func TestAgentArgsFromConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(cfg.agentArgs("muse"), " "); got != "--disable-sandbox --sandbox-network enabled" {
+	if got := strings.Join(cfg.agentArgs("muse", false), " "); got != "--disable-sandbox --sandbox-network enabled" {
 		t.Errorf("muse args = %q", got)
 	}
-	if got := strings.Join(cfg.agentArgs("claude", "--continue"), " "); got != "--model opus --continue" {
-		t.Errorf("claude args = %q", got)
+	if got := strings.Join(cfg.agentArgs("claude", true, "--continue"), " "); got != "--model opus --continue" {
+		t.Errorf("claude args with bypass_args = [] = %q", got)
 	}
 }
 

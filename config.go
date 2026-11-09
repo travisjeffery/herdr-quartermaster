@@ -84,6 +84,10 @@ type Config struct {
 type AgentConfig struct {
 	// Args go to the agent's own CLI on every start, dispatch and resume.
 	Args []string `toml:"args"`
+	// BypassArgs follow Args when a worker starts under a 9 lease, turning
+	// the agent's own permission checks off; unset takes the kind's default,
+	// and [] keeps a kind off bypass. The coordinator never gets them.
+	BypassArgs []string `toml:"bypass_args"`
 	// Env is "NAME=value" pairs exported in the agent's pane before it
 	// starts, after BEADS_ACTOR and BEADS_DIR, on every host.
 	Env []string `toml:"env"`
@@ -96,6 +100,13 @@ type AgentConfig struct {
 // unattended worker doesn't wait on a prompt nobody is watching.
 var defaultAgentArgs = map[string][]string{
 	"muse": {"--disable-sandbox", "--permission-profile", ":auto-review"},
+}
+
+// defaultBypassArgs are each kind's switch for its own permission checks,
+// used only under a 9 lease (docs/design/autonomy-dial.md, D8).
+var defaultBypassArgs = map[string][]string{
+	"claude": {"--dangerously-skip-permissions"},
+	"codex":  {"--dangerously-bypass-approvals-and-sandbox"},
 }
 
 // agentEnv is the shell command that exports what bd needs into an agent's
@@ -143,14 +154,34 @@ func (c Config) validateAgents() error {
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // agentArgs is what a kind starts with: its configured args (else the
-// default), then extra, such as a resume subcommand. Configured args go first
-// because codex takes its root options before a subcommand.
-func (c Config) agentArgs(kind string, extra ...string) []string {
+// default), its bypass args when bypass, then extra, such as a resume
+// subcommand. Configured args go first because codex takes its root options
+// before a subcommand.
+func (c Config) agentArgs(kind string, bypass bool, extra ...string) []string {
 	args := defaultAgentArgs[kind]
 	if a, ok := c.Agents[kind]; ok {
 		args = a.Args
 	}
-	return append(slices.Clone(args), extra...)
+	args = slices.Clone(args)
+	if bypass {
+		args = append(args, c.bypassArgs(kind)...)
+	}
+	return append(args, extra...)
+}
+
+func (c Config) bypassArgs(kind string) []string {
+	if a, ok := c.Agents[kind]; ok && a.BypassArgs != nil {
+		return a.BypassArgs
+	}
+	return defaultBypassArgs[kind]
+}
+
+// launchBypass reports whether b's worker starts with bypass args: only
+// under a 9 lease, the stop file counted, and only on this machine, since the
+// ticker can restart a worker only through resume, which is local.
+func (c Config) launchBypass(b Bead, host string) bool {
+	lvl, _ := c.beadLevel(b, autonomyStopped())
+	return lvl == 9 && host == localHost
 }
 
 func defaultConfig() Config {

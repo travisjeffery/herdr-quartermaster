@@ -605,6 +605,7 @@ args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
 
 [agents.claude]           # per-kind environment, exported in the agent's pane before it starts
 env = ["CLAUDE_CODE_ENABLE_TELEMETRY=1", "OTEL_EXPORTER_OTLP_ENDPOINT=https://otel.example.com"]
+bypass_args = ["--dangerously-skip-permissions"]   # after args, only for a worker under a 9 lease (the default; [] turns it off)
 
 [autonomy]                # the 0-9 dial (docs/design/autonomy-dial.md; these are the defaults)
 level = 4                 # the global level for beads without an autonomy:N label; 3+ also auto-closes
@@ -626,6 +627,17 @@ and replace that kind's defaults. Muse defaults to the args above:
 `:auto-review` permission profile, which keeps Muse's approval judge but lets
 it decide instead of waiting on a human nobody is watching. Set `args = []`
 for Muse's own defaults. Other kinds start with no extra args.
+
+`[agents.<kind>] bypass_args` follow `args` only when a worker starts on this
+machine under a 9 lease; the coordinator never gets them. They default to
+`--dangerously-skip-permissions` for Claude and
+`--dangerously-bypass-approvals-and-sandbox` for Codex; Muse has none, and
+`bypass_args = []` keeps a kind off bypass. A launch mode is fixed when the
+agent starts, so when a worker's level crosses 9 (set, lowered, lease expired
+or autonomy turned off) the ticker waits for it to go idle, asks it to
+`/exit`, and resumes it with the right args, keeping the conversation. A worker
+due that relaunch gets no prompts, queued briefs or level notices first. A
+worker at `needs_me` is left until it is answered.
 
 Before starting any agent, quartermaster exports `BEADS_ACTOR` (the kind) and
 `BEADS_DIR` (`beads_dir`) in its pane, so `bd` finds the database from a
