@@ -80,6 +80,9 @@ type Digest struct {
 	Changes  []string
 	Warnings []string
 	Total    int
+	// Auto is the AUTO: steps taken since the last digest; Changes lists them
+	// grouped by class.
+	Auto []autoStep
 }
 
 // digestState is what the digest remembers between runs: each bead's section,
@@ -355,24 +358,25 @@ func buildDigest(in digestInputs, prev digestState, prefixes []string, now time.
 		})
 	}
 	d.Changes = digestChanges(prev, next, byID, prOwner, in.closed)
-	d.Changes = append(d.Changes, autoChanges(prev, append(slices.Clone(in.open), in.closed...))...)
+	d.Auto = autoChanges(prev, append(slices.Clone(in.open), in.closed...))
+	d.Changes = append(d.Changes, autoLines(d.Auto)...)
 	return d, next
 }
 
-// autoChanges are the AUTO: notes added since the last digest, one change
-// each, so every step a worker took without TJ is in front of them once.
-// Notes have no timestamps: what is new is what lies past the last count. The
-// first digest has nothing to compare with, so it reports nothing.
-func autoChanges(prev digestState, beads []Bead) []string {
+// autoChanges are the AUTO: notes added since the last digest, so every step
+// a worker took without TJ is in front of them once. Notes have no
+// timestamps: what is new is what lies past the last count. The first digest
+// has nothing to compare with, so it reports nothing.
+func autoChanges(prev digestState, beads []Bead) []autoStep {
 	if prev.At.IsZero() {
 		return nil
 	}
-	var out []string
+	var out []autoStep
 	for _, b := range beads {
 		notes := autoNotes(b.Notes)
 		if seen := prev.Auto[b.ID]; seen < len(notes) {
 			for _, n := range notes[seen:] {
-				out = append(out, b.ID+" "+n)
+				out = append(out, autoStep{Bead: b.ID, Note: n})
 			}
 		}
 	}
@@ -580,9 +584,26 @@ func (d Digest) headline() string {
 	return strings.Join(parts, " · ")
 }
 
+// quiet is the line that tells a quiet digest from a broken one: whether
+// anything needed TJ, and how much ran without them.
+func (d Digest) quiet() string {
+	s := "nothing needed you"
+	if n := d.count(SecNeedsYou); n > 0 {
+		s = fmt.Sprintf("%d need you", n)
+	}
+	if len(d.Auto) == 0 {
+		return s + "; no steps without you"
+	}
+	s += fmt.Sprintf("; %d step(s) without you", len(d.Auto))
+	if c := topClass(d.Auto); c >= 0 {
+		s += fmt.Sprintf(", highest class %d", c)
+	}
+	return s
+}
+
 func renderDigest(d Digest) string {
 	var s strings.Builder
-	fmt.Fprintf(&s, "# Beads digest: %s\n\n%s (%d open)\n", d.At.Format("2006-01-02 15:04 MST"), d.headline(), d.Total)
+	fmt.Fprintf(&s, "# Beads digest: %s\n\n%s (%d open)\n\n%s\n", d.At.Format("2006-01-02 15:04 MST"), d.headline(), d.Total, d.quiet())
 	for _, w := range d.Warnings {
 		fmt.Fprintf(&s, "\n> WARNING: %s\n", w)
 	}
@@ -621,7 +642,7 @@ func renderDigest(d Digest) string {
 // and the top of needs-you. top caps both lists.
 func (d Digest) summary(top int) (string, string) {
 	title := "Beads: " + d.headline()
-	var body []string
+	body := []string{d.quiet()}
 	for i, c := range d.Changes {
 		if i == top {
 			body = append(body, fmt.Sprintf("…and %d more changes", len(d.Changes)-top))
@@ -631,10 +652,7 @@ func (d Digest) summary(top int) (string, string) {
 	}
 	needs := d.Sections[SecNeedsYou]
 	if len(needs) > 0 {
-		if len(body) > 0 {
-			body = append(body, "")
-		}
-		body = append(body, "Needs you:")
+		body = append(body, "", "Needs you:")
 		for i, it := range needs {
 			if i == top {
 				body = append(body, fmt.Sprintf("…and %d more", len(needs)-top))

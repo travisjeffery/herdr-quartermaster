@@ -466,5 +466,8 @@ func answerPrompt(env promptEnv, id, choice, expect, by string, class int) (stri
 	if err := env.note(id, note); err != nil {
 		return msg, fmt.Errorf("answered, but noting it on %s failed: %w", id, err)
 	}
+	if err := appendJournal(journalRecord{At: time.Now(), Kind: journalPrompt, Bead: id, Class: -1, Text: note}); err != nil {
+		return msg, fmt.Errorf("answered, but journaling it failed: %w", err)
+	}
 	return msg, nil
 }

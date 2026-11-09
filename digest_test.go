@@ -309,13 +309,16 @@ func TestRenderDigestAndSummary(t *testing.T) {
 	if title != "Beads: "+d.headline() {
 		t.Errorf("title %q", title)
 	}
-	if want := "Needs you:\napp-ask P1 Pick a rollout order (stale 6h ago)\napp-run P2 Rotate the deploy key\n…and 1 more"; body != want {
+	if want := "3 need you; no steps without you\n\nNeeds you:\napp-ask P1 Pick a rollout order (stale 6h ago)\napp-run P2 Rotate the deploy key\n…and 1 more"; body != want {
 		t.Errorf("body\n got %q\nwant %q", body, want)
 	}
 
 	quiet := Digest{At: t0, Sections: map[Section][]DigestItem{SecBacklog: d.Sections[SecBacklog]}}
 	if quiet.worthNotifying() {
 		t.Error("nothing changed and nothing needs the user: no notification")
+	}
+	if _, body := quiet.summary(2); body != "nothing needed you; no steps without you" {
+		t.Errorf("quiet body %q", body)
 	}
 	quiet.Changes = []string{"closed: app-x"}
 	if !quiet.worthNotifying() {

@@ -428,6 +428,7 @@ func (t Ticker) once(st *TickerState) error {
 			}
 		}
 		snap := snapshot(th, prev, now)
+		t.journalAuto(th, prev, seen, &snap, now)
 		snap.Pending = append(snap.Pending, out.Prompts...)
 		t.relaunch(th, &snap, relaunch[agentName(id)], now)
 		for _, e := range out.Events {
