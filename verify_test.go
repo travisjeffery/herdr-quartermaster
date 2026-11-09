@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -165,13 +166,13 @@ func withNote(b Bead, note string) Bead {
 	return b
 }
 
-func TestVerifyLinearDoneClosesWithAutoClose(t *testing.T) {
-	f := newFake(withNote(x0w5(), "Linear: INF-994"))
-	f.issues["INF-994"] = linearIssue{Key: "INF-994", URL: "https://linear.app/oscilar/issue/INF-994", State: "completed", Name: "Done", Updated: "u1"}
+func TestVerifyOwnMergedPRClosesWithAutoClose(t *testing.T) {
+	f := newFake(withNote(x0w5(), "Linear: INF-994\nPR: "+pr14190))
+	f.prs[pr14190] = prRef{URL: pr14190, State: "MERGED"}
 	st := TickerState{}
 	pass(t, f, vcfg(true), &st, vNow)
-	if len(f.closedN) != 1 || !strings.Contains(f.closedN[0], "INF-994 is Done") {
-		t.Fatalf("closed = %v, want backend-x0w5 closed citing INF-994", f.closedN)
+	if len(f.closedN) != 1 || !strings.Contains(f.closedN[0], "merged "+pr14190) {
+		t.Fatalf("closed = %v, want backend-x0w5 closed citing its PR", f.closedN)
 	}
 	if len(f.events) != 1 || f.events[0].Kind != EventAutoClosed {
 		t.Fatalf("events = %+v, want one auto_closed", f.events)
@@ -182,8 +183,8 @@ func TestVerifyLinearDoneClosesWithAutoClose(t *testing.T) {
 }
 
 func TestVerifyFlagOnlyBelowLevel3(t *testing.T) {
-	f := newFake(withNote(x0w5(), "Linear: INF-994"))
-	f.issues["INF-994"] = linearIssue{Key: "INF-994", State: "completed", Name: "Done"}
+	f := newFake(withNote(x0w5(), "Linear: INF-994\nPR: "+pr14190))
+	f.prs[pr14190] = prRef{URL: pr14190, State: "MERGED"}
 	st := TickerState{}
 	lines := pass(t, f, vcfg(false), &st, vNow)
 	if len(f.closedN) != 0 {
@@ -297,13 +298,14 @@ func TestVerifyNeverClosesGuardedBeads(t *testing.T) {
 	for name, mod := range map[string]func(*Bead){
 		"rolling-out": func(b *Bead) { b.Labels = []string{LabelRollingOut} },
 		"needs_me":    func(b *Bead) { b.Status = StatusNeedsMe },
+		"blocked":     func(b *Bead) { b.Status = StatusBlocked },
 		"epic":        func(b *Bead) { b.Type = "epic" },
 	} {
 		t.Run(name, func(t *testing.T) {
-			b := withNote(x0w5(), "Linear: INF-994")
+			b := withNote(x0w5(), "Linear: INF-994\nPR: "+pr14190)
 			mod(&b)
 			f := newFake(b)
-			f.issues["INF-994"] = linearIssue{Key: "INF-994", State: "completed", Name: "Done"}
+			f.prs[pr14190] = prRef{URL: pr14190, State: "MERGED"}
 			st := TickerState{}
 			pass(t, f, vcfg(true), &st, vNow)
 			if len(f.closedN) != 0 || len(f.events) != 1 || f.events[0].Kind != EventLikelyStale {
@@ -372,12 +374,12 @@ func TestVerifyIsIncremental(t *testing.T) {
 	}
 	f.merged = nil
 
-	// Linear moved to Done: closes, without another search.
+	// Its PR merged: closes, without another search.
 	f.calls = map[string]int{}
-	f.issues["INF-994"] = linearIssue{Key: "INF-994", State: "completed", Name: "Done", Updated: "u2"}
+	f.prs[pr14190] = prRef{URL: pr14190, State: "MERGED", Head: "bbb"}
 	pass(t, f, cfg, &st, vNow.Add(4*time.Hour))
 	if f.calls["search"] != 0 || len(f.closedN) != 1 {
-		t.Fatalf("Linear-moved pass calls = %v closed %v", f.calls, f.closedN)
+		t.Fatalf("PR-merged pass calls = %v closed %v", f.calls, f.closedN)
 	}
 }
 
@@ -452,8 +454,8 @@ func TestVerifySkipsOnLowBudget(t *testing.T) {
 }
 
 func TestVerifyDryRunChangesNothing(t *testing.T) {
-	f := newFake(withNote(x0w5(), "Linear: INF-994"))
-	f.issues["INF-994"] = linearIssue{Key: "INF-994", State: "completed", Name: "Done"}
+	f := newFake(withNote(x0w5(), "Linear: INF-994\nPR: "+pr14190))
+	f.prs[pr14190] = prRef{URL: pr14190, State: "MERGED"}
 	st := TickerState{}
 	lines, err := verifyPass(vcfg(true), f.env(), &st, nil, false, vNow)
 	if err != nil || len(f.closedN) != 0 || len(f.events) != 0 || st.Verified != nil {
@@ -577,14 +579,14 @@ func TestWorkRemainsWeakensMergedPRs(t *testing.T) {
 		"remaining note":  {Title: "Set connection_termination", Notes: "PR: " + pr14190 + " merged.\nRemaining clusters are still on the old behaviour."},
 		"follow-up after": {Title: "Fix it", Notes: "PR: " + pr14190 + "\nfollow-up: wire the alarm"},
 	} {
-		ev := prEvidence(b, []string{pr14190}, prs)
+		ev := prEvidence(b, []string{pr14190}, prs, "tj/")
 		if len(ev) != 1 || ev[0].Strong {
 			t.Errorf("%s: evidence %+v, want weak", name, ev)
 		}
 	}
 	// Remaining work noted before the PR that delivered it doesn't count.
 	b := Bead{Title: "Fix it", Notes: "still to do: the fix\nPR: " + pr14190 + " merged, verified."}
-	if ev := prEvidence(b, []string{pr14190}, prs); len(ev) != 1 || !ev[0].Strong {
+	if ev := prEvidence(b, []string{pr14190}, prs, "tj/"); len(ev) != 1 || !ev[0].Strong {
 		t.Errorf("evidence %+v, want strong", ev)
 	}
 }
@@ -604,7 +606,7 @@ func TestDuplicateIgnoresFamilySharingAKey(t *testing.T) {
 
 func TestClosedUnmergedPRKeepsEvidenceWeak(t *testing.T) {
 	prs := map[string]prRef{pr14190: {URL: pr14190, State: "MERGED"}, pr14190 + "1": {URL: pr14190 + "1", State: "CLOSED"}}
-	ev := prEvidence(Bead{Title: "Fix it"}, []string{pr14190, pr14190 + "1"}, prs)
+	ev := prEvidence(Bead{Title: "Fix it"}, []string{pr14190, pr14190 + "1"}, prs, "tj/")
 	if len(ev) != 1 || ev[0].Strong || !strings.Contains(ev[0].Detail, "closed unmerged") {
 		t.Fatalf("evidence %+v, want weak naming the closed PR", ev)
 	}
@@ -622,8 +624,8 @@ func TestVerifyRevalidatesBeforeClosing(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newFake(withNote(x0w5(), "Linear: INF-994"))
-			f.issues["INF-994"] = linearIssue{Key: "INF-994", State: "completed", Name: "Done"}
+			f := newFake(withNote(x0w5(), "Linear: INF-994\nPR: "+pr14190))
+			f.prs[pr14190] = prRef{URL: pr14190, State: "MERGED"}
 			change(f)
 			st := TickerState{}
 			lines := pass(t, f, vcfg(true), &st, vNow)
@@ -680,5 +682,121 @@ func TestVerifyChargesEveryRunLookup(t *testing.T) {
 	w := verifyWork{b: withNote(x0w5(), "https://github.com/o/r/actions/runs/1 https://github.com/o/r/actions/runs/2 https://github.com/o/r/actions/runs/3"), full: true, run: true}
 	if got := w.cost(); got != 5 {
 		t.Fatalf("cost = %d, want 5: a search, three run views and a run list", got)
+	}
+}
+
+// The ticker's first three auto-closes, all wrong: each closed on its Linear
+// issue being Done, over notes saying work remained or rejecting the flag.
+func TestVerifyRealWrongCloses(t *testing.T) {
+	linear := "https://linear.app/example/issue/ENG-1"
+	other := "https://github.com/example/app/pull/12021"
+	radar := "https://github.com/example/tool/pull/66"
+	cases := map[string]struct {
+		b   Bead
+		prs map[string]prRef
+	}{
+		// Linear Done and a merged PR naming the key, which only did a sliver
+		// of it; a note had rejected exactly that.
+		"key mentioned, flag rejected": {b: Bead{Notes: "Linear: ENG-1\n2026-11-05 coordinator: ticker flagged likely_stale (ENG-1 Done; #12021). Checked origin/main: work NOT done. Keep open."}},
+		// A PR it tracked merged, but the rest of it is a later read.
+		"remaining after the merge": {
+			b:   Bead{Notes: "Linear: ENG-1\nTo do: (1) tool#66 awaiting review: " + radar + "\nmerged.\nRemaining (2): re-run the cost read after three days, then close ENG-1.\nCoordinator 2026-10-31: likely_stale flag rejected - the multi-day read remains."},
+			prs: map[string]prRef{radar: {URL: radar, State: "MERGED"}},
+		},
+		// Its own PRs merged; its last notes list what is still open.
+		"OPEN items": {
+			b:   Bead{Notes: "Linear: ENG-1\nPR: " + other + "\nApplied and verified.\nOPEN for ENG-1: vendor activation, a missing secret."},
+			prs: map[string]prRef{other: {URL: other, State: "MERGED"}},
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			b := x0w5()
+			b.Type, b.Notes = "task", c.b.Notes
+			f := newFake(b)
+			f.issues["ENG-1"] = linearIssue{Key: "ENG-1", URL: linear, State: "completed", Name: "Done"}
+			f.prs = c.prs
+			f.found = []prRef{{URL: other, State: "MERGED", MergedAt: vNow.Add(-time.Hour)}}
+			cfg := vcfg(true)
+			cfg.LinearPrefixes = []string{"ENG"}
+			st := TickerState{}
+			pass(t, f, cfg, &st, vNow)
+			if len(f.closedN) != 0 {
+				t.Fatalf("closed %v", f.closedN)
+			}
+			// Reopened after verify closed it: never closed on the same evidence.
+			f.beads[0].Notes += "\nAUTO: [verify L4 C3] closed as already done — linear: ENG-1 is Done; pr: merged " + other
+			f.beads[0].UpdatedAt = x0w5().UpdatedAt.Add(time.Hour)
+			pass(t, f, cfg, &st, vNow.Add(48*time.Hour))
+			if len(f.closedN) != 0 {
+				t.Fatalf("closed %v after a reopen", f.closedN)
+			}
+		})
+	}
+}
+
+func TestLinearDoneAloneFlags(t *testing.T) {
+	f := newFake(withNote(x0w5(), "Linear: INF-994"))
+	f.issues["INF-994"] = linearIssue{Key: "INF-994", State: "completed", Name: "Done"}
+	st := TickerState{}
+	pass(t, f, vcfg(true), &st, vNow)
+	if len(f.closedN) != 0 || len(f.events) != 1 || f.events[0].Kind != EventLikelyStale {
+		t.Fatalf("closed %v events %+v, want a flag only", f.closedN, f.events)
+	}
+}
+
+func TestOnlyItsOwnPRIsStrong(t *testing.T) {
+	prs := map[string]prRef{pr14190: {URL: pr14190, State: "MERGED"}}
+	b := x0w5()
+	b.Notes = "tracks " + pr14190
+	if ev := prEvidence(b, []string{pr14190}, prs, "tj/"); len(ev) != 1 || ev[0].Strong {
+		t.Fatalf("a PR it only mentions: %+v, want weak", ev)
+	}
+	prs[pr14190] = prRef{URL: pr14190, State: "MERGED", Branch: "tj/backend-x0w5-aws-security-lake"}
+	if ev := prEvidence(b, []string{pr14190}, prs, "tj/"); len(ev) != 1 || !ev[0].Strong {
+		t.Fatalf("a PR from its branch: %+v, want strong", ev)
+	}
+}
+
+func TestVerifyRejectionNeedsNewEvidence(t *testing.T) {
+	f := newFake(withNote(x0w5(), "Linear: INF-994"))
+	f.issues["INF-994"] = linearIssue{Key: "INF-994", State: "completed", Name: "Done", Updated: "u1"}
+	st := TickerState{}
+	pass(t, f, vcfg(true), &st, vNow)
+	if len(f.events) != 1 {
+		t.Fatalf("events = %+v, want the first flag", f.events)
+	}
+	f.beads[0].Labels = []string{LabelStaleRejected}
+	f.beads[0].UpdatedAt = x0w5().UpdatedAt.Add(time.Hour)
+	pass(t, f, vcfg(true), &st, vNow.Add(48*time.Hour))
+	if len(f.events) != 1 || st.Verified["backend-x0w5"].Line == "" || !strings.Contains(st.Verified["backend-x0w5"].Line, " none: ") {
+		t.Fatalf("events %+v line %q, want the rejected evidence ignored", f.events, st.Verified["backend-x0w5"].Line)
+	}
+	// Its own PR merging afterwards is new, and closes it.
+	f.beads[0].Notes += "\nPR: " + pr14190
+	f.beads[0].UpdatedAt = x0w5().UpdatedAt.Add(2 * time.Hour)
+	f.prs[pr14190] = prRef{URL: pr14190, State: "MERGED"}
+	pass(t, f, vcfg(true), &st, vNow.Add(50*time.Hour))
+	if len(f.closedN) != 1 || strings.Contains(f.closedN[0], "INF-994") {
+		t.Fatalf("closed %v, want closed on its PR alone", f.closedN)
+	}
+}
+
+func TestSharedRefsAndFamilyDuplicatesDontCount(t *testing.T) {
+	umbrella := "https://github.com/example/.github/pull/7"
+	var beads []Bead
+	for i := range 5 {
+		b := x0w5()
+		b.ID, b.Type = fmt.Sprintf("backend-fam.%d", i+1), "task"
+		b.Notes = "Linear: INF-994"
+		beads = append(beads, b)
+	}
+	f := newFake(beads...)
+	f.found = []prRef{{URL: umbrella, Title: "INF-994: bump every repo", State: "MERGED", MergedAt: vNow.Add(-time.Hour)}}
+	f.closedB = []Bead{{ID: "backend-fam.20.1", Title: "INF-994: one of them", Status: StatusClosed, CloseReason: "done", Notes: "Linear: INF-994"}}
+	st := TickerState{}
+	pass(t, f, vcfg(true), &st, vNow)
+	if len(f.events) != 0 {
+		t.Fatalf("events = %+v, want no flag from an umbrella PR or a family member's close", f.events)
 	}
 }
