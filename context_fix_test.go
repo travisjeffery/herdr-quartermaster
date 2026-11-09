@@ -38,3 +38,55 @@ func TestCoordinatorGuideAppendsConfiguredRules(t *testing.T) {
 		t.Errorf("guide tail:\n%s", got[len(got)-200:])
 	}
 }
+
+func TestContextShowsDial(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	cfg := Config{Repo: "/r", Autonomy: AutonomyConfig{Level: 4, Max: 7}}
+	if err := saveAutonomy(autonomyState{Leases: map[string]autonomyLease{"b-1": {Level: 8, Until: t0.Add(time.Hour)}}}); err != nil {
+		t.Fatal(err)
+	}
+	out := renderContext(cfg, nil, nil, nil, nil, TickerState{}, nil, t0)
+	for _, want := range []string{
+		"## Autonomy",
+		"level: 4 (global, from [autonomy] level), max 7",
+		"lease: b-1 at 8 until",
+		"reporting: one line per update listing the AUTO: steps since the last",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("context missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "## Autonomy") > strings.Index(out, "## Inbox") {
+		t.Error("the dial is not at the top")
+	}
+}
+
+func TestReportingMode(t *testing.T) {
+	for g, want := range map[int]string{0: "each AUTO: step", 3: "each AUTO: step", 4: "one line per update", 6: "one line per update", 7: "between digests", 9: "between digests"} {
+		if got := reportingMode(g); !strings.Contains(got, want) {
+			t.Errorf("level %d: %q", g, got)
+		}
+	}
+}
+
+func TestCoordinatorGuidePointsAtCheck(t *testing.T) {
+	g := coordinatorGuide(Config{Repo: "/r"})
+	for _, want := range []string{
+		"quartermaster autonomy check <bead> --action A [--target T]",
+		"AUTO: [coordinator L<n> C<c>]",
+		"never lower than the worker's `CLASS:`",
+		"a question of taste or voice, involves other people",
+		"it never widens a task or\n  authorizes an action, at any level",
+		"A classifier denial (a prompt counting down to an\n    automatic deny) is class 9",
+		"--action merge` passes; otherwise tell TJ",
+	} {
+		if !strings.Contains(g, want) {
+			t.Errorf("guide missing %q", want)
+		}
+	}
+	for _, gone := range []string{"wait for TJ's go-ahead", "only on TJ's go-ahead", "autonomy grant|revoke", "never answer it for TJ"} {
+		if strings.Contains(g, gone) {
+			t.Errorf("guide still says %q", gone)
+		}
+	}
+}
