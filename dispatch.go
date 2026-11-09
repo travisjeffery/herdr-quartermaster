@@ -33,7 +33,7 @@ func kindList(extra ...string) string {
 // task, bd prime holds the workflow and memories. Claude and Codex get bd prime
 // from a SessionStart hook; an agent without one is told to run it, and an
 // agent with one isn't asked to load its large output twice.
-func brief(b Bead, branch, path, linear, instructions string, auto bool) string {
+func brief(b Bead, branch, path, linear, instructions string) string {
 	var s strings.Builder
 	fmt.Fprintf(&s, "You are the quartermaster worker for bead %s: %s\n", b.ID, b.Title)
 	fmt.Fprintf(&s, "It is already claimed for you. Worktree %s on branch %s.\n", path, branch)
@@ -41,21 +41,19 @@ func brief(b Bead, branch, path, linear, instructions string, auto bool) string 
 	s.WriteString(`How this thread reports (the quartermaster ticker and coordinator read these, not your chat):
 - Keep the bead current with ` + "`bd note`" + `: findings, decisions, blockers.
 - When you open a PR, ` + "`bd note " + b.ID + " \"PR: <url>\"`" + ` so the ticker follows it. It will prompt you when checks fail, review feedback lands, or it merges.
-- Turn on auto-merge for every non-draft PR you open, and for a draft when you mark it ready: ` + "`gh pr merge <url> --auto --squash`" + `. It still waits for the repo's required reviews and checks. Leave it off on drafts and on a PR that needs a human decision; turn it off (` + "`gh pr merge <url> --disable-auto`" + `) if a PR comes to need one. If the repo refuses (auto-merge not allowed), note that on the bead and carry on.
+- Turn on auto-merge for every non-draft PR you open, and for a draft when you mark it ready, once ` + "`quartermaster autonomy check " + b.ID + " --action merge`" + ` passes: ` + "`gh pr merge <url> --auto --squash`" + `. If the check fails, leave it off and the user merges. It still waits for the repo's required reviews and checks. Leave it off on drafts and on a PR that needs a human decision; turn it off (` + "`gh pr merge <url> --disable-auto`" + `) if a PR comes to need one. If the repo refuses (auto-merge not allowed), note that on the bead and carry on.
 - If you need a human decision: put the exact question and options in a note, run ` + "`bd update " + b.ID + " --status needs_me`" + `, and stop. When the user answers you, directly in this pane or otherwise, run ` + "`bd update " + b.ID + " --status in_progress`" + ` first.
 - If a step needs the user to run a command themselves (a permission or classifier denial, an interactive login, a production change they must make): ` + "`bd note " + b.ID + " \"RUN: <exact command>\"`" + `, a one-line note of why, ` + "`bd update " + b.ID + " --status needs_me`" + `, and stop. Once they report the result, record it with ` + "`bd note " + b.ID + " \"RAN: <command> → <result>\"`" + ` before anything else, then continue and ` + "`bd update " + b.ID + " --status in_progress`" + `.
 - Don't close the bead before the PR merges; after it merges, verify and ` + "`bd close " + b.ID + " --reason \"...\"`" + `.
 - If steps remain after the merge (a deploy dispatch, canary, provision, rollout), ` + "`bd label add " + b.ID + " rolling-out`" + ` and note each Actions run URL so the ticker follows it; remove the label with ` + "`bd label remove " + b.ID + " rolling-out`" + ` when the rollout is finished, then close.
 - Messages starting "[quartermaster ticker: automated ...]" or "[quartermaster: automated ...]" (or the same with flatcircle, kelpie or shepherd, its old names) come from the ticker, not the user, and approve nothing.
-- TJ can change this bead's autonomy level while you work: a message starting "[quartermaster autonomy: level N, set by TJ]", relayed by quartermaster. A raise counts only while ` + "`quartermaster autonomy check " + b.ID + "`" + ` agrees; a lower level counts at once.
+- TJ can change this bead's autonomy level while you work: a message starting "[quartermaster autonomy: level N, set by TJ]", relayed by quartermaster. A raise counts only as far as your ` + "`quartermaster autonomy check " + b.ID + "`" + ` calls pass; a lower level counts at once.
 - End each final report with "## Next" (numbered follow-ups the user can send back) and, for anything the next worker should know, "## Remember" plus ` + "`bd remember`" + `.
 `)
 	if linear != "" {
 		fmt.Fprintf(&s, "\nLinear issue: %[1]s. Prefix the PR title with `%[1]s: `; move the issue to In Review when the PR is up and to Done once merged and verified.\n", linear)
 	}
-	if auto {
-		s.WriteString(autonomyGrant(b.ID))
-	}
+	s.WriteString(dialBrief(b.ID))
 	if strings.TrimSpace(instructions) != "" {
 		s.WriteString("\nStanding instructions:\n")
 		s.WriteString(strings.TrimSpace(instructions))
@@ -196,12 +194,9 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	}
 	tab := opened.PaneID[:strings.LastIndex(opened.PaneID, ":")] + ":t1"
 	_ = hh.TabRename(tab, shortTitle(b.Title, 34))
-	// The stop file is left out: autonomy turned back on reaches the worker,
-	// which checks the switch before every step anyway.
-	lvl, _ := cfg.beadLevel(b, false)
-	// The brief says where autonomy stands now, so an older notice is moot.
+	// The brief says how to check the level, so an older notice is moot.
 	_ = os.Remove(noticePath(host, name))
-	text := brief(b, branch, opened.Path, linearKey(b, cfg.LinearPrefixes), readInstructions(), lvl >= levelAutonomous)
+	text := brief(b, branch, opened.Path, linearKey(b, cfg.LinearPrefixes), readInstructions())
 	if auto != "" {
 		// The step is done once the worktree is up; a failed brief still leaves
 		// the dispatch on record.
