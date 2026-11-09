@@ -264,18 +264,27 @@ once per head commit; otherwise the board shows
      so only with `LINEAR_API_KEY` or `linear auth login` in the ticker's
      environment);
   2. every PR its notes link is merged, none open;
-  3. merged PRs since it was opened mention its Linear key or id;
+  3. merged PRs since it was opened mention its Linear key or id, and no
+     more than three beads;
   4. for a bug, the code it quotes was on the default branch when it was
      opened and none of it is now (a local `git grep`);
   5. a closed bead has the same title, or the same Linear key outside its
-     own family.
+     own family (parent, siblings, children, the same root id).
 
   Strong evidence closes the bead with a reason citing it, but only at
-  autonomy level 3 or above: (1); (2) unless the title is rollout-shaped or the notes
-  after the last PR say work remains; and (4) once a run it links has failed
-  and a later run of that workflow passed. A `rolling-out`, `needs_me` or epic
-  bead, or one with open children, is never closed. Everything else becomes a
-  `likely_stale` inbox item for the coordinator; a closed one, `auto_closed`.
+  autonomy level 3 or above: (2) when one of the merged PRs is its own
+  (noted `PR: <url>`, or from its branch); and (4) once a run it links has
+  failed and a later run of that workflow passed. Neither closes a bead whose
+  title is rollout-shaped or whose notes after the last PR say work remains
+  ("remaining", "follow-up", "OPEN", "keep open", ...). A `rolling-out`,
+  `needs_me`, `blocked` or epic bead, or one with open children, is never
+  closed. Everything else becomes a `likely_stale` inbox item for the
+  coordinator; a closed one, `auto_closed`.
+
+  A rejected verdict stays rejected: a note saying "likely_stale rejected" or
+  "keep open", the `stale-rejected` label, or verify's own close note on a
+  reopened bead sets aside the evidence present then, and only evidence that
+  appears later counts.
 
   Passes are incremental. Each starts with one Linear query, one GitHub
   GraphQL query (the linked PRs' state and head, and per repo whose default

@@ -65,6 +65,7 @@ type prRef struct {
 	State    string    `json:"state"`
 	MergedAt time.Time `json:"mergedAt"`
 	Head     string    `json:"headRefOid"`
+	Branch   string    `json:"headRefName"`
 	// Body is fetched only by the per-repo search, to match beads locally.
 	Body string `json:"body,omitempty"`
 }
@@ -168,6 +169,8 @@ func closable(b Bead, openChildren int) string {
 		return "rolling out"
 	case b.Status == StatusNeedsMe:
 		return "waiting on TJ"
+	case b.Status == StatusBlocked:
+		return "blocked"
 	case b.Type == "epic":
 		return "an epic"
 	}
@@ -188,6 +191,8 @@ func decide(b Bead, ev []evidence, openChildren int, autoClose bool) verdict {
 	switch why := closable(b, openChildren); {
 	case why != "":
 		v.Why = why
+	case workRemains(b) != "":
+		v.Why = workRemains(b)
 	case !autoClose:
 		v.Why = "its autonomy level is below 3"
 	default:
@@ -215,20 +220,23 @@ func (v verdict) line() string {
 	return s
 }
 
-// linearEvidence is (a): the bead's Linear issue is finished.
+// linearEvidence is (a): the bead's Linear issue is finished. It is never
+// strong: an issue often spans more than the bead's own part of the work.
 func linearEvidence(key string, issues map[string]linearIssue) []evidence {
 	is, ok := issues[key]
 	if !ok || (is.State != "completed" && is.State != "canceled") {
 		return nil
 	}
-	return []evidence{{Class: evLinear, Strong: true, Detail: fmt.Sprintf("%s is %s %s", key, is.Name, is.URL)}}
+	return []evidence{{Class: evLinear, Detail: fmt.Sprintf("%s is %s %s", key, is.Name, is.URL)}}
 }
 
 // prEvidence is (b): the bead links PRs, at least one merged and none still
-// open. It is strong only when every linked PR merged and the bead doesn't say
-// work remains after the merge; a closed, unmerged one leaves it a flag.
-func prEvidence(b Bead, urls []string, prs map[string]prRef) []evidence {
+// open. It is strong only when every linked PR merged, one of them is the
+// bead's own, and the bead doesn't say work remains after the merge; a closed,
+// unmerged one leaves it a flag.
+func prEvidence(b Bead, urls []string, prs map[string]prRef, branchPrefix string) []evidence {
 	var merged, unmerged []string
+	owned := false
 	for _, u := range urls {
 		pr, ok := prs[u]
 		if !ok {
@@ -239,6 +247,7 @@ func prEvidence(b Bead, urls []string, prs map[string]prRef) []evidence {
 			return nil
 		case "MERGED":
 			merged = append(merged, u)
+			owned = owned || ownsPR(b, pr, branchPrefix)
 		default:
 			unmerged = append(unmerged, u)
 		}
@@ -250,6 +259,9 @@ func prEvidence(b Bead, urls []string, prs map[string]prRef) []evidence {
 	if len(unmerged) > 0 {
 		e.Strong = false
 		e.Detail += " (but closed unmerged: " + strings.Join(unmerged, ", ") + ")"
+	} else if !owned {
+		e.Strong = false
+		e.Detail += " (but none is its own PR)"
 	} else if why := workRemains(b); why != "" {
 		e.Strong = false
 		e.Detail += " (but " + why + ")"
@@ -257,11 +269,32 @@ func prEvidence(b Bead, urls []string, prs map[string]prRef) []evidence {
 	return []evidence{e}
 }
 
+// notedOwnPR is a PR a bead's notes record as its own: the "PR: <url>" every
+// worker notes when it opens one.
+var notedOwnPR = regexp.MustCompile(`(?i)\bPR:\s*(https://github\.com/[\w.-]+/[\w.-]+/pull/\d+)`)
+
+// ownsPR reports whether pr is the bead's own work: noted as its PR, or cut
+// from its branch. A PR it only mentions may be anyone's.
+func ownsPR(b Bead, pr prRef, branchPrefix string) bool {
+	if pr.Branch != "" && onBeadBranch(branchPrefix, pr.Branch, b) {
+		return true
+	}
+	for _, m := range notedOwnPR.FindAllStringSubmatch(b.Notes, -1) {
+		if m[1] == pr.URL {
+			return true
+		}
+	}
+	return false
+}
+
 var (
 	// Work that a merge starts rather than finishes.
 	rolloutTitle = regexp.MustCompile(`(?i)\b(roll ?out|deploy|provision|migrat|backfill|canary|enable)`)
 	// Notes that say something is still to do.
-	openWork = regexp.MustCompile(`(?i)\b(remaining|still (on|to|need|open|fail|broken|pending)|not (yet|done)|todo|follow[- ]up|next step|pending|waiting|deferred|blocked)\b`)
+	openWork = regexp.MustCompile(`(?i:\b(remaining|still (on|to|need|open|fail|broken|pending)|not (yet|done)|todo|follow[- ]up|next step|pending|waiting|deferred|blocked|keep open)\b)|\bOPEN\b`)
+	// verify's own close notes, which quote the PRs it saw and so would hide
+	// the notes before them once the bead is reopened.
+	verifyNote = regexp.MustCompile(`(?m)^.*AUTO: \[verify\b.*$`)
 )
 
 // workRemains is why a bead's merged PRs may not finish it: rollout-shaped
@@ -270,7 +303,7 @@ func workRemains(b Bead) string {
 	if m := rolloutTitle.FindString(b.Title); m != "" {
 		return fmt.Sprintf("its title says %q", strings.ToLower(m))
 	}
-	after := b.Notes
+	after := verifyNote.ReplaceAllString(b.Notes, "")
 	if locs := prURL.FindAllStringIndex(after, -1); len(locs) > 0 {
 		after = after[locs[len(locs)-1][1]:]
 	}
@@ -280,9 +313,19 @@ func workRemains(b Bead) string {
 	return ""
 }
 
+// maxSharers is how many beads a merged PR may mention and still be evidence
+// about one of them; past it, it is an umbrella PR for a whole family.
+const maxSharers = 3
+
 // refEvidence is (c): merged PRs since the bead was created that mention its
-// Linear key or id, other than the ones it links.
-func refEvidence(urls []string) []evidence {
+// Linear key or id, other than the ones it links, and few other beads.
+func refEvidence(refs []string, sharers map[string]int) []evidence {
+	var urls []string
+	for _, u := range refs {
+		if sharers[u] <= maxSharers {
+			urls = append(urls, u)
+		}
+	}
 	if len(urls) == 0 {
 		return nil
 	}
@@ -352,14 +395,14 @@ func normTitle(t string) string {
 
 // duplicateEvidence is (e): a closed bead with the same title or Linear key.
 // Beads in one family often share a Linear issue, so a key alone doesn't make
-// a sibling, parent or child a duplicate.
+// a sibling, parent, child or any bead under the same root id a duplicate.
 func duplicateEvidence(b Bead, key string, closed []Bead, prefixes []string) []evidence {
 	title := normTitle(b.Title)
 	for _, c := range closed {
 		if c.ID == b.ID {
 			continue
 		}
-		family := (b.Parent != "" && c.Parent == b.Parent) || c.Parent == b.ID || b.Parent == c.ID
+		family := (b.Parent != "" && c.Parent == b.Parent) || c.Parent == b.ID || b.Parent == c.ID || idRoot(c.ID) == idRoot(b.ID)
 		same := title != "" && normTitle(c.Title) == title
 		if !same && !family && key != "" && linearKey(c, prefixes) == key {
 			same = true
@@ -369,6 +412,12 @@ func duplicateEvidence(b Bead, key string, closed []Bead, prefixes []string) []e
 		}
 	}
 	return nil
+}
+
+// idRoot is the top of a bead's id hierarchy: backend-x for backend-x.20.1.
+func idRoot(id string) string {
+	root, _, _ := strings.Cut(id, ".")
+	return root
 }
 
 // verifySearch finds merged PRs in the bead's repo, since it was created, that
@@ -433,7 +482,7 @@ func (g GH) VerifyQuery(urls []string, searches map[string]string) (map[string]p
 	return parseVerify(out, alias)
 }
 
-const prRefFields = "url number title state mergedAt headRefOid"
+const prRefFields = "url number title state mergedAt headRefOid headRefName"
 
 func verifyGraphQL(urls []string, searches map[string]string) (string, map[string]string) {
 	var q strings.Builder
@@ -618,6 +667,10 @@ type VerifyMark struct {
 	// last one written to the inbox.
 	Line  string `json:"line,omitempty"`
 	Acted string `json:"acted,omitempty"`
+	// Rejected is the evidence present when the bead's verdict was turned
+	// down, RejectedN the rejections seen; only evidence since then counts.
+	Rejected  []string `json:"rejected,omitempty"`
+	RejectedN int      `json:"rejected_n,omitempty"`
 }
 
 // VerifyRepo is where a repo's default branch was at the last pass, and when
@@ -876,11 +929,31 @@ func verifyPass(cfg Config, env verifyEnv, st *TickerState, ids []string, act bo
 		}
 	}
 
+	// How many beads each merged PR mentions, this pass's finds included.
+	sharers := map[string]int{}
+	seen := map[string]bool{}
+	count := func(id, u string) {
+		if !seen[id+" "+u] {
+			seen[id+" "+u] = true
+			sharers[u]++
+		}
+	}
+	for id, m := range marks {
+		for _, u := range m.Refs {
+			count(id, u)
+		}
+	}
+	for i, w := range work {
+		for _, pr := range append(found[fmt.Sprintf("s%d", i)], w.refs...) {
+			count(w.b.ID, pr.URL)
+		}
+	}
+
 	var errs []error
 	for i, w := range work {
 		m := w.m
 		if w.full {
-			m = VerifyMark{Desc: w.b.Description, Line: w.m.Line, Acted: w.m.Acted}
+			m = VerifyMark{Desc: w.b.Description, Line: w.m.Line, Acted: w.m.Acted, Rejected: w.m.Rejected, RejectedN: w.m.RejectedN}
 		}
 		if m.Evidence == nil {
 			m.Evidence = map[string]evidence{}
@@ -893,7 +966,7 @@ func verifyPass(cfg Config, env verifyEnv, st *TickerState, ids []string, act bo
 			}
 		}
 		set(evLinear, linearEvidence(w.key, issues))
-		set(evPR, prEvidence(w.b, w.urls, prs))
+		set(evPR, prEvidence(w.b, w.urls, prs, cfg.BranchPrefix))
 		refs := w.refs
 		if w.full {
 			refs = append(found[fmt.Sprintf("s%d", i)], refs...)
@@ -903,7 +976,7 @@ func verifyPass(cfg Config, env verifyEnv, st *TickerState, ids []string, act bo
 				m.Refs = append(m.Refs, pr.URL)
 			}
 		}
-		set(evRefs, refEvidence(m.Refs))
+		set(evRefs, refEvidence(m.Refs, sharers))
 		if w.b.Type == "bug" && (w.full || w.code || w.run) {
 			gone, err := updateGone(env, &m, w, mains[w.repo])
 			if err != nil {
@@ -919,7 +992,19 @@ func verifyPass(cfg Config, env verifyEnv, st *TickerState, ids []string, act bo
 			m.FullAt = now
 		}
 		lvl, _ := cfg.beadLevel(w.b, autonomyStopped())
-		v := decide(w.b, orderedEvidence(m.Evidence), children[w.b.ID], lvl >= classHousekeeping)
+		ev := orderedEvidence(m.Evidence)
+		// shortcut: a rejection is dated by the pass that first sees it, so
+		// evidence that arrived between the note and that pass counts as seen.
+		if n := rejections(w.b); n > m.RejectedN {
+			m.RejectedN = n
+			for _, e := range ev {
+				if !slices.Contains(m.Rejected, e.key()) {
+					m.Rejected = append(m.Rejected, e.key())
+				}
+			}
+		}
+		ev = slices.DeleteFunc(ev, func(e evidence) bool { return slices.Contains(m.Rejected, e.key()) })
+		v := decide(w.b, ev, children[w.b.ID], lvl >= classHousekeeping)
 		v.Level = lvl
 		if !act || v.line() != m.Line {
 			lines = append(lines, v.line())
@@ -1008,6 +1093,30 @@ func stillClosable(env verifyEnv, b Bead) string {
 		return "now " + why
 	}
 	return ""
+}
+
+// rejectedNote is a note turning a verdict down: the coordinator's or TJ's, or
+// verify's own close note on a bead that was reopened since.
+var rejectedNote = regexp.MustCompile(`(?i)likely[_ -]stale( flag)? rejected|\bkeep open\b|AUTO: \[verify\b[^\]]*\] closed as already done`)
+
+// LabelStaleRejected marks a bead whose likely_stale verdict was turned down.
+const LabelStaleRejected = "stale-rejected"
+
+// rejections counts the times a bead's verdict was turned down.
+func rejections(b Bead) int {
+	n := len(rejectedNote.FindAllStringIndex(b.Notes, -1))
+	if b.HasLabel(LabelStaleRejected) {
+		n++
+	}
+	return n
+}
+
+// key identifies evidence across passes, without the parts that change while
+// it says the same thing: why it was weakened, the latest passing run.
+func (e evidence) key() string {
+	d, _, _ := strings.Cut(e.Detail, " (but ")
+	d, _, _ = strings.Cut(d, ", and ")
+	return e.Class + ": " + d
 }
 
 var evidenceOrder = []string{evLinear, evPR, evRefs, evGone, evDuplicate}
