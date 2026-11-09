@@ -166,3 +166,19 @@ func TestJournalAuto(t *testing.T) {
 		t.Errorf("repeated step: level %d, want %d", lvl, breakerCap)
 	}
 }
+
+func TestEnforceDispatchBudget(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	cfg := defaultConfig()
+	cfg.Autonomy.Budget = BudgetConfig{Dispatches: 1}
+	b := Bead{ID: "b-1", Status: StatusOpen}
+	if _, err := cfg.enforce(b, "dispatch", "coordinator"); err != nil {
+		t.Fatalf("first dispatch: %v", err)
+	}
+	if _, err := cfg.enforce(b, "dispatch", "coordinator"); !errors.Is(err, errNotAutonomous) || !strings.Contains(err.Error(), "budget") {
+		t.Errorf("second dispatch: %v, want a budget failure", err)
+	}
+	if _, err := cfg.enforce(b, "dispatch", "TJ"); err != nil {
+		t.Errorf("TJ's dispatch: %v", err)
+	}
+}

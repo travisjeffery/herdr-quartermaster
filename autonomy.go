@@ -324,7 +324,21 @@ func (c Config) enforce(b Bead, action, by string) (string, error) {
 		return "", err
 	}
 	lvl, why := c.beadLevel(b, autonomyStopped())
-	return allow(b.ID, by, action, class, lvl, why)
+	prefix, err := allow(b.ID, by, action, class, lvl, why)
+	if err != nil {
+		return "", err
+	}
+	// Steps taken for TJ count against the budget and are journaled like a
+	// passing check.
+	now := time.Now()
+	recs, err := readJournal(now.Add(-budgetWindow))
+	if err != nil {
+		return "", err
+	}
+	if spent := budgetSpent(c.Autonomy.Budget, recs, b.ID, class, action); spent != "" {
+		return "", fmt.Errorf("%w: %s; ask TJ, and on their go rerun with --by TJ", errNotAutonomous, spent)
+	}
+	return prefix, appendJournal(journalRecord{At: now, Kind: journalCheck, Bead: b.ID, Class: class, Action: action, Pass: true, Text: "by " + by})
 }
 
 // allow says whether by may take what, of class, on bead id at level lvl
