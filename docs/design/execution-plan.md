@@ -1,9 +1,9 @@
 # Execution plans: a checked, durable executor for the autonomy dial
 
-Status: **proposed** (2026-11-08). Nothing here is implemented. It designs
-the "later, enforced" phase of [autonomy-dial.md](autonomy-dial.md) (the
-credential-holding executor). The decisions for TJ are at the end, each with
-a recommendation (R).
+Status: **accepted** (2026-11-08), not yet implemented. It designs the
+"later, enforced" phase of [autonomy-dial.md](autonomy-dial.md) (the
+credential-holding executor). TJ chose the recommendation (R) for every
+decision; see "Decisions" at the end.
 
 ## Summary
 
@@ -307,6 +307,9 @@ mechanisms and `mvdan.cc/sh`.
 
 ## Decisions for TJ
 
+The options as they were put to TJ; (R) is the recommendation. The outcome
+is in "Decisions" at the end.
+
 ### E1. How wide the IR is
 
 - **(R) a.** Typed operations for credentialed effects only. The agent's
@@ -372,3 +375,24 @@ mechanisms and `mvdan.cc/sh`.
 - b. Merges only, the smallest useful slice, with applies in P2.
 - c. Include provisions and messages in v1, which brings the MCP server
   forward.
+
+## Decisions
+
+2026-11-08, TJ: **all R** on E1–E8.
+
+- **E1** typed operations for credentialed effects only; anything that
+  can't be lowered is opaque, class 9. No general bash or TypeScript
+  interpreter.
+- **E2** lowering happens at argv, in `PATH` shims; the hook's bash parse
+  may only refuse.
+- **E3** a `quartermaster executor` daemon with per-bead sockets; the same
+  Unix user in v1, its own user (or outside the worker containers) from P2.
+- **E4** durability is built: an event log per plan, provider CAS plus
+  probes, at-least-once delivery, `needs_me` when a step can't be retried.
+- **E5** policy stays in the Go class tables and `gate.go`'s classifier.
+- **E6** approval binds to the plan digest and expires after 1 hour; the
+  level, budget and preconditions are rechecked before every step.
+- **E7** Pulumi applies use `--save-plan`/`--plan`, with a re-preview
+  fallback noted in the AUTO note.
+- **E8** v1 is merges and IaC applies; deploy-service provisions, messages
+  and other connectors come in P3; the browser stays advisory.
