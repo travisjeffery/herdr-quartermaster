@@ -53,6 +53,8 @@ type AutonomyConfig struct {
 	// MergeClass raises merging in a repo, by directory name, whose main
 	// deploys on merge.
 	MergeClass map[string]int `toml:"merge_class"`
+	// Budget caps the steps a bead takes without TJ per rolling hour.
+	Budget BudgetConfig `toml:"budget"`
 
 	// The keys from before the dial, folded in by migrate.
 	Enabled *bool `toml:"enabled"`
@@ -107,6 +109,8 @@ type autonomyState struct {
 	Level *int `json:"level,omitempty"`
 	// Leases are by bead; "" is the global level's.
 	Leases map[string]autonomyLease `json:"leases,omitempty"`
+	// Breakers are the beads the circuit breaker capped, until TJ sets a level.
+	Breakers map[string]autonomyBreaker `json:"breakers,omitempty"`
 }
 
 type autonomyLease struct {
@@ -190,13 +194,17 @@ func (a AutonomyConfig) global(s autonomyState) int {
 }
 
 // level is b's effective level: its own or the global one, capped by max
-// unless a lease lifts it, and by the stop file. why names the cap that
-// lowered it.
+// unless a lease lifts it, by the stop file and by its circuit breaker. why
+// names the cap that lowered it.
 func (a AutonomyConfig) level(s autonomyState, b Bead, stopped bool, now time.Time) (int, string) {
+	n, why := a.capped(s, "", a.global(s), stopped, now)
 	if own, ok := ownLevel(b); ok {
-		return a.capped(s, b.ID, own, stopped, now)
+		n, why = a.capped(s, b.ID, own, stopped, now)
 	}
-	return a.capped(s, "", a.global(s), stopped, now)
+	if br, ok := s.Breakers[b.ID]; ok && n > breakerCap {
+		return breakerCap, "its circuit breaker (" + br.Reason + ")"
+	}
+	return n, why
 }
 
 // capped is level set under the lease kept at key.
@@ -316,7 +324,21 @@ func (c Config) enforce(b Bead, action, by string) (string, error) {
 		return "", err
 	}
 	lvl, why := c.beadLevel(b, autonomyStopped())
-	return allow(b.ID, by, action, class, lvl, why)
+	prefix, err := allow(b.ID, by, action, class, lvl, why)
+	if err != nil {
+		return "", err
+	}
+	// Steps taken for TJ count against the budget and are journaled like a
+	// passing check.
+	now := time.Now()
+	recs, err := readJournal(now.Add(-budgetWindow))
+	if err != nil {
+		return "", err
+	}
+	if spent := budgetSpent(c.Autonomy.Budget, recs, b.ID, class, action); spent != "" {
+		return "", fmt.Errorf("%w: %s; ask TJ, and on their go rerun with --by TJ", errNotAutonomous, spent)
+	}
+	return prefix, appendJournal(journalRecord{At: now, Kind: journalCheck, Bead: b.ID, Class: class, Action: action, Pass: true, Text: "by " + by})
 }
 
 // allow says whether by may take what, of class, on bead id at level lvl
@@ -451,11 +473,41 @@ func autonomyCmd(cfg Config, env autonomyEnv, pos []string, o autonomyOpts, w io
 			what = fmt.Sprintf("%s (class %d)", o.Action, class)
 		}
 		lvl, why := cfg.beadLevel(b, autonomyStopped())
+		var fail error
 		if class > lvl {
 			if why != "" {
 				why = ", capped by " + why
 			}
-			return fmt.Errorf("%w: %s is above %s's level %d%s; stop for TJ as usual", errNotAutonomous, what, b.ID, lvl, why)
+			fail = fmt.Errorf("%w: %s is above %s's level %d%s; stop for TJ as usual", errNotAutonomous, what, b.ID, lvl, why)
+		}
+		// A bare check is a probe, not a step: it is neither journaled nor
+		// counted against the bead.
+		if o.Class < 0 && o.Action == "" {
+			if fail != nil {
+				return fail
+			}
+			fmt.Fprintf(w, "%s may take %s without TJ (level %d; advisory)\n", b.ID, what, lvl)
+			return nil
+		}
+		recs, err := readJournal(now.Add(-budgetWindow))
+		if err != nil {
+			return err
+		}
+		if spent := budgetSpent(cfg.Autonomy.Budget, recs, b.ID, class, o.Action); fail == nil && spent != "" {
+			fail = fmt.Errorf("%w: %s; stop for TJ as usual", errNotAutonomous, spent)
+		}
+		rec := journalRecord{At: now, Kind: journalCheck, Bead: b.ID, Class: class, Action: o.Action, Pass: fail == nil}
+		if fail != nil {
+			rec.Text = fail.Error()
+		}
+		if err := appendJournal(rec); err != nil {
+			return errors.Join(fail, err)
+		}
+		if fail != nil {
+			if failedRun(append(recs, rec), b.ID) && lvl > breakerCap {
+				fail = errors.Join(fail, tripBreaker(b.ID, fmt.Sprintf("%d failed checks in a row", breakerRun), now))
+			}
+			return fail
 		}
 		fmt.Fprintf(w, "%s may take %s without TJ (level %d; advisory)\n", b.ID, what, lvl)
 	case "grant", "revoke":
@@ -676,7 +728,7 @@ func setGlobalLevel(cfg Config, n int, d time.Duration, now time.Time) (string, 
 	if why != "" {
 		out += " (capped by " + why + ")"
 	}
-	return out + "; " + advisory, nil
+	return out + "; " + advisory, appendJournal(journalRecord{At: now, Kind: journalLevel, Class: -1, Text: fmt.Sprintf("global level set to %s: %s", levelWord(n), out)})
 }
 
 // autonomyEnv is what setLevel reads and changes, so it is testable.
@@ -751,6 +803,10 @@ func setLevel(cfg Config, env autonomyEnv, id string, n int, d time.Duration, by
 		prev = &p
 	}
 	s.lease(id, n, d, prev, now)
+	// Only TJ lifts a breaker; a lease expiring doesn't.
+	if by == "TJ" {
+		delete(s.Breakers, id)
+	}
 	// The lease goes first: a level label without its lease is capped at max.
 	if err := saveAutonomy(s); err != nil {
 		return "", err
@@ -776,6 +832,9 @@ func setLevel(cfg Config, env autonomyEnv, id string, n int, d time.Duration, by
 		text += " until " + now.Add(d).UTC().Format(time.RFC3339)
 	}
 	if err := env.note(id, text); err != nil {
+		return "", err
+	}
+	if err := appendJournal(journalRecord{At: now, Kind: journalLevel, Bead: id, Class: -1, Text: text}); err != nil {
 		return "", err
 	}
 	lvl, why := cfg.Autonomy.level(s, b, autonomyStopped(), now)
@@ -825,7 +884,11 @@ func expireLeases(cfg Config, env autonomyEnv, now time.Time) ([]Event, error) {
 				return events, err
 			}
 		}
-		events = append(events, Event{Bead: key, Kind: EventLeaseExpired, Summary: fmt.Sprintf("autonomy lease at %d expired: %s", l.Level, msg), At: now})
+		e := Event{Bead: key, Kind: EventLeaseExpired, Summary: fmt.Sprintf("autonomy lease at %d expired: %s", l.Level, msg), At: now}
+		if err := appendJournal(journalRecord{At: now, Kind: journalLease, Bead: key, Class: -1, Text: e.Summary}); err != nil {
+			return events, err
+		}
+		events = append(events, e)
 	}
 	return events, nil
 }

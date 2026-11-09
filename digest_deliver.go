@@ -80,7 +80,9 @@ func runDigest(cfg Config, deliver string, always bool, stdout io.Writer) error 
 	if targets["stdout"] {
 		fmt.Fprint(stdout, text)
 	}
-	notify := always || d.worthNotifying()
+	// From 7 up the digest is all TJ hears, so it arrives even when empty:
+	// quiet must look different from broken.
+	notify := always || d.worthNotifying() || digestOnly(cfg)
 	var sent []string
 	var errs []string
 	if notify && targets["desktop"] {
@@ -115,6 +117,19 @@ func runDigest(cfg Config, deliver string, always bool, stdout io.Writer) error 
 	}
 	return nil
 }
+
+// digestOnly says whether the global dial is in its digest-only reporting
+// band (docs/design/autonomy-dial.md, "What TJ hears").
+func digestOnly(cfg Config) bool {
+	s, err := loadAutonomy()
+	if err != nil {
+		return true // can't tell: deliver rather than go quiet
+	}
+	g, _ := cfg.Autonomy.capped(s, "", cfg.Autonomy.global(s), autonomyStopped(), time.Now())
+	return g >= digestOnlyLevel
+}
+
+const digestOnlyLevel = 7
 
 func notifyDesktop(title, body string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

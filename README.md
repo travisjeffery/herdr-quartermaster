@@ -615,6 +615,11 @@ prod = []                 # globs naming production targets; an apply elsewhere 
                           # no target or no patterns) 7
 widespread = 5            # deletes past this are class 9
 merge_class = {}          # e.g. { infra = 7 }: a repo whose main deploys on merge
+
+[autonomy.budget]         # per rolling hour, enforced by `autonomy check`; 0 is no limit
+steps = 30                # AUTO steps of any class, per bead
+applies = 3               # class 6+ steps, per bead
+dispatches = 5            # coordinator dispatches, all beads
 # Read for one release: default = true is level = 7; enabled = false caps max at 2;
 # decide, install, merge or apply = false cap max at 1, 2, 3 or 5.
 ```
@@ -865,7 +870,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster unconfigure` | Stop the ticker and remove the agent view and sidebar tokens. |
 | `quartermaster autonomy level` | The dial: global level, max, leases, and each active bead's effective level. Advisory: workers hold their own credentials. |
 | `quartermaster autonomy level N\|- [<bead>...] [--for D]` | Set the global level, or beads' own (label `autonomy:N`) and tell their workers; `-` goes back to the global level. 8 is a lease (`--for`, default 4h); 9 only on beads, with `--for`. The ticker puts an expired lease back. |
-| `quartermaster autonomy check <bead> [--class N \| --action A [--target T]]` | Exit 0 only if the bead may take a step of that class without you right now; a worker runs it before each one. |
+| `quartermaster autonomy check <bead> [--class N \| --action A [--target T]]` | Exit 0 only if the bead may take a step of that class without you right now and its `[autonomy.budget]` isn't spent; a worker runs it before each one. Three failed checks in a row, or the same `AUTO:` step three times running, trip the circuit breaker: the bead is capped at 2 with an inbox item until you set its level. Checks, `AUTO:` steps, prompt answers, level changes, lease expiries and breaker trips go to `journal.jsonl` in the state dir. |
 | `quartermaster autonomy on\|off` | Off caps every bead at level 2 until on. |
 | `quartermaster autonomy grant\|revoke <bead>` | Level 7 or 2 on a bead (the old `autonomous`/`supervised` labels, still read as those levels). |
 | `quartermaster prompt <bead>` | The approval prompt the bead's worker is showing: its text, options, auto-deny countdown, and a hash that names it. Exits 1 when none is showing. |

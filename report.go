@@ -245,15 +245,18 @@ func renderReport(r Report, now time.Time) string {
 		fmt.Fprintf(&s, "- **%s** (`%s`): %s\n", oneLine(b.Title), b.ID, lastNote(b.Notes, 300))
 	}
 
-	// Only autonomous beads have these, so the section shows only when there
-	// are some.
+	// Only beads that took steps without TJ have these, so the section shows
+	// only when there are some. Steps are grouped by class, highest first.
 	if len(r.Auto) > 0 {
-		fmt.Fprintf(&s, "\n## Done without you (%d)\n\n", len(r.Auto))
+		var steps []autoStep
 		for _, a := range r.Auto {
-			fmt.Fprintf(&s, "- **%s** (`%s`)\n", oneLine(a.Bead.Title), a.Bead.ID)
 			for _, n := range a.Notes {
-				fmt.Fprintf(&s, "  - %s\n", oneLine(n))
+				steps = append(steps, autoStep{Bead: a.Bead.ID, Note: n})
 			}
+		}
+		fmt.Fprintf(&s, "\n## Done without you (%d)\n\n", len(steps))
+		for _, l := range autoLines(steps) {
+			fmt.Fprintf(&s, "- %s\n", l)
 		}
 	}
 	return s.String()

@@ -199,7 +199,7 @@ func defaultConfig() Config {
 		StaleDays:        3,
 		VerifyMax:        20,
 		GHMinRemaining:   1000,
-		Autonomy:         AutonomyConfig{Level: 4, Max: maxStanding, Widespread: 5},
+		Autonomy:         AutonomyConfig{Level: 4, Max: maxStanding, Widespread: 5, Budget: BudgetConfig{Steps: 30, Applies: 3, Dispatches: 5}},
 	}
 }
 

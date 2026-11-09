@@ -204,6 +204,9 @@ type Snapshot struct {
 	// Relaunch marks a worker asked to exit so it can be resumed in the
 	// launch mode its level calls for.
 	Relaunch bool `json:"relaunch,omitempty"`
+	// Auto is how many AUTO: notes the bead had, so each new one is journaled
+	// once.
+	Auto int `json:"auto,omitempty"`
 }
 
 type EventKind string
@@ -223,6 +226,7 @@ const (
 	EventAutoClosed   EventKind = "auto_closed"
 	EventAutoMergeOff EventKind = "auto_merge_off"
 	EventLeaseExpired EventKind = "lease_expired"
+	EventBreaker      EventKind = "breaker_tripped"
 )
 
 type Event struct {

@@ -108,7 +108,7 @@ func TestAutoChanges(t *testing.T) {
 		t.Errorf("first digest: %q", got)
 	}
 	prev := digestState{At: time.Now(), Auto: map[string]int{"a-1": 1}}
-	want := []string{"a-1 AUTO: two", "a-1 AUTO: three"}
+	want := []autoStep{{"a-1", "AUTO: two"}, {"a-1", "AUTO: three"}}
 	if got := autoChanges(prev, []Bead{b}); !slices.Equal(got, want) {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -129,7 +129,7 @@ func TestReportAuto(t *testing.T) {
 		t.Fatalf("auto: %+v", r.Auto)
 	}
 	out := renderReport(r, since.Add(2*time.Hour))
-	if !strings.Contains(out, "## Done without you (1)") || !strings.Contains(out, "  - AUTO: applied stack x — 2 update, gate ok") {
+	if !strings.Contains(out, "## Done without you (1)") || !strings.Contains(out, "- a-1 C?: AUTO: applied stack x — 2 update, gate ok") {
 		t.Errorf("report:\n%s", out)
 	}
 	if out := renderReport(buildReport(since, nil, active[2:], nil, TickerState{}, "tj/"), since); strings.Contains(out, "Done without you") {
