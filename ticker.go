@@ -408,7 +408,8 @@ func (t Ticker) once(st *TickerState) error {
 			t.log.Printf("inbox: %v", err)
 		}
 	}
-	for _, name := range deliverOutbox(t.cfg, t.herdr, agents, needsMe) {
+	relaunch := t.launchMismatch(threads)
+	for _, name := range deliverOutbox(t.cfg, t.herdr, agents, needsMe, relaunch) {
 		t.log.Printf("delivered queued brief to %s", name)
 	}
 	var rows []sidebarRow
@@ -431,6 +432,7 @@ func (t Ticker) once(st *TickerState) error {
 		}
 		snap := snapshot(th, prev, now)
 		snap.Pending = append(snap.Pending, out.Prompts...)
+		t.relaunch(th, &snap, relaunch[agentName(id)], now)
 		for _, e := range out.Events {
 			if err := writeEvent(e); err != nil {
 				t.log.Printf("inbox: %v", err)
@@ -442,7 +444,8 @@ func (t Ticker) once(st *TickerState) error {
 		if th.Agent != nil {
 			// A needs_me thread waits on the user; typing into it would look like
 			// an answer and resume it. Its prompts wait until it is answered.
-			if len(snap.Pending) > 0 && th.Bead.Status != StatusNeedsMe && deliverable(snap, now, t.cfg.idle()) {
+			// A worker due a relaunch gets nothing else first (D8).
+			if len(snap.Pending) > 0 && th.Bead.Status != StatusNeedsMe && !relaunch[agentName(id)] && deliverable(snap, now, t.cfg.idle()) {
 				text := strings.Join(snap.Pending, "\n\n")
 				if err := t.herdr.Prompt(th.Agent.PaneID, text); err != nil {
 					t.log.Printf("prompt %s: %v", id, err)
@@ -476,6 +479,80 @@ func (t Ticker) once(st *TickerState) error {
 	}
 	t.nudgeCoordinator(st, agents, now)
 	return nil
+}
+
+// launchMismatch is the ready workers, by agent name, whose launch mode no
+// longer matches their level: started with their kind's bypass args below 9,
+// or without them at 9 (docs/design/autonomy-dial.md, D8). The ticker lists
+// only this machine's agents, and remote workers never start with bypass.
+func (t Ticker) launchMismatch(threads []Thread) map[string]bool {
+	out := map[string]bool{}
+	for _, th := range threads {
+		a := th.Agent
+		// A needs_me worker waits on TJ, and typing /exit into it would read as
+		// an answer; it relaunches once answered and idle again.
+		if a == nil || !agentReady(a) || th.Bead.Status == StatusNeedsMe {
+			continue
+		}
+		args := t.cfg.bypassArgs(a.Kind)
+		if len(args) == 0 {
+			continue
+		}
+		argv, err := t.herdr.ForegroundArgv(a.PaneID)
+		if err != nil {
+			t.log.Printf("launch mode of %s: %v", th.Bead.ID, err)
+			continue
+		}
+		if launchedWith(argv, args) != t.cfg.launchBypass(th.Bead, localHost) {
+			out[a.Name] = true
+		}
+	}
+	return out
+}
+
+// launchedWith reports whether any of a pane's foreground processes was
+// started with args, in order.
+func launchedWith(argv [][]string, args []string) bool {
+	for _, a := range argv {
+		for i := 0; len(args) > 0 && i+len(args) <= len(a); i++ {
+			if slices.Equal(a[i:i+len(args)], args) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// relaunch restarts a worker whose launch mode no longer matches its level,
+// in two passes: once it has been idle a while it is asked to exit, and on a
+// later pass, its agent gone, it is resumed with the right args, keeping the
+// conversation.
+func (t Ticker) relaunch(th Thread, snap *Snapshot, due bool, now time.Time) {
+	id := th.Bead.ID
+	switch {
+	case th.Agent == nil && snap.Relaunch:
+		snap.Relaunch = false
+		mode := "without"
+		if t.cfg.launchBypass(th.Bead, localHost) {
+			mode = "with"
+		}
+		if _, err := resume(t.cfg, t.herdr, []string{id}, ""); err != nil {
+			t.log.Printf("relaunch %s: %v", id, err)
+			_ = t.beads.Note(id, "quartermaster could not relaunch the worker "+mode+" bypass args after it exited: "+err.Error()+"; `quartermaster resume "+id+"`")
+			return
+		}
+		t.log.Printf("relaunched %s %s bypass args", id, mode)
+		_ = t.beads.Note(id, "quartermaster relaunched the worker "+mode+" its kind's bypass args, to match its autonomy level")
+	case due && deliverable(*snap, now, t.cfg.idle()):
+		if err := t.herdr.Prompt(th.Agent.PaneID, "/exit"); err != nil {
+			t.log.Printf("relaunch %s: exit: %v", id, err)
+			return
+		}
+		t.log.Printf("relaunch %s: asked it to exit", id)
+		snap.Relaunch = true
+	case th.Agent != nil && !due && agentReady(th.Agent):
+		snap.Relaunch = false
+	}
 }
 
 // readPrompt is the approval prompt a pane shows, nil when there is none or

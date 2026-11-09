@@ -172,6 +172,7 @@ case "$1 $2" in
 "agent list") if [ -n "$remote" ]; then echo "{\"result\":{\"agents\":${FAKE_REMOTE_AGENTS:-[]}}}"; else echo "{\"result\":{\"agents\":${FAKE_LOCAL_AGENTS:-[]}}}"; fi ;;
 "worktree create") echo '{"result":{"workspace":{"workspace_id":"w9"},"worktree":{"path":"/home/u/worktrees/x"},"root_pane":{"pane_id":"w9:p1"}}}' ;;
 "worktree list") echo "{\"result\":{\"worktrees\":${FAKE_WORKTREES:-[]}}}" ;;
+"pane process-info") echo "{\"result\":{\"process_info\":{\"foreground_processes\":${FAKE_PROCS:-[]}}}}" ;;
 *) echo '{"result":{}}' ;;
 esac
 `,
@@ -299,7 +300,7 @@ func TestDeliverOutboxOnRemoteHost(t *testing.T) {
 	if err := queueBrief("b-2", "local brief"); err != nil {
 		t.Fatal(err)
 	}
-	sent := deliverOutbox(hostsConfig(), newHerdr(), map[string]Agent{"b-2": {Name: "b-2", PaneID: "w1:p1", Status: "done"}}, nil)
+	sent := deliverOutbox(hostsConfig(), newHerdr(), map[string]Agent{"b-2": {Name: "b-2", PaneID: "w1:p1", Status: "done"}}, nil, nil)
 	if !slices.Equal(sent, []string{"b-2", "b-1 on server"}) {
 		t.Fatalf("sent %q", sent)
 	}

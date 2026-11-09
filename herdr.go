@@ -284,6 +284,30 @@ func (h Herdr) AgentStart(name, kind, pane string, agentArgs ...string) error {
 	return err
 }
 
+// ForegroundArgv is the argv of each process in a pane's foreground group:
+// for an idle agent, the agent itself.
+func (h Herdr) ForegroundArgv(pane string) ([][]string, error) {
+	res, err := h.call(callTimeout, "pane", "process-info", "--pane", pane)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Info struct {
+			Procs []struct {
+				Argv []string `json:"argv"`
+			} `json:"foreground_processes"`
+		} `json:"process_info"`
+	}
+	if err := json.Unmarshal(res, &out); err != nil {
+		return nil, err
+	}
+	var argv [][]string
+	for _, p := range out.Info.Procs {
+		argv = append(argv, p.Argv)
+	}
+	return argv, nil
+}
+
 type Pane struct {
 	ID    string `json:"pane_id"`
 	Agent string `json:"agent"`

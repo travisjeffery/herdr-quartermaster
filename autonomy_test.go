@@ -624,14 +624,14 @@ func TestDeliverQueuedNotices(t *testing.T) {
 	needsMe := map[string]bool{"b-2": true}
 	// b-1 gets its brief first and the grant on a later pass; b-2's lower
 	// level waits while it is at needs_me.
-	if sent := deliverOutbox(hostsConfig(), newHerdr(), agents, needsMe); !slices.Equal(sent, []string{"b-1"}) {
+	if sent := deliverOutbox(hostsConfig(), newHerdr(), agents, needsMe, nil); !slices.Equal(sent, []string{"b-1"}) {
 		t.Fatalf("first pass sent %q", sent)
 	}
-	if sent := deliverOutbox(hostsConfig(), newHerdr(), agents, needsMe); !slices.Equal(sent, []string{"b-1"}) {
+	if sent := deliverOutbox(hostsConfig(), newHerdr(), agents, needsMe, nil); !slices.Equal(sent, []string{"b-1"}) {
 		t.Fatalf("second pass sent %q", sent)
 	}
 	needsMe["b-2"] = false
-	if sent := deliverOutbox(hostsConfig(), newHerdr(), agents, needsMe); !slices.Equal(sent, []string{"b-2"}) {
+	if sent := deliverOutbox(hostsConfig(), newHerdr(), agents, needsMe, nil); !slices.Equal(sent, []string{"b-2"}) {
 		t.Fatalf("third pass sent %q", sent)
 	}
 	herdr := logLines(t, dir, "herdr")

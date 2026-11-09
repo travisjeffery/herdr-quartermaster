@@ -198,7 +198,7 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	text := brief(b, branch, opened.Path, linearKey(b, cfg.LinearPrefixes), readInstructions(), auto)
 	_ = hh.Run(opened.PaneID, cfg.agentEnvOn(host, kind))
 	where := opened.PaneID + onHost(host)
-	if err := hh.AgentStart(name, kind, opened.PaneID, cfg.agentArgs(kind)...); err != nil {
+	if err := hh.AgentStart(name, kind, opened.PaneID, cfg.agentArgs(kind, cfg.launchBypass(b, host))...); err != nil {
 		// A new worktree often opens on the agent's folder-trust prompt. The
 		// ticker delivers the brief once someone answers it.
 		if !strings.Contains(err.Error(), "agent_not_ready") {
@@ -349,7 +349,7 @@ func openCoordinator(cfg Config, h Herdr, kind string) (string, error) {
 	_ = tickerStart(cfg)
 	first := "Run `quartermaster context` and give me a short status: what needs me, what's in review, what's ready to start."
 	_ = h.Run(opened.PaneID, cfg.agentEnv(kind))
-	if err := h.AgentStart(cfg.CoordinatorName, kind, opened.PaneID, cfg.agentArgs(kind)...); err != nil {
+	if err := h.AgentStart(cfg.CoordinatorName, kind, opened.PaneID, cfg.agentArgs(kind, false)...); err != nil {
 		if !strings.Contains(err.Error(), "agent_not_ready") {
 			return "", err
 		}
@@ -414,8 +414,8 @@ func moveQueuedBrief(from, to string) {
 // listing, made only while it has something queued. needsMe names the agents
 // whose bead is at needs_me, for heldNotice. It returns who got something,
 // host-qualified when remote.
-func deliverOutbox(cfg Config, h Herdr, agents map[string]Agent, needsMe map[string]bool) []string {
-	sent := deliverQueued(h, localHost, agents, needsMe)
+func deliverOutbox(cfg Config, h Herdr, agents map[string]Agent, needsMe, relaunch map[string]bool) []string {
+	sent := deliverQueued(h, localHost, agents, needsMe, relaunch)
 	entries, _ := os.ReadDir(outboxDir())
 	for _, e := range entries {
 		host := e.Name()
@@ -435,7 +435,7 @@ func deliverOutbox(cfg Config, h Herdr, agents map[string]Agent, needsMe map[str
 		for _, a := range list {
 			byName[a.Name] = a
 		}
-		for _, name := range deliverQueued(hh, host, byName, needsMe) {
+		for _, name := range deliverQueued(hh, host, byName, needsMe, nil) {
 			sent = append(sent, name+onHost(host))
 		}
 	}
@@ -444,8 +444,9 @@ func deliverOutbox(cfg Config, h Herdr, agents map[string]Agent, needsMe map[str
 
 // deliverQueued sends what is queued on host to its ready agents. A brief
 // goes first; an autonomy notice waits for the next pass after one, since
-// the agent is busy with the brief.
-func deliverQueued(h Herdr, host string, agents map[string]Agent, needsMe map[string]bool) []string {
+// the agent is busy with the brief. A worker due a relaunch gets nothing
+// until it has restarted.
+func deliverQueued(h Herdr, host string, agents map[string]Agent, needsMe, relaunch map[string]bool) []string {
 	dir := outboxDirOn(host)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -459,7 +460,7 @@ func deliverQueued(h Herdr, host string, agents map[string]Agent, needsMe map[st
 				continue
 			}
 			a, ok := agents[name]
-			if !ok || !agentReady(&a) {
+			if !ok || !agentReady(&a) || relaunch[name] {
 				continue
 			}
 			path := filepath.Join(dir, e.Name())

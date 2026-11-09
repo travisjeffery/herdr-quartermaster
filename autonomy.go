@@ -615,6 +615,9 @@ type autonomyEnv struct {
 	// agent is the bead's worker on host, if one is running.
 	agent  func(host, name string) (*Agent, error)
 	prompt func(host, pane, text string) error
+	// bypassed reports a worker running with its kind's bypass args; nil
+	// reads as no.
+	bypassed func(host string, a Agent) bool
 }
 
 func liveAutonomyEnv(cfg Config, h Herdr) autonomyEnv {
@@ -625,6 +628,13 @@ func liveAutonomyEnv(cfg Config, h Herdr) autonomyEnv {
 		note:     bd.Note,
 		agent:    agentOn(cfg, h),
 		prompt:   func(host, pane, text string) error { return cfg.herdrOn(h, host).Prompt(pane, text) },
+		bypassed: func(host string, a Agent) bool {
+			if host != localHost {
+				return false
+			}
+			argv, err := cfg.herdrOn(h, host).ForegroundArgv(a.PaneID)
+			return err == nil && launchedWith(argv, cfg.bypassArgs(a.Kind))
+		},
 	}
 }
 
@@ -766,7 +776,10 @@ func tellWorker(env autonomyEnv, b Bead, notice string) (string, error) {
 		return "", fmt.Errorf("find the worker%s: %w", onHost(host), err)
 	}
 	held := heldNotice(notice, b.Status == StatusNeedsMe)
-	if a != nil && agentReady(a) && !held {
+	// A worker in bypass hears of a level change only after the ticker has
+	// relaunched it, if the change calls for that (D8).
+	bypass := a != nil && env.bypassed != nil && env.bypassed(host, *a)
+	if a != nil && agentReady(a) && !held && !bypass {
 		if err := env.prompt(host, a.PaneID, notice); err != nil {
 			return "", fmt.Errorf("tell %s: %w", name, err)
 		}
@@ -784,6 +797,8 @@ func tellWorker(env autonomyEnv, b Bead, notice string) (string, error) {
 		return "no worker running; queued for when one is resumed", nil
 	case held:
 		return name + " waits on you at needs_me; queued until it is answered", nil
+	case bypass:
+		return name + " runs with bypass args; queued for after the ticker relaunches it, if its level calls for that", nil
 	}
 	return name + " is " + a.Status + "; queued until it is idle", nil
 }
