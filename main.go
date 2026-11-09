@@ -21,7 +21,7 @@ qm is a short alias: qm context is quartermaster context.
 Usage:
   quartermaster coordinator [--agent K]                open (or focus) the coordinator agent
   quartermaster dispatch <bead> [--agent K] [--focus]  start a worker on a bead in its own worktree
-                [--host H] [--force]                   on host H (default: the bead's host: label, else
+                [--host H] [--force] [--by WHO]        on host H (default: the bead's host: label, else
                                                        local); --force ignores the bead's needs: labels
   quartermaster host list                              the worker hosts: machine, slots, labels, repos
   quartermaster focus [<bead>] [--agent K]             focus the bead's worker, else dispatch it
@@ -37,9 +37,9 @@ Usage:
                                                        --force also removes an open or dirty one
   quartermaster sweep [--yes]                          list finished linked worktrees; --yes removes the safe ones
   quartermaster resume [<bead>...] [--agent K]         restart exited agents in their worktrees, continuing
-                                                       their last conversation (all resumable if none given)
+                [--by WHO]                             their last conversation (all resumable if none given)
   quartermaster stale [--days N] [--release]           claims with no agent or worktree untouched N days
-                                                       (default 7); --release reopens them
+                [--by WHO]                             (default 7); --release reopens them
   quartermaster verify [<bead>...] [--yes]             stale beads with evidence they are already done; --yes
                                                        closes (at autonomy level 3+) or flags them like the ticker
   quartermaster board                                  every open bead by state: act on them, tidy up
@@ -60,8 +60,9 @@ Usage:
   quartermaster prompt <bead>                          the approval prompt the bead's worker is showing, with
                                                        its options and a hash that names it
   quartermaster answer <bead> <choice> --expect HASH   answer that prompt (choice: option number or label) only
-                [--by WHO]                             if it is still the one with HASH; waits for it to clear
-                                                       and notes the answer on the bead (WHO: coordinator, TJ)
+                [--by WHO] [--class N]                 if it is still the one with HASH; waits for it to clear
+                                                       and notes the answer on the bead; N is the class of
+                                                       the command it releases
   quartermaster gate plan <file|-> [--expect op=N,...] print a pulumi preview --json or tofu show -json
                 [--target T]                           plan's class on target T (6/7 by [autonomy] prod, 8
                                                        delete/replace in prod or stateful, 9 widespread or
@@ -72,6 +73,9 @@ Usage:
   quartermaster version
 
 K is the agent kind: claude, codex or muse; dispatch and focus also take auto.
+WHO is who decided: coordinator (the default) or TJ. Without --by TJ, dispatch, resume,
+stale --release and answer refuse a step above the bead's autonomy level and note
+the ones they take ("AUTO: [coordinator L4 C3] ...").
 `
 
 func main() {
@@ -174,11 +178,11 @@ func run(args []string) error {
 	deliver := fs.String("deliver", defaultDeliver(), "digest: where to send it: desktop, slack, stdout, none (comma-separated)")
 	always := fs.Bool("always", false, "digest: notify even when nothing changed and nothing needs you")
 	actionFlag := fs.String("action", "", "autonomy check: the kind of step, from the action table (merge, apply, ...)")
-	classFlag := fs.Int("class", -1, "autonomy check: the step's impact class, 0-9")
+	classFlag := fs.Int("class", -1, "autonomy check: the step's impact class, 0-9; answer: the class of the command the answer releases")
 	targetFlag := fs.String("target", "", "autonomy check: the stack or environment an apply, deploy or rollout lands on")
 	forFlag := fs.Duration("for", 0, "autonomy level: how long a level 8 or 9 lease lasts (8 defaults to 4h)")
 	expect := fs.String("expect", "", "answer: the hash of the prompt being answered, from quartermaster prompt")
-	by := fs.String("by", "coordinator", "answer: who chose the answer, for the bead note")
+	by := fs.String("by", "coordinator", "dispatch, focus, resume, stale --release, answer: who decided; anyone but TJ needs the bead's autonomy level to reach the step's class")
 	pos, err := interspersed(fs, rest)
 	if err != nil {
 		return err
@@ -195,7 +199,7 @@ func run(args []string) error {
 		if len(pos) != 1 {
 			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex|muse] [--focus] [--host H] [--force]")
 		}
-		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Focus: *focus, Host: *hostFlag, Force: *force})
+		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Focus: *focus, Host: *hostFlag, Force: *force, By: *by})
 		if err != nil {
 			return err
 		}
@@ -213,7 +217,7 @@ func run(args []string) error {
 			h.Notify("quartermaster: no bead", err.Error())
 			return err
 		}
-		msg, err := dispatch(cfg, h, id, DispatchOpts{Kind: *kind, Focus: true})
+		msg, err := dispatch(cfg, h, id, DispatchOpts{Kind: *kind, Focus: true, By: "TJ"}) // focus is TJ's key, never the coordinator's
 		if err != nil {
 			h.Notify("quartermaster: "+id, err.Error())
 			return err
@@ -288,11 +292,11 @@ func run(args []string) error {
 	case "sweep":
 		return sweep(cfg, liveSweepEnv(h), *yes, os.Stdout)
 	case "resume":
-		lines, err := resume(cfg, h, pos, *kind)
+		lines, err := resume(cfg, h, pos, *kind, *by)
 		fmt.Print(strings.Join(append(lines, ""), "\n"))
 		return err
 	case "stale":
-		lines, err := stale(cfg, h, *days, *release)
+		lines, err := stale(cfg, h, *days, *release, *by)
 		fmt.Print(strings.Join(append(lines, ""), "\n"))
 		return err
 	case "verify":
@@ -321,9 +325,9 @@ func run(args []string) error {
 		fmt.Print(out)
 	case "answer":
 		if len(pos) != 2 {
-			return fmt.Errorf("usage: quartermaster answer <bead> <choice> --expect <hash> [--by coordinator|TJ]")
+			return fmt.Errorf("usage: quartermaster answer <bead> <choice> --expect <hash> [--by coordinator|TJ] [--class N]")
 		}
-		msg, err := answerPrompt(livePromptEnv(cfg, h.on(cfg.coordSocket())), pos[0], pos[1], *expect, *by)
+		msg, err := answerPrompt(livePromptEnv(cfg, h.on(cfg.coordSocket())), pos[0], pos[1], *expect, *by, *classFlag)
 		if msg != "" {
 			fmt.Println(msg)
 		}

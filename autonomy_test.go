@@ -692,3 +692,31 @@ func TestBriefNamesMidFlightLevel(t *testing.T) {
 		t.Fatalf("brief does not explain a mid-flight level change:\n%s", b)
 	}
 }
+
+// Owned commands go ahead for TJ, and for anyone else only up to the bead's
+// level, with the AUTO: prefix to note it by.
+func TestEnforce(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	cfg := defaultConfig()
+	b := Bead{ID: "b-1", Status: StatusInProgress}
+	if auto, err := cfg.enforce(b, "dispatch", "coordinator"); err != nil || auto != "AUTO: [coordinator L4 C3]" {
+		t.Errorf("dispatch at 4: %q, %v", auto, err)
+	}
+	b.Labels = []string{"autonomy:2"}
+	for _, a := range []string{"dispatch", "resume", "release"} {
+		if _, err := cfg.enforce(b, a, "coordinator"); !errors.Is(err, errNotAutonomous) || !strings.Contains(err.Error(), "--by TJ") {
+			t.Errorf("%s at 2: %v", a, err)
+		}
+		if auto, err := cfg.enforce(b, a, "TJ"); err != nil || auto != "" {
+			t.Errorf("%s by TJ at 2: %q, %v", a, auto, err)
+		}
+	}
+	// The stop file caps at 2 whatever the label says.
+	b.Labels = []string{"autonomy:7"}
+	if err := os.WriteFile(autonomyStopPath(), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.enforce(b, "resume", "coordinator"); err == nil || !strings.Contains(err.Error(), "autonomy is off") {
+		t.Errorf("resume while off: %v", err)
+	}
+}

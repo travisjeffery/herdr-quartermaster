@@ -144,10 +144,10 @@ func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 			return setLevel(cfg, liveAutonomyEnv(cfg, h), id, n, d, "TJ", time.Now())
 		},
 		dispatch: func(id, kind string) (string, error) {
-			return dispatch(cfg, h, id, DispatchOpts{Kind: kind, Focus: true})
+			return dispatch(cfg, h, id, DispatchOpts{Kind: kind, Focus: true, By: "TJ"})
 		},
 		resume: func(id string) (string, error) {
-			lines, err := resume(cfg, h, []string{id}, "")
+			lines, err := resume(cfg, h, []string{id}, "", "TJ")
 			return strings.Join(lines, "; "), err
 		},
 		resolve: func(id string) (string, error) { return resolve(cfg, h, id, false) },
