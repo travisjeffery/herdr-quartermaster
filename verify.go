@@ -43,6 +43,8 @@ type verdict struct {
 	Action string
 	// Why is what kept a strong verdict from closing.
 	Why string
+	// Level is the bead's autonomy level the verdict was reached at.
+	Level int
 }
 
 type linearIssue struct {
@@ -89,6 +91,7 @@ type verifyEnv struct {
 	runView   func(url string) (Run, error)
 	laterPass func(r Run) (Run, bool, error)
 	close     func(id, reason string) error
+	note      func(id, text string) error
 	event     func(Event) error
 }
 
@@ -137,6 +140,7 @@ func liveVerifyEnv(cfg Config, h Herdr) verifyEnv {
 			_, err := Beads{}.run("close", id, "--reason", reason)
 			return err
 		},
+		note:  Beads{}.Note,
 		event: writeEvent,
 	}
 }
@@ -384,6 +388,11 @@ func verifySearch(slug string, b Bead, key string) string {
 func applyVerdict(env verifyEnv, v verdict, now time.Time) error {
 	switch v.Action {
 	case "close":
+		// The close is a class 3 step taken without TJ, noted like any other.
+		auto := fmt.Sprintf("AUTO: [verify L%d C%d] closed as already done — %s", v.Level, classHousekeeping, v.summary())
+		if err := env.note(v.Bead.ID, auto); err != nil {
+			return err
+		}
 		reason := "quartermaster verify: already done. " + v.summary()
 		if err := env.close(v.Bead.ID, reason); err != nil {
 			return err
@@ -911,6 +920,7 @@ func verifyPass(cfg Config, env verifyEnv, st *TickerState, ids []string, act bo
 		}
 		lvl, _ := cfg.beadLevel(w.b, autonomyStopped())
 		v := decide(w.b, orderedEvidence(m.Evidence), children[w.b.ID], lvl >= classHousekeeping)
+		v.Level = lvl
 		if !act || v.line() != m.Line {
 			lines = append(lines, v.line())
 		}

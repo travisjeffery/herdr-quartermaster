@@ -254,7 +254,7 @@ func (c Config) beadMark(b Bead) string {
 // see actionClass.
 var actionClasses = map[string]int{
 	"push":     2,
-	"dispatch": 3, "resume": 3, "close": 3, "resolve": 3, "install": 3,
+	"dispatch": 3, "resume": 3, "close": 3, "resolve": 3, "install": 3, "release": 3,
 	"merge": 4,
 	// decide is the pre-dial brief's check before a worker takes its own
 	// recommendation, read as the default dial's reach until briefs carry
@@ -302,6 +302,37 @@ func (a AutonomyConfig) targetClass(target string) int {
 }
 
 var errNotAutonomous = errors.New("not autonomous")
+
+// enforce is the check quartermaster's own commands run before a step on b
+// that by takes for TJ (D6). TJ's own steps go ahead; anyone else's need b's
+// level to reach the action's class. It returns the AUTO: prefix to note the
+// step with, "" for TJ.
+func (c Config) enforce(b Bead, action, by string) (string, error) {
+	if by == "TJ" {
+		return "", nil
+	}
+	class, err := c.actionClass(b, action, "")
+	if err != nil {
+		return "", err
+	}
+	lvl, why := c.beadLevel(b, autonomyStopped())
+	return allow(b.ID, by, action, class, lvl, why)
+}
+
+// allow says whether by may take what, of class, on bead id at level lvl
+// (capped by why), and the AUTO: prefix to note it with.
+func allow(id, by, what string, class, lvl int, why string) (string, error) {
+	if by == "TJ" {
+		return "", nil
+	}
+	if class > lvl {
+		if why != "" {
+			why = ", capped by " + why
+		}
+		return "", fmt.Errorf("%w: %s (class %d) is above %s's level %d%s; ask TJ, and on their go rerun with --by TJ", errNotAutonomous, what, class, id, lvl, why)
+	}
+	return fmt.Sprintf("AUTO: [%s L%d C%d]", by, lvl, class), nil
+}
 
 // selfRepo is quartermaster's own repository. Only its beads may install
 // without TJ: installing a merged PR there is a local pull, build and ticker

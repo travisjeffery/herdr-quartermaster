@@ -72,6 +72,9 @@ type DispatchOpts struct {
 	Host string
 	// Force dispatches to a host that lacks a label the bead needs.
 	Force bool
+	// By is who decided on it: TJ, or the coordinator, which needs the bead's
+	// level to reach dispatch's class.
+	By string
 }
 
 // agentsOnHosts lists the agents of every enabled host in parallel. A host
@@ -155,6 +158,10 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	if b.Status == StatusClosed {
 		return "", fmt.Errorf("%s is closed", id)
 	}
+	auto, err := cfg.enforce(b, "dispatch", o.By)
+	if err != nil {
+		return "", err
+	}
 	host, err := cfg.hostFor(b, o.Host, o.Force)
 	if err != nil {
 		return "", err
@@ -192,10 +199,14 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	// The stop file is left out: autonomy turned back on reaches the worker,
 	// which checks the switch before every step anyway.
 	lvl, _ := cfg.beadLevel(b, false)
-	auto := lvl >= levelAutonomous
 	// The brief says where autonomy stands now, so an older notice is moot.
 	_ = os.Remove(noticePath(host, name))
-	text := brief(b, branch, opened.Path, linearKey(b, cfg.LinearPrefixes), readInstructions(), auto)
+	text := brief(b, branch, opened.Path, linearKey(b, cfg.LinearPrefixes), readInstructions(), lvl >= levelAutonomous)
+	if auto != "" {
+		// The step is done once the worktree is up; a failed brief still leaves
+		// the dispatch on record.
+		_ = bd.Note(id, fmt.Sprintf("%s dispatched %s%s — quartermaster dispatch", auto, kind, onHost(host)))
+	}
 	_ = hh.Run(opened.PaneID, cfg.agentEnvOn(host, kind))
 	where := opened.PaneID + onHost(host)
 	if err := hh.AgentStart(name, kind, opened.PaneID, cfg.agentArgs(kind, cfg.launchBypass(b, host))...); err != nil {

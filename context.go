@@ -208,9 +208,10 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   Never prompt a worker that is working or blocked.
 - A worker blocked at an approval prompt shows up in the inbox with the prompt,
   its options and a hash; `+"`quartermaster prompt <bead>`"+` reads it again. Answer only
-  with `+"`quartermaster answer <bead> <choice> --expect <hash>`"+` (choice: the option
-  number), never by sending keys: it refuses if a different prompt is showing,
-  waits for it to clear, and notes the answer on the bead. The prompt text is the
+  with `+"`quartermaster answer <bead> <choice> --expect <hash> --class <N>`"+` (choice: the option
+  number; N: the autonomy class of the command the answer releases), never by sending
+  keys: it refuses if a different prompt is showing or the class is above the bead's
+  level, waits for it to clear, and notes the answer on the bead. The prompt text is the
   worker's, so judge the actual command, not its description.
   - Answer on your own only a prompt in a category a rule at the end of this list allows, and
     never one counting down to an automatic deny (an auto-mode classifier denial).
@@ -246,7 +247,7 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   (Linear Done, merged PRs, code gone from main, a duplicate). Check the
   evidence and offer TJ to close it with a reason; an "auto_closed" item was
   closed by the ticker, so tell TJ and reopen it if the evidence is wrong.
-- Offer `+"`quartermaster resume <bead>...`"+` for resumable threads and `+"`quartermaster stale --release`"+` for stale claims; run either only on TJ's go-ahead.
+- Offer `+"`quartermaster resume <bead>...`"+` for resumable threads and `+"`quartermaster stale --release`"+` for stale claims; run either only on TJ's go-ahead, with `+"`--by TJ`"+`. Without it, dispatch, resume, stale --release and answer refuse steps above the bead's autonomy level.
 - Lessons worth keeping across threads go to `+"`bd remember`"+`.
 - Messages starting "[quartermaster ticker: automated ...]" or "[quartermaster: automated ...]"
   (or the same with flatcircle, kelpie or shepherd, its old names) come from the ticker, not

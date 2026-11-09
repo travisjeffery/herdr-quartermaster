@@ -174,7 +174,9 @@ func unattended(cfg Config, h Herdr, prs map[string]PR) ([]Resumable, []Bead, er
 	return orphans(cfg, active, live, prs, cachedWorktrees(h.Worktrees))
 }
 
-func resume(cfg Config, h Herdr, ids []string, kind string) ([]string, error) {
+// resume restarts the picked beads' agents; by is who decided, as for
+// dispatch.
+func resume(cfg Config, h Herdr, ids []string, kind, by string) ([]string, error) {
 	if kind != "" && !validKinds[kind] {
 		return nil, fmt.Errorf("unknown agent kind %q (%s)", kind, kindList())
 	}
@@ -189,10 +191,18 @@ func resume(cfg Config, h Herdr, ids []string, kind string) ([]string, error) {
 		errs = append(errs, fmt.Errorf("%s: nothing to resume (not active, already has an agent, or no worktree)", id))
 	}
 	for _, r := range picked {
+		auto, err := cfg.enforce(r.Bead, "resume", by)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", r.Bead.ID, err))
+			continue
+		}
 		msg, err := resumeOne(cfg, h, r, resumeKind(cfg, r.Bead, kind))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", r.Bead.ID, err))
 			continue
+		}
+		if auto != "" {
+			_ = (Beads{}).Note(r.Bead.ID, auto+" "+msg+" — quartermaster resume")
 		}
 		out = append(out, msg)
 	}
@@ -243,7 +253,7 @@ func resumeOne(cfg Config, h Herdr, r Resumable, kind string) (string, error) {
 	return fmt.Sprintf("resumed %s on %s (%s)", kind, id, pane), nil
 }
 
-func stale(cfg Config, h Herdr, days int, release bool) ([]string, error) {
+func stale(cfg Config, h Herdr, days int, release bool, by string) ([]string, error) {
 	if days < 0 {
 		return nil, fmt.Errorf("--days must not be negative")
 	}
@@ -262,7 +272,15 @@ func stale(cfg Config, h Herdr, days int, release bool) ([]string, error) {
 	for _, b := range claims {
 		line := fmt.Sprintf("- %s untouched %dd: %s", b.ID, daysSince(b.UpdatedAt, now), shortTitle(b.Title, 70))
 		if release {
+			auto, err := cfg.enforce(b, "release", by)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
 			note := fmt.Sprintf("released by quartermaster stale: no agent or worktree for %dd", days)
+			if auto != "" {
+				note = auto + " " + note
+			}
 			if err := (Beads{}).Note(b.ID, note); err != nil {
 				errs = append(errs, err)
 				continue

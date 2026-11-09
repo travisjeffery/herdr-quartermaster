@@ -533,7 +533,9 @@ func (t Ticker) relaunch(th Thread, snap *Snapshot, due bool, now time.Time) {
 		if t.cfg.launchBypass(th.Bead, localHost) {
 			mode = "with"
 		}
-		if _, err := resume(t.cfg, t.herdr, []string{id}, ""); err != nil {
+		// The relaunch carries out a level change already made, so a lowered
+		// level must not block it.
+		if _, err := resume(t.cfg, t.herdr, []string{id}, "", "TJ"); err != nil {
 			t.log.Printf("relaunch %s: %v", id, err)
 			_ = t.beads.Note(id, "quartermaster could not relaunch the worker "+mode+" bypass args after it exited: "+err.Error()+"; `quartermaster resume "+id+"`")
 			return

@@ -154,6 +154,7 @@ type fakePane struct {
 	screens []string
 	sent    [][]string
 	notes   []string
+	level   int
 }
 
 func (f *fakePane) env() promptEnv {
@@ -172,6 +173,7 @@ func (f *fakePane) env() promptEnv {
 		},
 		note:  func(id, text string) error { f.notes = append(f.notes, text); return nil },
 		sleep: func(time.Duration) {},
+		level: func(string) (int, string) { return f.level, "" },
 	}
 }
 
@@ -179,7 +181,7 @@ func TestAnswerPrompt(t *testing.T) {
 	bash := screen(t, "claude-bash-4.txt")
 	p, _ := parsePrompt(bash)
 	f := &fakePane{screens: []string{bash, screen(t, "claude-idle.txt")}}
-	msg, err := answerPrompt(f.env(), "backend-ab12", "1", p.Hash, "TJ")
+	msg, err := answerPrompt(f.env(), "backend-ab12", "1", p.Hash, "TJ", -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +200,7 @@ func TestAnswerPrompt(t *testing.T) {
 func TestAnswerPromptRefusesChangedPrompt(t *testing.T) {
 	bash, _ := parsePrompt(screen(t, "claude-bash-4.txt"))
 	f := &fakePane{screens: []string{screen(t, "claude-write-3.txt")}}
-	_, err := answerPrompt(f.env(), "backend-ab12", "1", bash.Hash, "coordinator")
+	_, err := answerPrompt(f.env(), "backend-ab12", "1", bash.Hash, "coordinator", 9)
 	if err == nil || !strings.Contains(err.Error(), "the prompt changed") {
 		t.Fatalf("err = %v", err)
 	}
@@ -209,11 +211,11 @@ func TestAnswerPromptRefusesChangedPrompt(t *testing.T) {
 
 func TestAnswerPromptGone(t *testing.T) {
 	f := &fakePane{screens: []string{screen(t, "claude-idle.txt")}}
-	_, err := answerPrompt(f.env(), "backend-ab12", "1", "abcd1234", "coordinator")
+	_, err := answerPrompt(f.env(), "backend-ab12", "1", "abcd1234", "coordinator", 9)
 	if !errors.Is(err, errNoPrompt) || len(f.sent) != 0 {
 		t.Fatalf("err = %v, sent %q", err, f.sent)
 	}
-	if _, err := answerPrompt(f.env(), "backend-ab12", "1", "", "coordinator"); err == nil || !strings.Contains(err.Error(), "--expect") {
+	if _, err := answerPrompt(f.env(), "backend-ab12", "1", "", "coordinator", 9); err == nil || !strings.Contains(err.Error(), "--expect") {
 		t.Errorf("no --expect: err = %v", err)
 	}
 }
@@ -221,8 +223,8 @@ func TestAnswerPromptGone(t *testing.T) {
 func TestAnswerPromptStillShowing(t *testing.T) {
 	bash := screen(t, "claude-bash-4.txt")
 	p, _ := parsePrompt(bash)
-	f := &fakePane{screens: []string{bash}}
-	_, err := answerPrompt(f.env(), "backend-ab12", "no", p.Hash, "coordinator")
+	f := &fakePane{screens: []string{bash}, level: 9}
+	_, err := answerPrompt(f.env(), "backend-ab12", "no", p.Hash, "coordinator", 9)
 	if err == nil || !strings.Contains(err.Error(), "still showing") {
 		t.Fatalf("err = %v", err)
 	}
@@ -271,5 +273,43 @@ func TestBlockedPromptReachesInboxOncePerPrompt(t *testing.T) {
 	th.Prompt = nil
 	if o := transition(th, Snapshot{Group: GroupWorking}, false, t0); len(o.Events) != 1 || !strings.Contains(o.Events[0].Summary, "waiting at an approval or question prompt") {
 		t.Errorf("no prompt read: %+v", o.Events)
+	}
+}
+
+// The coordinator answers only within the bead's level, by the class of what
+// the answer releases; classifier denials, standing options and answers it
+// didn't classify are 9.
+func TestAnswerPromptEnforcesLevel(t *testing.T) {
+	bash := screen(t, "claude-bash-4.txt")
+	deny := screen(t, "claude-autodeny.txt")
+	idle := screen(t, "claude-idle.txt")
+	for _, c := range []struct {
+		name, screen, choice, by string
+		class, level             int
+		want                     string // note prefix; "" = refused
+	}{
+		{"within level", bash, "1", "coordinator", 2, 4, "AUTO: [coordinator L4 C2] PROMPT ANSWERED: 1 Yes"},
+		{"above level", bash, "1", "coordinator", 5, 4, ""},
+		{"unclassified", bash, "1", "coordinator", -1, 7, ""},
+		{"don't ask again", bash, "2", "coordinator", 2, 7, ""},
+		{"mode switch", bash, "3", "coordinator", 2, 7, ""},
+		{"classifier denial", deny, "1", "coordinator", 1, 7, ""},
+		{"classifier denial at 9", deny, "1", "coordinator", 1, 9, "AUTO: [coordinator L9 C9]"},
+		{"TJ", deny, "2", "TJ", -1, 0, "PROMPT ANSWERED: 2 Yes, and don't ask"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p, _ := parsePrompt(c.screen)
+			f := &fakePane{screens: []string{c.screen, idle}, level: c.level}
+			_, err := answerPrompt(f.env(), "backend-ab12", c.choice, p.Hash, c.by, c.class)
+			if c.want == "" {
+				if !errors.Is(err, errNotAutonomous) || len(f.sent) != 0 || len(f.notes) != 0 {
+					t.Fatalf("err = %v, sent %q, notes %q; want a refusal", err, f.sent, f.notes)
+				}
+				return
+			}
+			if err != nil || len(f.notes) != 1 || !strings.HasPrefix(f.notes[0], c.want) {
+				t.Fatalf("err = %v, notes %q; want %q...", err, f.notes, c.want)
+			}
+		})
 	}
 }

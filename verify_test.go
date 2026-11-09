@@ -48,6 +48,7 @@ type fakeVerify struct {
 	shown   int
 	calls   map[string]int
 	closedN []string
+	notes   []string
 	events  []Event
 }
 
@@ -128,6 +129,10 @@ func (f *fakeVerify) env() verifyEnv {
 			f.closedN = append(f.closedN, id+": "+reason)
 			return nil
 		},
+		note: func(id, text string) error {
+			f.notes = append(f.notes, id+": "+text)
+			return nil
+		},
 		event: func(e Event) error {
 			f.events = append(f.events, e)
 			return nil
@@ -170,6 +175,9 @@ func TestVerifyLinearDoneClosesWithAutoClose(t *testing.T) {
 	}
 	if len(f.events) != 1 || f.events[0].Kind != EventAutoClosed {
 		t.Fatalf("events = %+v, want one auto_closed", f.events)
+	}
+	if len(f.notes) != 1 || !strings.HasPrefix(f.notes[0], "backend-x0w5: AUTO: [verify L3 C3] closed as already done") {
+		t.Fatalf("notes = %q, want the close noted AUTO:", f.notes)
 	}
 }
 

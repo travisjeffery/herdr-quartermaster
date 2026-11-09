@@ -311,6 +311,8 @@ type promptEnv struct {
 	keys  func(host, pane string, keys ...string) error
 	note  func(id, text string) error
 	sleep func(time.Duration)
+	// level is the bead's effective autonomy level and the cap that lowered it.
+	level func(id string) (int, string)
 }
 
 func livePromptEnv(cfg Config, h Herdr) promptEnv {
@@ -326,7 +328,31 @@ func livePromptEnv(cfg Config, h Herdr) promptEnv {
 		},
 		note:  bd.Note,
 		sleep: time.Sleep,
+		level: func(id string) (int, string) {
+			b, err := bd.Show(id)
+			if err != nil {
+				return 0, err.Error()
+			}
+			return cfg.beadLevel(b, autonomyStopped())
+		},
 	}
+}
+
+// standingRe matches an option that changes future policy rather than
+// answering this prompt: don't ask again, allow for the session, a mode
+// switch.
+var standingRe = regexp.MustCompile(`(?i)don'?t ask|do not ask|always|auto-accept|this session|\bmode\b|bypass`)
+
+// answerClass is the impact class of answering p with o (D7): 9 for a
+// classifier denial, which counts down, and for an option granting standing
+// permission (loosening settings); else the class of the command it
+// releases, as the answerer gives it, and 9 when it gives none: an answer of
+// unknown impact is class 9.
+func answerClass(p ApprovalPrompt, o PromptOption, given int) int {
+	if p.Countdown != "" || standingRe.MatchString(o.Label) || given < 0 {
+		return 9
+	}
+	return given
 }
 
 // promptReadLines is how much of the screen is read: a prompt with a long
@@ -381,9 +407,15 @@ const answerWait = 5 * time.Second
 // presses the keys only if the prompt with hash expect is still the one
 // showing, so an answer never lands on a prompt it wasn't meant for. It then
 // waits for that prompt to go and notes the answer on the bead.
-func answerPrompt(env promptEnv, id, choice, expect, by string) (string, error) {
+//
+// Anyone but TJ answers only within the bead's autonomy level, by the class
+// of what the answer releases, and the note starts AUTO:.
+func answerPrompt(env promptEnv, id, choice, expect, by string, class int) (string, error) {
 	if expect == "" {
 		return "", fmt.Errorf("--expect <hash> is required: read the prompt with `quartermaster prompt %s` first", id)
+	}
+	if class > 9 {
+		return "", errors.New("--class must be 0-9")
 	}
 	p, host, a, err := workerPrompt(env, id)
 	if err != nil {
@@ -396,6 +428,17 @@ func answerPrompt(env promptEnv, id, choice, expect, by string) (string, error) 
 	o, err := p.choose(choice)
 	if err != nil {
 		return "", err
+	}
+	auto := ""
+	if by != "TJ" {
+		lvl, why := env.level(id)
+		what := fmt.Sprintf("answering %d %s", o.Number, shortTitle(o.Label, 40))
+		if class < 0 {
+			what += " (no --class given)"
+		}
+		if auto, err = allow(id, by, what, answerClass(p, o, class), lvl, why); err != nil {
+			return "", err
+		}
 	}
 	if err := env.keys(host, a.PaneID, p.keys(o)...); err != nil {
 		return "", fmt.Errorf("send keys to %s: %w", a.Name, err)
@@ -417,6 +460,9 @@ func answerPrompt(env promptEnv, id, choice, expect, by string) (string, error) 
 	}
 	msg := fmt.Sprintf("answered %s: %d %s to %s", a.Name, o.Number, o.Label, p.Summary())
 	note := fmt.Sprintf("PROMPT ANSWERED: %d %s to %s [%s] by %s", o.Number, shortTitle(o.Label, 60), p.Summary(), p.Hash, by)
+	if auto != "" {
+		note = auto + " " + note
+	}
 	if err := env.note(id, note); err != nil {
 		return msg, fmt.Errorf("answered, but noting it on %s failed: %w", id, err)
 	}
