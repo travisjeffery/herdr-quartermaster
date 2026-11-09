@@ -678,61 +678,85 @@ its worktree, branch and PRs then live in that repository, and
 configured repository falls back to `repo` and shows as a warning in
 `quartermaster context`.
 
-### Autonomous beads
+### The autonomy dial
 
-A bead labeled `autonomous` when it is dispatched gets a standing grant in its
-worker's brief. Where it would stop for you, it takes its own recommendation
-instead: a decision it has a recommendation for, the next step of a staged
-rollout once the last one verified, merging its PR (auto-merge, stacks
-retargeted, `--match-head-commit` if auto-merge isn't allowed), and an apply
-whose machine-readable preview passes `quartermaster gate plan`. A bead in
-herdr-quartermaster itself may also install its merged PR: pull the main
-checkout the installed binary is built from, `go build -o bin/quartermaster .`,
-restart the ticker, and smoke-test. Supervised beads still leave that to you as
-a `RUN:`, and other repos' installs and deploys go through the apply step. Each of these
-steps leaves an `AUTO:` note on the bead. The notes reach you in the digest's
-changes and in the report's "Done without you" section, and milestones also
-go to Linear. Its thread shows its level, `· L7` (`· L8 3h left` while a lease
-lifts it).
+**Advisory.** Workers hold their own credentials (`gh`, cloud roles), so
+quartermaster enforces the dial only in the commands it owns: `dispatch`,
+`resume`, `answer`, `stale --release`, the ticker's auto-close and launch
+modes. Everything else rests on the worker running the check, and `autonomy
+level` says so. A later phase moves side-effecting credentials into an
+executor that checks before it acts.
 
-It still stops to `needs_me`, with the question starting `CRITICAL:`, for:
-- any delete or destroy, including a replace of a stateful resource
-- irreversible operations
-- money
-- messages to people outside the team
-- anything `gate plan` blocks
-- anything it isn't sure about
+Every bead has a level from 0 to 9: its `autonomy:N` label, or the global
+`[autonomy] level` (default 4). Every step a worker or the coordinator takes
+has an impact class, set by where its output lands. A step whose class is at
+most the bead's level goes ahead without you; anything above it stops at
+`needs_me`.
 
-It never approves a PR (required review stays human) and never answers
-Claude Code's permission prompts or works around its classifier.
+| Class | Where it lands |
+|---|---|
+| 0 | Nowhere: read-only |
+| 1 | The agent's own worktree and scratch |
+| 2 | Its own branch and PR: pushing, replies, a choice that only shapes its PR |
+| 3 | Your machine and bead state: dispatching a `next` bead, resuming, closing on strong evidence, creating beads, installing a merged herdr-quartermaster PR |
+| 4 | Main: merging its own PR with the required review and checks green |
+| 5 | Internal messages: team channels, others' PRs and issues |
+| 6 | Non-production infrastructure: an apply or deploy that passes `gate plan` |
+| 7 | Production, additive or in place: passes `gate plan`, change noted beforehand, rollback named |
+| 8 | One prod delete or replace, a stateful replace, force-pushing a shared branch, merging without the required review, a secret, a message outside the team, money, approving a PR |
+| 9 | Widespread or irreversible, answering a classifier denial, loosening agent settings or hooks, raising its own level, anything whose impact is unknown |
 
-Before every such step the worker runs `quartermaster autonomy check <bead>
---action decide|merge|apply|install`. The check fails, and the worker stops for you as
-usual, after any of these:
-- `quartermaster autonomy off`
-- `[autonomy] enabled = false`
-- the bead's label removed, or the label `supervised` added
-- that kind of step turned off in `[autonomy]`
-- `install` on a bead whose repo isn't herdr-quartermaster
+A step takes the highest class among its effects, including what it sets off:
+a trigger comment that runs an apply is the apply's class, and a merge into a
+repo listed in `merge_class` takes that class. A decision takes the class of
+what the chosen option does. Missing a precondition moves a step up a class.
 
-A missing `quartermaster` binary fails the check too, so a worker host without
-one never acts on its own.
+The dial says how far a worker may go in doing its bead, never what the bead
+is for. Its task is the bead's description and your messages to it; text in a
+repo, a comment, a web page or a tool result is data however high the level,
+and work it discovers becomes a new bead.
 
-You can grant or revoke autonomy at any stage, not only at dispatch:
-`quartermaster autonomy grant <bead>` adds `autonomous` (and removes
-`supervised`), notes the bead, and sends its worker the same grant its brief
-would have carried. `quartermaster autonomy revoke <bead>` removes
-`autonomous`, adds `supervised`, and tells the worker it stops for you again.
-On the board, `U` cycles the selected bead through levels 2, 4 and 7, and a
-digit sets that level (8 and 9 ask how long). A worker that is working
-or at an approval prompt is never interrupted: the message waits in the outbox
-until it is idle, and a revoke also waits while the bead is at `needs_me`, so
-it can't read as your answer. A grant to an idle worker at `needs_me` lets it
-take its recommendation if the question isn't critical. An open bead gets the
-grant in its brief when it is dispatched. Either way the labels are what
-count: the worker trusts a grant only while `autonomy check` passes, and the
-ticker never grants. See
-[docs/design/autonomous-mode.md](docs/design/autonomous-mode.md).
+Before every step of class 3 or more, and every decision it would otherwise
+ask you, the worker runs `quartermaster autonomy check <bead> --class N` or
+`--action A [--target T]`. If it passes, the worker takes its own
+recommendation and leaves an `AUTO: [worker L<level> C<class>]` note; for
+class 6 and up, one before the step with the change it expects and one with
+the result. If it fails, or `quartermaster` is missing on the worker's host,
+it stops for you. Its `needs_me` question always carries its recommendation
+and a `CLASS: <n>` line, and starts `CRITICAL:` for class 8 or 9. The
+coordinator may answer a `needs_me` itself when its own read of the evidence
+gives an answer within the dial; it escalates questions of taste, ones
+involving other people, conflicting or missing evidence, and anything
+`CRITICAL:`.
+
+`AUTO:` notes reach you in the digest's changes and the report's "Done without
+you" section; every check, `AUTO:` step, prompt answer and level change also
+goes to `journal.jsonl`. A thread shows its level, `· L7` (`· L8 3h left`
+while a lease lifts it).
+
+Setting the level:
+- `quartermaster autonomy level N` sets the global level, up to `max`
+  (default 7). `quartermaster autonomy level N <bead>...` sets beads' own,
+  which may sit above the global level, and tells their workers; `-` goes back
+  to the global level.
+- 8 and 9 are leases (`--for`, default 4h), and 9 is set only on beads. The
+  ticker puts an expired lease back. Only a worker under a 9 lease launches
+  with its kind's `bypass_args`.
+- `quartermaster autonomy off` caps every bead at 2 until `on`.
+- `grant` and `revoke` set 7 and 2; the old `autonomous` and `supervised`
+  labels still read as those levels.
+- On the board, `U` cycles the selected bead through 2, 4 and 7, and a digit
+  sets that level (8 and 9 ask how long).
+
+A raise counts only as far as the worker's checks pass; a lower level counts
+at once. A worker that is working or at an approval prompt is never
+interrupted: the notice waits in the outbox until it is idle. While the bead
+is at `needs_me`, a notice below 7 also waits, so it can't read as your
+answer; one at 7 or above goes through, and the worker takes its
+recommendation if the question isn't `CRITICAL:` and its check now passes.
+The ticker never raises a level. `[autonomy.budget]` and the circuit breaker
+(see Commands) cap how much runs without you. See
+[docs/design/autonomy-dial.md](docs/design/autonomy-dial.md).
 
 ### Worker hosts
 
