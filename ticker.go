@@ -136,10 +136,7 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 // knows of its PRs and runs.
 func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thread {
 	th := Thread{Bead: b, Linear: linearKey(b, cfg.LinearPrefixes)}
-	lvl, _ := cfg.beadLevel(b, autonomyStopped())
-	// shortcut: "auto" is still the pre-dial autonomous level until the board
-	// shows each bead's level.
-	th.Auto = lvl >= levelAutonomous
+	th.Level = cfg.beadMark(b)
 	if a, ok := byName[agentName(b.ID)]; ok {
 		th.Agent = &a
 	}

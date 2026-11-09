@@ -224,6 +224,31 @@ func (c Config) beadLevel(b Bead, stopped bool) (int, string) {
 	return c.Autonomy.level(s, b, stopped, time.Now())
 }
 
+// levelMark is b's effective level as the board and sidebar show it: L4, or
+// L8 3h left while a lease lifts it past max.
+func (a AutonomyConfig) levelMark(s autonomyState, b Bead, stopped bool, now time.Time) string {
+	lvl, _ := a.level(s, b, stopped, now)
+	key := ""
+	if _, own := ownLevel(b); own {
+		key = b.ID
+	}
+	mark := "L" + strconv.Itoa(lvl)
+	if l, ok := s.Leases[key]; ok && lvl > a.Max && now.Before(l.Until) {
+		mark += " " + age(now, l.Until) + " left"
+	}
+	return mark
+}
+
+// beadMark is b's levelMark now; L0 when the state file can't be read, as
+// beadLevel counts it.
+func (c Config) beadMark(b Bead) string {
+	s, err := loadAutonomy()
+	if err != nil {
+		return "L0"
+	}
+	return c.Autonomy.levelMark(s, b, autonomyStopped(), time.Now())
+}
+
 // actionClasses are the classes `autonomy check --action` looks up. Apply,
 // deploy, rollout, install and merge also depend on the target or the repo;
 // see actionClass.

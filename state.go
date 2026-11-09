@@ -52,8 +52,8 @@ type Thread struct {
 	// Merged is every merged PR of the bead's, the pick or not, so a merge
 	// behind another open PR is still announced.
 	Merged []PR
-	// Auto is whether the bead runs without TJ right now (autonomous mode).
-	Auto bool
+	// Level is the bead's effective autonomy level as levelMark shows it.
+	Level string
 	// Prompt is the approval prompt a blocked agent is showing, when the
 	// ticker could read it.
 	Prompt *ApprovalPrompt
@@ -163,8 +163,8 @@ func stateLine(t Thread) string {
 	if t.Linear != "" {
 		s += " · " + t.Linear
 	}
-	if t.Auto {
-		s += " · auto"
+	if t.Level != "" {
+		s += " · " + t.Level
 	}
 	return s
 }

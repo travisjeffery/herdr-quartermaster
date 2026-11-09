@@ -71,11 +71,37 @@ func TestBriefGrant(t *testing.T) {
 	}
 }
 
-func TestStateLineAuto(t *testing.T) {
+func TestStateLineLevel(t *testing.T) {
 	th := thread(bead(StatusInProgress), agent("working", 1), nil)
-	th.Auto = true
-	if got := stateLine(th); !strings.HasSuffix(got, " · auto") {
-		t.Errorf("state line %q has no auto marker", got)
+	th.Level = "L4"
+	if got := stateLine(th); !strings.HasSuffix(got, " · L4") {
+		t.Errorf("state line %q has no level marker", got)
+	}
+}
+
+func TestLevelMark(t *testing.T) {
+	now := time.Now()
+	a := AutonomyConfig{Level: 4, Max: maxStanding}
+	own := Bead{ID: "a-1", Labels: []string{"autonomy:8"}}
+	leased := autonomyState{Leases: map[string]autonomyLease{"a-1": {Level: 8, Until: now.Add(3*time.Hour + time.Minute)}}}
+	for _, c := range []struct {
+		name string
+		s    autonomyState
+		b    Bead
+		stop bool
+		want string
+	}{
+		{"global", autonomyState{}, Bead{ID: "a-2"}, false, "L4"},
+		{"own", autonomyState{}, Bead{ID: "a-2", Labels: []string{LabelSupervised}}, false, "L2"},
+		{"lease", leased, own, false, "L8 3h left"},
+		{"no lease is capped at max", autonomyState{}, own, false, "L7"},
+		{"expired lease", autonomyState{Leases: map[string]autonomyLease{"a-1": {Level: 8, Until: now.Add(-time.Minute)}}}, own, false, "L7"},
+		{"stopped", leased, own, true, "L2"},
+		{"global lease", autonomyState{Level: new(8), Leases: map[string]autonomyLease{"": {Level: 8, Until: now.Add(90 * time.Minute)}}}, Bead{ID: "a-2"}, false, "L8 1h left"},
+	} {
+		if got := a.levelMark(c.s, c.b, c.stop, now); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 

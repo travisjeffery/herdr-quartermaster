@@ -687,7 +687,8 @@ restart the ticker, and smoke-test. Supervised beads still leave that to you as
 a `RUN:`, and other repos' installs and deploys go through the apply step. Each of these
 steps leaves an `AUTO:` note on the bead. The notes reach you in the digest's
 changes and in the report's "Done without you" section, and milestones also
-go to Linear. Its thread shows `· auto`.
+go to Linear. Its thread shows its level, `· L7` (`· L8 3h left` while a lease
+lifts it).
 
 It still stops to `needs_me`, with the question starting `CRITICAL:`, for:
 - any delete or destroy, including a replace of a stateful resource
@@ -717,7 +718,8 @@ You can grant or revoke autonomy at any stage, not only at dispatch:
 `supervised`), notes the bead, and sends its worker the same grant its brief
 would have carried. `quartermaster autonomy revoke <bead>` removes
 `autonomous`, adds `supervised`, and tells the worker it stops for you again.
-`U` on the board does either for the selected bead. A worker that is working
+On the board, `U` cycles the selected bead through levels 2, 4 and 7, and a
+digit sets that level (8 and 9 ask how long). A worker that is working
 or at an approval prompt is never interrupted: the message waits in the outbox
 until it is idle, and a revoke also waits while the bead is at `needs_me`, so
 it can't read as your answer. A grant to an idle worker at `needs_me` lets it

@@ -88,13 +88,9 @@ func (f *fakeBoard) env() boardEnv {
 		resume:   func(id string) (string, error) { return "resumed", rec("resume %s", id) },
 		resolve:  func(id string) (string, error) { return "removed", rec("resolve %s", id) },
 		release:  func(b Bead, days int) error { return rec("release %s %d", b.ID, days) },
-		autonomy: func(id string, on bool) (string, error) {
-			add, drop := LabelAutonomous, LabelSupervised
-			if !on {
-				add, drop = drop, add
-			}
-			edit(id, func(b *Bead) { b.Labels = append(without(b.Labels, drop), add) })
-			return "autonomy set", rec("autonomy %s %v", id, on)
+		autonomy: func(id string, n int, d time.Duration) (string, error) {
+			edit(id, func(b *Bead) { b.Labels = withLevel(b.Labels, n) })
+			return "autonomy set", rec("autonomy %s %d %s", id, n, d)
 		},
 		focus:     func(a string) error { return rec("focus %s", a) },
 		inboxDone: func(id string) error { return rec("dismiss %s", id) },
@@ -196,6 +192,7 @@ func testFleet() *fakeBoard {
 }
 
 func TestBuildRowsShowsEveryOpenBeadBySection(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
 	m := testModel(t, testFleet())
 	got := sections(m.all)
 	want := []string{
@@ -211,7 +208,7 @@ func TestBuildRowsShowsEveryOpenBeadBySection(t *testing.T) {
 		t.Fatalf("sections =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 	for _, r := range m.all {
-		if r.bead.ID == "bk-dep" && r.line != "bug · waits on bk-wait" {
+		if r.bead.ID == "bk-dep" && r.line != "bug · waits on bk-wait · L0" {
 			t.Errorf("dep line = %q: want only its open blocker", r.line)
 		}
 		if r.header == "next" && r.count != 2 {
@@ -684,7 +681,7 @@ func TestGCBulkActions(t *testing.T) {
 	}
 }
 
-func TestAutonomyToggleConfirms(t *testing.T) {
+func TestAutonomyLevelKeys(t *testing.T) {
 	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
 	f := &fakeBoard{beads: []Bead{boardBead("bk-a", StatusInProgress, 2, LabelSupervised)}}
 	m := testModel(t, f)
@@ -692,30 +689,34 @@ func TestAutonomyToggleConfirms(t *testing.T) {
 	m.rebuild()
 	selectBead(t, m, "bk-a")
 	press(t, m, "U")
-	if m.ask == nil || !strings.Contains(m.ask.prompt, "grant autonomy to bk-a") {
-		t.Fatalf("no grant confirmation: %+v", m.ask)
+	if m.ask == nil || !strings.Contains(m.ask.prompt, "set bk-a to autonomy level 4 (now 2)") {
+		t.Fatalf("no confirmation: %+v", m.ask)
 	}
 	press(t, m, "n")
 	if len(f.calls) != 0 {
-		t.Fatalf("declined grant ran: %v", f.calls)
+		t.Fatalf("declined level ran: %v", f.calls)
 	}
-	press(t, m, "U")
-	press(t, m, "y")
-	if !slices.Equal(f.calls, []string{"autonomy bk-a true"}) {
-		t.Fatalf("calls %v", f.calls)
+	// U cycles 2, 4, 7 and round to 2; a digit sets any standing level.
+	for _, k := range []string{"U", "U", "U", "5"} {
+		press(t, m, k, "y")
 	}
-	if r := m.sel(); r == nil || !strings.Contains(r.line, "auto") {
-		t.Fatalf("no auto marker after the grant: %+v", r)
+	want := []string{"autonomy bk-a 4 0s", "autonomy bk-a 7 0s", "autonomy bk-a 2 0s", "autonomy bk-a 5 0s"}
+	if !slices.Equal(f.calls, want) {
+		t.Fatalf("calls %v, want %v", f.calls, want)
 	}
-	press(t, m, "U")
-	if m.ask == nil || !strings.Contains(m.ask.prompt, "revoke autonomy on bk-a") {
-		t.Fatalf("no revoke confirmation: %+v", m.ask)
+	if r := m.sel(); r == nil || !strings.Contains(stateLine(Thread{Bead: r.bead, Level: m.cfg.beadMark(r.bead)}), "L5") {
+		t.Fatalf("no L5 marker after setting 5: %+v", r)
 	}
-	press(t, m, "y")
-	if !slices.Equal(f.calls, []string{"autonomy bk-a true", "autonomy bk-a false"}) {
-		t.Fatalf("calls %v", f.calls)
+	// 8 and 9 ask how long instead of y/n.
+	press(t, m, "8")
+	if m.ask == nil || !m.ask.text || !strings.Contains(m.ask.prompt, "for how long") {
+		t.Fatalf("no duration prompt: %+v", m.ask)
 	}
-	if r := m.sel(); r == nil || strings.Contains(r.line, "auto") {
-		t.Fatalf("auto marker after the revoke: %+v", r)
+	typeText(t, m, "2h\r")
+	press(t, m, "9")
+	typeText(t, m, "soon\r")
+	want = append(want, "autonomy bk-a 8 2h0m0s")
+	if !slices.Equal(f.calls, want) {
+		t.Fatalf("calls %v, want %v", f.calls, want)
 	}
 }

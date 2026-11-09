@@ -154,9 +154,7 @@ func openRow(cfg Config, st TickerState, b Bead, live map[string]bool) boardRow 
 	if key != "" {
 		parts = append(parts, key)
 	}
-	if lvl, _ := cfg.beadLevel(b, autonomyStopped()); lvl >= levelAutonomous {
-		parts = append(parts, "auto")
-	}
+	parts = append(parts, cfg.beadMark(b))
 	line := strings.Join(parts, " · ")
 	var urls []string
 	for _, pr := range prs {

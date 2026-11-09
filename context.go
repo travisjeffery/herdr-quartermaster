@@ -221,7 +221,7 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
     switching modes) unless TJ chose it. List each answer in your next update.
 - A needs_me bead's question is in its latest note. Relay it to TJ verbatim with
   the options; when they answer, prompt the worker and it resets the status.
-- A thread marked "auto" is autonomous: its worker decides on its own
+- A thread marked L7 or higher is autonomous: its worker decides on its own
   recommendation, merges, and runs applies that pass `+"`quartermaster gate plan`"+`, and leaves
   an "AUTO:" note for each. When it is needs_me, the step is critical (its note
   starts "CRITICAL:") or the worker has no recommendation. Relay it like any other

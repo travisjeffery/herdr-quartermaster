@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -96,7 +97,7 @@ type boardEnv struct {
 	resume      func(id string) (string, error)
 	resolve     func(id string) (string, error)
 	release     func(b Bead, days int) error
-	autonomy    func(id string, on bool) (string, error)
+	autonomy    func(id string, n int, d time.Duration) (string, error)
 	focus       func(agent string) error
 	inboxDone   func(id string) error
 	copy        func(text string) error
@@ -139,12 +140,8 @@ func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 			return strings.TrimSpace(string(out)), err
 		},
 		prompt: h.Prompt,
-		autonomy: func(id string, on bool) (string, error) {
-			n := levelSupervised
-			if on {
-				n = levelAutonomous
-			}
-			return setLevel(cfg, liveAutonomyEnv(cfg, h), id, n, 0, "TJ", time.Now())
+		autonomy: func(id string, n int, d time.Duration) (string, error) {
+			return setLevel(cfg, liveAutonomyEnv(cfg, h), id, n, d, "TJ", time.Now())
 		},
 		dispatch: func(id, kind string) (string, error) {
 			return dispatch(cfg, h, id, DispatchOpts{Kind: kind, Focus: true})
@@ -776,25 +773,45 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 		return []cmd{func() msg {
 			return doneMsg{text: id + " " + word, err: m.env.setLabel(id, LabelNext, on), reload: true}
 		}}
-	case "U":
-		// Grant (level 7) below the autonomous level, revoke (level 2) at it.
-		lvl, _ := m.cfg.beadLevel(r.bead, false)
-		on := lvl < levelAutonomous
-		q := "grant autonomy to " + id + ": it goes ahead without you except critical operations?"
-		if !on {
-			q = "revoke autonomy on " + id + ": it stops for you again?"
-		}
-		m.ask = confirm(q, func() []cmd {
-			n := levelAutonomous
-			if !on {
-				n = levelSupervised
+	case "U", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		lvl, _ := m.cfg.beadLevel(r.bead, autonomyStopped())
+		n, _ := strconv.Atoi(k)
+		if k == "U" {
+			// The usual stops: supervised, the default, autonomous, then round.
+			n = levelSupervised
+			for _, s := range []int{levelSupervised, 4, levelAutonomous} {
+				if s > lvl {
+					n = s
+					break
+				}
 			}
+		}
+		set := func(d time.Duration) []cmd {
 			m.local(id, func(b *Bead) { b.Labels = withLevel(b.Labels, n) })
 			return []cmd{func() msg {
-				text, err := m.env.autonomy(id, on)
+				text, err := m.env.autonomy(id, n, d)
 				return doneMsg{text: text, err: err, reload: true}
 			}}
-		})
+		}
+		if n >= 8 {
+			// 8 and 9 are leases; entering how long is the confirmation.
+			hint := "empty for 4h"
+			if n == 9 {
+				hint = "required"
+			}
+			m.ask = &ask{prompt: fmt.Sprintf("%s autonomy level %d (now %d) for how long, e.g. 2h (%s): ", id, n, lvl, hint), text: true, then: func(a string) []cmd {
+				var d time.Duration
+				if a = strings.TrimSpace(a); a != "" {
+					var err error
+					if d, err = time.ParseDuration(a); err != nil || d <= 0 {
+						return []cmd{func() msg { return doneMsg{err: fmt.Errorf("not a duration: %q", a)} }}
+					}
+				}
+				return set(d)
+			}}
+			return nil
+		}
+		m.ask = confirm(fmt.Sprintf("set %s to autonomy level %d (now %d)?", id, n, lvl), func() []cmd { return set(0) })
 	case "S":
 		statuses := map[string]string{"o": StatusOpen, "i": StatusInProgress, "b": StatusBlocked, "m": StatusNeedsMe}
 		m.ask = &ask{prompt: id + " status: o open · i in_progress · b blocked · m needs_me", keys: "oibm", then: func(a string) []cmd {
