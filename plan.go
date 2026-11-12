@@ -274,6 +274,10 @@ const (
 	planApproved = "approved"
 	planIntent   = "intent"
 	planOutcome  = "outcome"
+	// planRerun starts a new run of a plan whose last run failed: a shim
+	// resubmits the same merge once its checks pass. Only the events after
+	// the latest rerun are the run's.
+	planRerun = "rerun"
 	// The ends. done and failed are final; a plan stopped at needs_me or
 	// expired continues with plan resume once TJ approves it.
 	planDone    = "done"

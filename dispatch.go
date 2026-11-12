@@ -206,9 +206,8 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	}
 	env := cfg.agentEnvOn(host, kind)
 	if host == localHost {
-		// The bead's own socket to the executor, if one is running (S1:
-		// advisory routing).
-		execOpen(id)
+		// The bead's own socket to the executor and the shims, if one is
+		// running (S1: advisory routing).
 		env += execEnv(id)
 	}
 	_ = hh.Run(opened.PaneID, env)
