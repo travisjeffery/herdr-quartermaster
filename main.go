@@ -83,9 +83,10 @@ Usage:
   quartermaster plan resume <digest>                   the executor continues a stopped plan (after TJ approves it)
   quartermaster executor run|install|uninstall|status  the daemon that runs approved plans, durably; install sets
                                                        up its systemd user unit; it resumes unfinished plans on start
-  quartermaster run -- gh <args>                       what the gh shim on a worker's PATH runs: gh pr merge and gh api
-                                                       PUT .../pulls/N/merge go to the executor as a plan; other
-                                                       subcommands run the real gh
+  quartermaster run -- gh|pulumi|tofu <args>           what the shims on a worker's PATH run: gh pr merge, gh api
+                                                       PUT .../pulls/N/merge, pulumi up and tofu apply go to the
+                                                       executor as a plan (applies from a clean checkout of the
+                                                       worktree's commit); other subcommands run the real tool
   quartermaster bd-proxy --host NAME [--bd PATH]       authorized_keys forced command: run a worker host's
                                                        bd request (SSH_ORIGINAL_COMMAND) on this machine's beads
   quartermaster version

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,9 +32,8 @@ import (
 // shimMarker is in every shim, so the real binary's lookup never finds one.
 const shimMarker = "quartermaster shim"
 
-// shimTools are the binaries with a shim. pulumi and tofu join with their
-// applies.
-var shimTools = []string{"gh"}
+// shimTools are the binaries with a shim.
+var shimTools = []string{"gh", "pulumi", "tofu"}
 
 func shimDir() string { return filepath.Join(stateDir(), "shims") }
 
@@ -529,6 +529,7 @@ func cmpOr(a, b string) string {
 // stand in.
 type shimRun struct {
 	lookup func(dir string) ghLookup
+	iac    func(dir string) iacLookup
 	// replace runs the real tool in place of this process; it returns only
 	// on error.
 	replace func(path string, argv []string) error
@@ -543,6 +544,7 @@ func liveShimRun() shimRun {
 	dir, _ := os.Getwd()
 	return shimRun{
 		lookup:  func(dir string) ghLookup { return liveLookup(dir, os.Stdin) },
+		iac:     liveIACLookup,
 		replace: func(path string, argv []string) error { return syscall.Exec(path, argv, os.Environ()) },
 		call:    func(sock string, req execRequest) (execResponse, error) { return execCall(sock, req, 0) },
 		getenv:  os.Getenv,
@@ -572,10 +574,20 @@ func runCmd(args []string, r shimRun) error {
 		return r.replace(bin, args)
 	}
 	sock := r.getenv("QUARTERMASTER_EXEC_SOCKET")
-	if tool != "gh" || sock == "" {
+	if sock == "" || !slices.Contains(shimTools, tool) {
 		return passThrough()
 	}
-	s, ok, err := lowerGH(args[1:], r.lookup(r.dir))
+	var s Step
+	var ok bool
+	var err error
+	switch tool {
+	case "gh":
+		s, ok, err = lowerGH(args[1:], r.lookup(r.dir))
+	case "pulumi":
+		s, ok, err = lowerPulumi(args[1:], r.iac(r.dir))
+	case "tofu":
+		s, ok, err = lowerTofu(args[1:], r.iac(r.dir))
+	}
 	if err != nil {
 		return err
 	}
@@ -589,7 +601,7 @@ func runCmd(args []string, r shimRun) error {
 	}
 	resp, err := r.call(sock, execRequest{Run: data})
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
-		fmt.Fprintf(r.stderr, "quartermaster: no executor on %s; running gh directly (advisory)\n", sock)
+		fmt.Fprintf(r.stderr, "quartermaster: no executor on %s; running %s directly (advisory)\n", sock, tool)
 		return passThrough()
 	}
 	if err != nil {
@@ -598,6 +610,9 @@ func runCmd(args []string, r shimRun) error {
 	err = reportRun(resp, r.stdout)
 	if resp.State == "waiting" {
 		fmt.Fprintf(r.stdout, "waiting for approval: quartermaster plan status %s\n", resp.Digest)
+		if s.Op == "iac.apply" {
+			fmt.Fprintln(r.stdout, iacWaiting(resp.Digest))
+		}
 	}
 	return err
 }

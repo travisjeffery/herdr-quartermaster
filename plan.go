@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -55,7 +56,7 @@ const opOpaque = "opaque"
 var ops = map[string]opSpec{
 	"github.pr.merge":     {action: "merge", pre: []string{"head_sha"}},
 	"github.pr.automerge": {action: "merge", pre: []string{"head_sha"}},
-	"iac.apply":           {action: "apply"},
+	"iac.apply":           {action: "apply"}, // pre.rev, from the shim; the executor binds the preview's digests
 	opOpaque:              {},
 }
 
@@ -116,6 +117,9 @@ func parsePlan(data []byte) (Plan, error) {
 		case "iac.apply":
 			if tool, stack, _ := strings.Cut(s.Target, ":"); (tool != "pulumi" && tool != "tofu") || stack == "" {
 				return p, bad("target must be pulumi:<stack> or tofu:<name>, not %q", s.Target)
+			}
+			if rev := s.Pre["rev"]; rev != "" && !fullSHA.MatchString(rev) {
+				return p, bad("pre.rev must be a full 40-character commit SHA")
 			}
 			if path := s.Args["preview"]; path != "" {
 				b, err := os.ReadFile(path)
@@ -214,20 +218,46 @@ func (c Config) opClass(b Bead, s Step) (int, string) {
 		if pc.Format != tool {
 			pc.Problems = append(pc.Problems, fmt.Sprintf("the preview is %s output, the target %s", pc.Format, tool))
 		}
-		if e := s.Args["expect"]; e != "" {
+		e := s.Args["expect"]
+		if e != "" {
 			want, err := parseExpect(e)
 			if err != nil {
 				return 9, "expect: " + err.Error()
 			}
 			pc.expect(want)
 		}
-		pc.classify(c.Autonomy, stack)
+		// The selectors the step carries (AWS_PROFILE, KUBECONFIG, ...) choose
+		// what it reaches too, so a production pattern matching one of them
+		// makes it production.
+		var env map[string]string
+		_ = json.Unmarshal([]byte(s.Args["env"]), &env)
+		maps.DeleteFunc(env, func(k, _ string) bool { return !slices.Contains(iacEnv, k) })
+		where := stack
+		for _, k := range sortedKeys(env) {
+			where += "/" + env[k]
+		}
+		pc.classify(c.Autonomy, where)
+		pc.Target = stack
 		why := "apply on " + targetWord(pc) + ", preview " + counts(pc)
+		if len(env) > 0 {
+			why += " (with " + strings.Join(func() []string {
+				var kv []string
+				for _, k := range sortedKeys(env) {
+					kv = append(kv, k+"="+env[k])
+				}
+				return kv
+			}(), ", ") + ")"
+		}
 		if len(pc.Problems) > 0 {
 			// gate gives a plan with problems no class: it stops for TJ.
 			return 9, why + "; " + strings.Join(pc.Problems, "; ")
 		}
-		return pc.Class, why
+		if e == "" {
+			// The dial's rule: a step missing a precondition, here the
+			// change noted beforehand, is one class up.
+			return min(9, pc.Class+1), why + "; no expected counts, so one class up"
+		}
+		return pc.Class, why + ", as expected"
 	case opOpaque:
 		return 9, "opaque"
 	}
