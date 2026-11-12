@@ -135,8 +135,10 @@ nudges the coordinator; the coordinator reads the inbox through
 ### Finishing a thread
 
 Usually there's nothing to do. When a worker's PR merges, the ticker tells it
-to verify and close its bead (`bd close <id> --reason "<what shipped and how
-it was verified>"`). A `rolling-out` bead is finished first, then closed. The
+to verify and close its bead (`quartermaster close <id> --by worker --reason
+"<what shipped and how it was verified>"`). A `rolling-out` bead is finished
+first, then closed; a bead with steps after its merge or with no PR passes the
+[verifier](#acceptance-criteria-and-the-verifier) before it closes. The
 ticker sees the bead close and writes a `closed` event, and the coordinator
 runs `quartermaster resolve <bead>`: that removes the bead's worktree and its
 workspace, closing the worker's pane, and deletes the local branch if the PR
@@ -147,7 +149,7 @@ Other cases:
 
 | Situation | What happens |
 |---|---|
-| Done without a PR (an investigation, an ops task) | The worker closes its bead with a reason when it finishes; the coordinator runs `quartermaster resolve <id>` (auto-resolve only covers merged PRs) |
+| Done without a PR (an investigation, an ops task) | The worker closes its bead with `quartermaster close`, which runs the verifier first; the coordinator runs `quartermaster resolve <id>` (auto-resolve only covers merged PRs) |
 | Dropping or parking the work | Tell the coordinator; it closes the bead (`--reason "dropped: …"`) or defers it, then resolves it, with `--force` only if nothing in the worktree is worth keeping |
 | Done, but you want the worktree a while longer | Ask the coordinator to hold off on `resolve` |
 | Finished worktrees have piled up | `quartermaster sweep`, then `quartermaster sweep --yes` to remove the safe ones |
@@ -157,6 +159,66 @@ Other cases:
 you pass `--force`, and it only ever removes a linked worktree on that bead's
 branch, never the main checkout. If the worker ran somewhere other than its
 own worktree, there's nothing to remove; close its pane.
+
+### Acceptance criteria and the verifier
+
+A PR gets an independent check before it counts: review and required checks.
+Two kinds of bead have no such check, so the worker that did the work would
+also be the one saying it is done: one with steps after its merge (a rollout,
+a deploy, a provision) and one with no PR at all (an audit, a design, an
+investigation). For those, quartermaster separates the builder from the
+evaluator.
+
+**Criteria at creation.** The coordinator ends every bead description it
+writes with 2-4 checkable acceptance criteria, a bullet list under a
+`## Acceptance` heading: what a reader could confirm from live evidence once
+the work is done. Workers do the same for beads they create for discovered
+work.
+
+**Close through quartermaster.** Workers and the coordinator close beads with
+`quartermaster close <bead> --reason "..." [--by worker|coordinator|TJ]`,
+never `bd close`. It runs the dial's check for closing (class 3), then sorts
+the bead:
+
+| Bead | What close does |
+|---|---|
+| Its notes link a PR, and nothing follows the merge | Closes it, as `bd close` always has. No verifier. |
+| Labelled `rolling-out`, or Actions runs noted, or no PR noted | Runs the verifier first; closes only on a pass, removing `rolling-out`. |
+| Closed `--by TJ` (or from the board) | Closes it: you are the evaluator. An in-scope bead gets a `VERIFY: skipped [TJ]` note. |
+
+**The verifier** is a separate headless agent quartermaster starts in the
+bead's repository, with a fresh context: the bead's title, description and
+criteria, and pointers to evidence (its PR and Actions run URLs, `RAN:` results
+you reported). It never sees the worker's notes or close reason, which are the
+claim it is checking. It is read-only by construction: the default `[verifier]
+command` is `claude -p` with no settings files or MCP servers, a read-only tool
+set (`Read`, `Grep`, `Glob`, `WebFetch` and an allowlist of read-only commands
+such as `gh pr view`, `gh run view`, `git log`, `bd show`, `kubectl get`) and
+`--permission-mode dontAsk`, which denies anything else instead of stopping at
+a prompt nobody is watching. It checks each criterion and ends with a verdict;
+quartermaster notes it on the bead (`VERIFY: pass|fail [verifier] ✓/✗ <criterion>
+— <evidence>; ...`) and appends it to `journal.jsonl`. Close trusts the
+journal, not the note, since a note is one `bd note` away for the worker being
+checked; a pass in the last hour lets a retried close skip a second run.
+
+- **Pass:** the bead closes as usual.
+- **Fail:** nothing closes. The failing criteria and their evidence print for
+  whoever ran close (the worker, or the coordinator, which passes them on) and
+  go in a note; the worker fixes them and runs close again.
+- **Bounded:** `max_rounds` fails in a row (default 2; a pass resets the
+  count) set the bead to `needs_me` with both sides' evidence, the verifier's
+  findings and the worker's close reason, and a `CLASS: 3` line. You decide:
+  `quartermaster close <bead> --by TJ --reason "..."`, or send the worker back.
+- **No `## Acceptance` section** (beads from before this): the verifier
+  derives 2-4 criteria from the description, checks those, and its note says
+  the criteria were derived. It doesn't block.
+- A verifier that fails to run (not installed, timed out) spends no round and
+  closes nothing; close reports the error.
+
+Two closes stay outside it: the ticker's own auto-close of stale beads
+(`verify`), which acts only on strong evidence it gathered itself, and your
+closes from the board. Like the dial, this is enforced in quartermaster's own
+commands; a worker can still run `bd close`, which its brief forbids.
 
 Workers save what the next worker should know with `bd remember` and move
 their Linear issues as they go, and the coordinator marks inbox items handled.
@@ -633,6 +695,11 @@ applies = 3               # class 6+ steps, per bead
 dispatches = 5            # coordinator dispatches, all beads
 # Read for one release: default = true is level = 7; enabled = false caps max at 2;
 # decide, install, merge or apply = false cap max at 1, 2, 3 or 5.
+
+[verifier]                # `quartermaster close`'s read-only check (see Acceptance criteria and the verifier)
+max_rounds = 2            # fails in a row before the bead goes to needs_me
+minutes = 15              # one run's time limit
+# command = ["claude", "-p", ...]   # prompt on stdin, VERDICT line on stdout; unset is a read-only headless Claude
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts
@@ -899,6 +966,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster resume [<bead>...] [--agent K]` | Restart exited workers in their worktrees, continuing their last conversation. |
 | `quartermaster stale [--days N] [--release]` | List claims with no agent, worktree or PR untouched N days (7); `--release` reopens them. |
 | `quartermaster verify [<bead>...] [--yes]` | Stale beads with evidence their work is done. Lists what a pass would do; `--yes` acts like the ticker (closes only at autonomy level 3+). |
+| `quartermaster close <bead> --reason R [--by WHO]` | Close a bead. One labelled `rolling-out`, with Actions runs noted, or with no PR must first pass the read-only [verifier](#acceptance-criteria-and-the-verifier) against its `## Acceptance` criteria; a fail leaves it open with the failing criteria, and `max_rounds` fails set it to `needs_me`. `--by TJ` skips the verifier. |
 | `quartermaster resolve <bead> [--force]` | Remove a finished bead's worktree, and its branch if the PR merged. |
 | `quartermaster sweep [--yes]` | List finished worktrees across every repo; `--yes` removes only the safe ones. |
 | `quartermaster report [--since 24h\|7d\|DATE]` | Markdown summary of what shipped, what's in flight and what needs you. |
