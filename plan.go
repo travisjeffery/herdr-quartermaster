@@ -248,22 +248,44 @@ func counts(pc PlanCheck) string {
 	return strings.Join(out, ", ")
 }
 
-// planEvent is one line of a plan's events.jsonl.
+// planEvent is one line of a plan's events.jsonl. checked and approved come
+// from plan check and approve; the executor (executor.go) adds intent and
+// outcome around every step, then one of the ends.
 type planEvent struct {
 	At    time.Time `json:"at"`
-	Kind  string    `json:"kind"` // checked, approved
+	Kind  string    `json:"kind"`
 	Class int       `json:"class"`
 	Level int       `json:"level"`
 	Pass  bool      `json:"pass,omitempty"`
-	// Why is what failed a check.
+	// Why is what failed a check, or why a plan ended as it did.
 	Why     string    `json:"why,omitempty"`
 	By      string    `json:"by,omitempty"` // dial or TJ
 	Expires time.Time `json:"expires,omitzero"`
+	// Step (1-based) and Attempt are an intent's or an outcome's.
+	Step    int `json:"step,omitempty"`
+	Attempt int `json:"attempt,omitempty"`
+	// Result is an outcome's: ok, failed or unknown (it may have happened).
+	Result   string `json:"result,omitempty"`
+	Evidence string `json:"evidence,omitempty"`
 }
 
 const (
 	planChecked  = "checked"
 	planApproved = "approved"
+	planIntent   = "intent"
+	planOutcome  = "outcome"
+	// The ends. done and failed are final; a plan stopped at needs_me or
+	// expired continues with plan resume once TJ approves it.
+	planDone    = "done"
+	planFailed  = "failed"
+	planNeedsMe = "needs_me"
+	planExpired = "expired"
+)
+
+const (
+	resultOK      = "ok"
+	resultFailed  = "failed"
+	resultUnknown = "unknown"
 )
 
 func plansDir() string             { return filepath.Join(stateDir(), "plans") }
@@ -370,7 +392,7 @@ func liveApproval(events []planEvent, now time.Time) (planEvent, bool) {
 	return planEvent{}, false
 }
 
-const planUsage = "usage: quartermaster plan check <file|-> | approve <digest> --by TJ [--for D] | status <digest>"
+const planUsage = "usage: quartermaster plan check <file|-> | approve <digest> --by TJ [--for D] | status <digest> | run <file|-> | resume <digest>"
 
 // planCmd is `quartermaster plan`. check classifies a plan, stores it under
 // its digest and approves it by the dial when its class is at most the
@@ -386,13 +408,7 @@ func planCmd(cfg Config, show func(string) (Bead, error), pos []string, by strin
 	now := time.Now()
 	switch pos[0] {
 	case "check":
-		var data []byte
-		var err error
-		if pos[1] == "-" {
-			data, err = io.ReadAll(stdin)
-		} else {
-			data, err = os.ReadFile(pos[1])
-		}
+		data, err := readPlanArg(pos[1], stdin)
 		if err != nil {
 			return err
 		}
@@ -415,7 +431,20 @@ func planCmd(cfg Config, show func(string) (Bead, error), pos []string, by strin
 			return err
 		}
 		fmt.Fprintf(w, "plan %s (%s, class %d) approved by TJ until %s\n", short(digest), p.Bead, class, e.Expires.Format("15:04"))
+		if events, _ := readPlanEvents(digest); unfinished(events) || slices.ContainsFunc(events, func(e planEvent) bool { return e.Kind == planNeedsMe || e.Kind == planExpired }) {
+			if s := planRunState(events, digest); !strings.HasPrefix(s, "done") && !strings.HasPrefix(s, "failed") {
+				fmt.Fprintf(w, "its run stopped; continue it: quartermaster plan resume %s\n", digest)
+			}
+		}
 		return appendJournal(journalRecord{At: now, Kind: journalCheck, Bead: p.Bead, Class: class, Action: "plan", Pass: true, Text: "plan " + short(digest) + " approved by TJ"})
+	case "run":
+		data, err := readPlanArg(pos[1], stdin)
+		if err != nil {
+			return err
+		}
+		return planRun(data, w)
+	case "resume":
+		return planResume(pos[1], w)
 	case "status":
 		p, digest, err := loadPlan(pos[1])
 		if err != nil {
@@ -434,6 +463,13 @@ func planCmd(cfg Config, show func(string) (Bead, error), pos []string, by strin
 		return nil
 	}
 	return errors.New(planUsage)
+}
+
+func readPlanArg(arg string, stdin io.Reader) ([]byte, error) {
+	if arg == "-" {
+		return io.ReadAll(stdin)
+	}
+	return os.ReadFile(arg)
 }
 
 // classifyPlan is p's class, the highest of its steps', on its bead.
@@ -532,8 +568,12 @@ func renderPlan(cfg Config, b Bead, p Plan, digest string) string {
 	return sb.String()
 }
 
-// planState is where a plan's approval stands at now.
+// planState is where a plan stands at now: how its run ended or where it
+// is, else where its approval stands.
 func planState(events []planEvent, digest string, now time.Time) string {
+	if s := planRunState(events, digest); s != "" {
+		return s
+	}
 	if a, ok := liveApproval(events, now); ok {
 		return fmt.Sprintf("approved by %s until %s", a.By, a.Expires.Format("15:04"))
 	}

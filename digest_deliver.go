@@ -229,12 +229,13 @@ const (
 
 func userUnitDir() string { return filepath.Join(configBase(), "systemd", "user") }
 
-// digestDropIn is the unit's machine-specific part: where bd's database is
-// and a PATH that finds bd, gh and notify-send, which a user service started
-// before the desktop session imports its environment would not have.
-func digestDropIn(beadsDir string, path []string) string {
+// unitDropIn is a user unit's machine-specific part, written by `quartermaster
+// <by>`: where bd's database is and a PATH that finds bd, gh and notify-send,
+// which a user service started before the desktop session imports its
+// environment would not have.
+func unitDropIn(by, beadsDir string, path []string) string {
 	var s strings.Builder
-	s.WriteString("# Written by `quartermaster digest install`; run it again to refresh.\n[Service]\n")
+	fmt.Fprintf(&s, "# Written by `quartermaster %s`; run it again to refresh.\n[Service]\n", by)
 	if beadsDir != "" {
 		fmt.Fprintf(&s, "Environment=%s\n", systemdQuote("BEADS_DIR="+beadsDir))
 	}
@@ -276,10 +277,8 @@ func miseShims() string {
 // digestInstall writes the digest's systemd user units and drop-in into dir
 // and starts the hourly timer through systemctl.
 func digestInstall(cfg Config, dir string, lookPath func(string) (string, error), systemctl func(args ...string) error) ([]string, error) {
-	home, _ := os.UserHomeDir()
-	bin := filepath.Join(home, ".local", "bin", toolName)
-	if _, err := os.Stat(bin); err != nil {
-		return nil, fmt.Errorf("%s is missing; run `quartermaster configure` first", bin)
+	if err := installedBinary(); err != nil {
+		return nil, err
 	}
 	var lines []string
 	for _, name := range []string{digestService, digestTimer} {
@@ -293,7 +292,7 @@ func digestInstall(cfg Config, dir string, lookPath func(string) (string, error)
 		lines = append(lines, "wrote "+filepath.Join(dir, name))
 	}
 	dropIn := filepath.Join(dir, digestService+".d", toolName+".conf")
-	if err := writeAtomic(dropIn, []byte(digestDropIn(cfg.BeadsDir, digestSearchPath(lookPath, miseShims())))); err != nil {
+	if err := writeAtomic(dropIn, []byte(unitDropIn("digest install", cfg.BeadsDir, digestSearchPath(lookPath, miseShims())))); err != nil {
 		return lines, err
 	}
 	lines = append(lines, "wrote "+dropIn)
@@ -325,6 +324,16 @@ func digestUninstall(dir string, systemctl func(args ...string) error) ([]string
 	}
 	_ = os.Remove(filepath.Join(dir, digestService+".d"))
 	return lines, systemctl("daemon-reload")
+}
+
+// installedBinary checks for the ~/.local/bin link the units run.
+func installedBinary() error {
+	home, _ := os.UserHomeDir()
+	bin := filepath.Join(home, ".local", "bin", toolName)
+	if _, err := os.Stat(bin); err != nil {
+		return fmt.Errorf("%s is missing; run `quartermaster configure` first", bin)
+	}
+	return nil
 }
 
 func systemctlUser(args ...string) error {

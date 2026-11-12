@@ -204,7 +204,14 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 		// the dispatch on record.
 		_ = bd.Note(id, fmt.Sprintf("%s dispatched %s%s — quartermaster dispatch", auto, kind, onHost(host)))
 	}
-	_ = hh.Run(opened.PaneID, cfg.agentEnvOn(host, kind))
+	env := cfg.agentEnvOn(host, kind)
+	if host == localHost {
+		// The bead's own socket to the executor, if one is running (S1:
+		// advisory routing).
+		execOpen(id)
+		env += execEnv(id)
+	}
+	_ = hh.Run(opened.PaneID, env)
 	where := opened.PaneID + onHost(host)
 	if err := hh.AgentStart(name, kind, opened.PaneID, cfg.agentArgs(kind, cfg.launchBypass(b, host))...); err != nil {
 		// A new worktree often opens on the agent's folder-trust prompt. The
@@ -274,6 +281,7 @@ func resolve(cfg Config, h Herdr, id string, force bool) (string, error) {
 		return "", fmt.Errorf("git worktree remove: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	done := []string{"removed worktree " + target.Path}
+	execClose(id)
 	if merged(repo, target.Branch) {
 		if exec.Command("git", "-C", repo, "branch", "-D", target.Branch).Run() == nil {
 			done = append(done, "deleted merged branch "+target.Branch)

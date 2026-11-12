@@ -1,0 +1,20 @@
+# Installed by `quartermaster executor install`, which also writes a drop-in
+# (quartermaster-executor.service.d/quartermaster.conf) with BEADS_DIR and PATH.
+[Unit]
+Description=quartermaster: executor for checked execution plans
+Documentation=https://github.com/travisjeffery/herdr-quartermaster/blob/main/docs/design/execution-plan.md
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/quartermaster executor run
+# A crash mid-step leaves an intent with no outcome; the next start probes it
+# and resumes the plan.
+Restart=on-failure
+RestartSec=2s
+# SIGTERM reaches the executor first: it stops between steps, or records a
+# step it interrupted as unknown for the next start to settle.
+KillMode=mixed
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=default.target
