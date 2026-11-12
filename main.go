@@ -71,6 +71,12 @@ Usage:
                                                        delete/replace in prod or stateful, 9 widespread or
                                                        unknown op); exit 0 only for no delete, replace or
                                                        unknown op (and, with --expect, exactly those changes)
+  quartermaster plan check <file|->                    classify an execution plan (JSON: bead, steps of op, target,
+                                                       args, pre) by its highest step, store it under its SHA-256
+                                                       digest and approve it for 1h if the bead's level reaches it;
+                                                       else exit nonzero naming the digest for TJ
+  quartermaster plan approve <digest> --by TJ [--for D] TJ's approval of a checked plan (default 1h)
+  quartermaster plan status <digest>                   a checked plan, its classes and where its approval stands
   quartermaster bd-proxy --host NAME [--bd PATH]       authorized_keys forced command: run a worker host's
                                                        bd request (SSH_ORIGINAL_COMMAND) on this machine's beads
   quartermaster version
@@ -183,7 +189,7 @@ func run(args []string) error {
 	actionFlag := fs.String("action", "", "autonomy check: the kind of step, from the action table (merge, apply, ...)")
 	classFlag := fs.Int("class", -1, "autonomy check: the step's impact class, 0-9; answer: the class of the command the answer releases")
 	targetFlag := fs.String("target", "", "autonomy check: the stack or environment an apply, deploy or rollout lands on")
-	forFlag := fs.Duration("for", 0, "autonomy level: how long a level 8 or 9 lease lasts (8 defaults to 4h)")
+	forFlag := fs.Duration("for", 0, "autonomy level: how long a level 8 or 9 lease lasts (8 defaults to 4h); plan approve: how long the approval lasts (default 1h)")
 	expect := fs.String("expect", "", "answer: the hash of the prompt being answered, from quartermaster prompt")
 	reasonFlag := fs.String("reason", "", "close: what shipped and how it was verified")
 	by := fs.String("by", "coordinator", "dispatch, focus, resume, stale --release, answer, close: who decided; anyone but TJ needs the bead's autonomy level to reach the step's class")
@@ -323,6 +329,8 @@ func run(args []string) error {
 	case "autonomy":
 		o := autonomyOpts{Class: *classFlag, Action: *actionFlag, Target: *targetFlag, For: *forFlag}
 		return autonomyCmd(cfg, liveAutonomyEnv(cfg, h.on(cfg.coordSocket())), pos, o, os.Stdout)
+	case "plan":
+		return planCmd(cfg, Beads{}.Show, pos, *by, *forFlag, os.Stdin, os.Stdout)
 	case "prompt":
 		if len(pos) != 1 {
 			return fmt.Errorf("usage: quartermaster prompt <bead>")
