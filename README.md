@@ -614,6 +614,8 @@ args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
 
 [agents.claude]           # per-kind environment, exported in the agent's pane before it starts
 env = ["CLAUDE_CODE_ENABLE_TELEMETRY=1", "OTEL_EXPORTER_OTLP_ENDPOINT=https://otel.example.com"]
+args = ["--model", "claude-opus-5-5[1m]"]                     # workers
+coordinator_args = ["--model", "claude-fable-5-2[1m]"]        # the coordinator, in place of args
 bypass_args = ["--dangerously-skip-permissions"]   # after args, only for a worker under a 9 lease (the default; [] turns it off)
 
 [autonomy]                # the 0-9 dial (docs/design/autonomy-dial.md; these are the defaults)
@@ -641,6 +643,11 @@ and replace that kind's defaults. Muse defaults to the args above:
 `:auto-review` permission profile, which keeps Muse's approval judge but lets
 it decide instead of waiting on a human nobody is watching. Set `args = []`
 for Muse's own defaults. Other kinds start with no extra args.
+
+`[agents.<kind>] coordinator_args` replace `args` when that kind runs the
+coordinator, and only then: to run the coordinator on a different model from
+the workers, say. Unset, the coordinator starts with `args` like a worker;
+`coordinator_args = []` starts it with none. The kind's `env` still applies.
 
 `[agents.<kind>] bypass_args` follow `args` only when a worker starts on this
 machine under a 9 lease; the coordinator never gets them. They default to

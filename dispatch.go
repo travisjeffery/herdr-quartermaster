@@ -355,7 +355,7 @@ func openCoordinator(cfg Config, h Herdr, kind string) (string, error) {
 	_ = tickerStart(cfg)
 	first := "Run `quartermaster context` and give me a short status: what needs me, what's in review, what's ready to start."
 	_ = h.Run(opened.PaneID, cfg.agentEnv(kind))
-	if err := h.AgentStart(cfg.CoordinatorName, kind, opened.PaneID, cfg.agentArgs(kind, false)...); err != nil {
+	if err := h.AgentStart(cfg.CoordinatorName, kind, opened.PaneID, cfg.coordinatorArgs(kind)...); err != nil {
 		if !strings.Contains(err.Error(), "agent_not_ready") {
 			return "", err
 		}
