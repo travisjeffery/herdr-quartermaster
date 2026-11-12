@@ -236,7 +236,6 @@ func resumeOne(cfg Config, h Herdr, r Resumable, kind string) (string, error) {
 		}
 	}
 	text := fmt.Sprintf("[quartermaster] You were resumed after your agent exited. Run `bd show %s` and continue.", id)
-	execOpen(id)
 	_ = h.Run(pane, cfg.agentEnv(kind)+execEnv(id))
 	if err := h.AgentStart(name, kind, pane, cfg.agentArgs(kind, cfg.launchBypass(r.Bead, localHost), resumeArgs[kind]...)...); err != nil {
 		if !strings.Contains(err.Error(), "agent_not_ready") {

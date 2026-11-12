@@ -478,6 +478,14 @@ func TestExecutorSockets(t *testing.T) {
 	if _, err := os.Stat(beadSocket("b-9")); err != nil {
 		t.Errorf("open: %v", err)
 	}
+	// dispatch exports the socket and puts the shims first on PATH.
+	env := execEnv("b-9")
+	if !strings.Contains(env, "QUARTERMASTER_EXEC_SOCKET="+shellQuote(beadSocket("b-9"))) || !strings.Contains(env, " PATH="+shellQuote(shimDir())+`:"$PATH"`) {
+		t.Errorf("execEnv = %q", env)
+	}
+	if !isShim(filepath.Join(shimDir(), "gh")) {
+		t.Error("execEnv wrote no gh shim")
+	}
 	execClose("b-9")
 	if _, err := os.Stat(beadSocket("b-9")); !os.IsNotExist(err) {
 		t.Errorf("close left %v", err)
@@ -491,6 +499,10 @@ func TestExecutorSockets(t *testing.T) {
 	}
 	if _, err := os.Stat(controlSocket()); !os.IsNotExist(err) {
 		t.Error("the control socket outlived the executor")
+	}
+	// With no executor, a worker gets neither the socket nor the shims.
+	if env := execEnv("b-9"); env != "" {
+		t.Errorf("execEnv with no executor = %q", env)
 	}
 }
 

@@ -3,8 +3,10 @@
 Status: **accepted** (2026-11-08); P1 in progress: the IR, digest and
 `quartermaster plan check|approve|status` are in (`plan.go`), and so is the
 executor daemon with per-bead sockets, durable steps and resume
-(`executor.go`, `plan run|resume`, `quartermaster executor`); the shims and
-the ops' runners are not. It designs the
+(`executor.go`, `plan run|resume`, `quartermaster executor`), and the `gh`
+shim with merges through the executor (`shim.go`, `merge.go`,
+`quartermaster run`); the IaC applies and their `pulumi`/`tofu` shims are
+not. It designs the
 "later, enforced" phase of [autonomy-dial.md](autonomy-dial.md) (the
 credential-holding executor). TJ chose the recommendation (R) for every
 decision; see "Decisions" at the end.

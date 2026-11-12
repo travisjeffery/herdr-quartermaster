@@ -121,7 +121,7 @@ func stepTag(digest string, i int) string { return fmt.Sprintf("qm:%s:%d", short
 // many attempts it has had.
 func stepState(events []planEvent, i int) (string, int) {
 	state, n := "", 0
-	for _, e := range events {
+	for _, e := range currentRun(events) {
 		if e.Step != i {
 			continue
 		}
@@ -143,9 +143,19 @@ func isEnd(kind string) bool {
 	return kind == planDone || kind == planFailed || kind == planNeedsMe || kind == planExpired
 }
 
-// lastRun is the latest intent, outcome or end in events.
+// currentRun is events from the latest rerun on: the run a resume continues.
+func currentRun(events []planEvent) []planEvent {
+	for i, e := range slices.Backward(events) {
+		if e.Kind == planRerun {
+			return events[i+1:]
+		}
+	}
+	return events
+}
+
+// lastRun is the latest intent, outcome or end in the current run.
 func lastRun(events []planEvent) (planEvent, bool) {
-	for _, e := range slices.Backward(events) {
+	for _, e := range slices.Backward(currentRun(events)) {
 		if e.Kind == planIntent || e.Kind == planOutcome || isEnd(e.Kind) {
 			return e, true
 		}
@@ -361,7 +371,7 @@ func (x *executor) runStep(ctx context.Context, digest string, p Plan, class, n 
 			return x.end(digest, p, class, kind, fmt.Sprintf("before step %d: %s", n, why))
 		}
 		if err := r.pre(ctx, s); err != nil {
-			if errors.Is(err, errStale) {
+			if errors.Is(err, errStale) || errors.Is(err, errUnmet) {
 				return x.end(digest, p, class, planFailed, fmt.Sprintf("step %d: %v", n, err))
 			}
 			return x.end(digest, p, class, planNeedsMe, fmt.Sprintf("step %d: preconditions: %v", n, err))
@@ -679,6 +689,14 @@ func (x *executor) submit(ctx context.Context, bead string, raw json.RawMessage)
 			return fail(err)
 		}
 	}
+	// A new submission of a plan whose last run failed is a new run: the
+	// failure was a precondition not met then (checks pending) or a refusal,
+	// and every op rechecks its preconditions before it acts.
+	if e, ok := lastRun(events); ok && e.Kind == planFailed {
+		if err := x.record(digest, p, planEvent{Kind: planRerun}); err != nil {
+			return fail(err)
+		}
+	}
 	kind, err := x.execPlan(ctx, digest)
 	if err != nil {
 		resp := fail(err)
@@ -693,7 +711,13 @@ func (x *executor) submit(ctx context.Context, bead string, raw json.RawMessage)
 // result is a plan's response after a run that ended as kind.
 func (x *executor) result(digest, kind string) execResponse {
 	events, _ := readPlanEvents(digest)
-	resp := execResponse{Digest: digest, State: kind, Output: planState(events, digest, x.now()) + "\n"}
+	var out strings.Builder
+	for _, e := range currentRun(events) {
+		if e.Kind == planOutcome && e.Result == resultOK && e.Evidence != "" {
+			fmt.Fprintf(&out, "step %d: %s\n", e.Step, e.Evidence)
+		}
+	}
+	resp := execResponse{Digest: digest, State: kind, Output: out.String() + planState(events, digest, x.now()) + "\n"}
 	if e, ok := lastRun(events); ok {
 		resp.Why = e.Why
 	}
@@ -711,19 +735,16 @@ func executorRun(cfg Config) error {
 	return newExecutor(cfg, log.New(os.Stderr, "", log.LstdFlags)).serve(ctx)
 }
 
-// execOpen asks a running executor for bead id's socket. Without one it does
-// nothing: routing through the executor is advisory (S1).
-func execOpen(id string) {
-	_, _ = execCall(controlSocket(), execRequest{Open: id}, 5*time.Second)
+// execOpen asks a running executor for bead id's socket, and says whether
+// one answered. Without one it does nothing: routing through the executor is
+// advisory (S1).
+func execOpen(id string) bool {
+	_, err := execCall(controlSocket(), execRequest{Open: id}, 5*time.Second)
+	return err == nil
 }
 
 func execClose(id string) {
 	_, _ = execCall(controlSocket(), execRequest{Close: id}, 5*time.Second)
-}
-
-// execEnv is the worker's export of its bead's socket, appended to agentEnv.
-func execEnv(id string) string {
-	return " QUARTERMASTER_EXEC_SOCKET=" + shellQuote(beadSocket(id))
 }
 
 // planRun is `plan run`: send the plan to its bead's socket

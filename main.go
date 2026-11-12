@@ -83,6 +83,9 @@ Usage:
   quartermaster plan resume <digest>                   the executor continues a stopped plan (after TJ approves it)
   quartermaster executor run|install|uninstall|status  the daemon that runs approved plans, durably; install sets
                                                        up its systemd user unit; it resumes unfinished plans on start
+  quartermaster run -- gh <args>                       what the gh shim on a worker's PATH runs: gh pr merge and gh api
+                                                       PUT .../pulls/N/merge go to the executor as a plan; other
+                                                       subcommands run the real gh
   quartermaster bd-proxy --host NAME [--bd PATH]       authorized_keys forced command: run a worker host's
                                                        bd request (SSH_ORIGINAL_COMMAND) on this machine's beads
   quartermaster version
@@ -144,6 +147,9 @@ func run(args []string) error {
 	case "help", "--help", "-h":
 		fmt.Print(usage)
 		return nil
+	case "run":
+		// What a shim runs; its argv is the tool's, so no flag parsing.
+		return runCmd(args[1:], liveShimRun())
 	}
 	// gate works without a config: the default [autonomy] has no prod
 	// patterns, so every target is production.
