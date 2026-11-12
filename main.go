@@ -76,7 +76,13 @@ Usage:
                                                        digest and approve it for 1h if the bead's level reaches it;
                                                        else exit nonzero naming the digest for TJ
   quartermaster plan approve <digest> --by TJ [--for D] TJ's approval of a checked plan (default 1h)
-  quartermaster plan status <digest>                   a checked plan, its classes and where its approval stands
+  quartermaster plan status <digest>                   a checked plan, its classes, its approval and its run
+  quartermaster plan run <file|->                      send a plan to the executor on its bead's socket
+                                                       ($QUARTERMASTER_EXEC_SOCKET): checked unless approved, then
+                                                       run step by step; exit 0 only when every step is done
+  quartermaster plan resume <digest>                   the executor continues a stopped plan (after TJ approves it)
+  quartermaster executor run|install|uninstall|status  the daemon that runs approved plans, durably; install sets
+                                                       up its systemd user unit; it resumes unfinished plans on start
   quartermaster bd-proxy --host NAME [--bd PATH]       authorized_keys forced command: run a worker host's
                                                        bd request (SSH_ORIGINAL_COMMAND) on this machine's beads
   quartermaster version
@@ -331,6 +337,11 @@ func run(args []string) error {
 		return autonomyCmd(cfg, liveAutonomyEnv(cfg, h.on(cfg.coordSocket())), pos, o, os.Stdout)
 	case "plan":
 		return planCmd(cfg, Beads{}.Show, pos, *by, *forFlag, os.Stdin, os.Stdout)
+	case "executor":
+		if len(pos) != 1 {
+			return errors.New("usage: quartermaster executor run|install|uninstall|status")
+		}
+		return executorCmd(cfg, pos[0], os.Stdout)
 	case "prompt":
 		if len(pos) != 1 {
 			return fmt.Errorf("usage: quartermaster prompt <bead>")
