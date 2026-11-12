@@ -562,7 +562,7 @@ func TestExecutorInstall(t *testing.T) {
 	}
 	unit, _ := os.ReadFile(filepath.Join(dir, executorService))
 	drop, _ := os.ReadFile(filepath.Join(dir, executorService+".d", toolName+".conf"))
-	if !strings.Contains(string(unit), "ExecStart=%h/.local/bin/quartermaster executor run") || !strings.Contains(string(drop), "BEADS_DIR=/home/me/.beads") || !strings.Contains(string(drop), "executor install") {
+	if !strings.Contains(string(unit), "ExecStart=%h/.local/bin/quartermaster executor run") || !strings.Contains(string(drop), "BEADS_DIR=/home/me/.beads") || !strings.Contains(string(drop), "executor install") || !strings.Contains(string(drop), "/opt/bin") {
 		t.Errorf("unit:\n%s\ndrop-in:\n%s", unit, drop)
 	}
 	if !slices.Equal(calls, []string{"daemon-reload", "enable --now " + executorService, "restart " + executorService}) {

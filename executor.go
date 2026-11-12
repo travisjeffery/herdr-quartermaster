@@ -61,8 +61,8 @@ var (
 )
 
 // opRunners are the ops the executor can carry out. An op with no runner
-// fails before its intent: it is checked and journaled, never run. Merges and
-// applies register theirs with their shims (P1, later PRs).
+// fails before its intent: it is checked and journaled, never run. Merges
+// (merge.go) and applies (iac.go) register theirs.
 var opRunners = map[string]opRunner{}
 
 // maxAttempts bounds the tries of one retry-safe step, the first included.
@@ -220,6 +220,9 @@ func (x *executor) record(digest string, p Plan, e planEvent) error {
 // the bead to needs_me with the question.
 func (x *executor) end(digest string, p Plan, class int, kind, why string) (string, error) {
 	err := x.record(digest, p, planEvent{Kind: kind, Class: class, Why: why})
+	if kind == planDone || kind == planFailed {
+		x.cleanupPlan(p)
+	}
 	if kind == planNeedsMe || kind == planExpired {
 		note := fmt.Sprintf("EXEC: plan %s stopped: %s. To go on: quartermaster plan approve %s --by TJ, then quartermaster plan resume %s\nCLASS: %d — plan %s", short(digest), why, digest, digest, class, short(digest))
 		if nerr := x.needsMe(p.Bead, note); nerr != nil {
@@ -556,6 +559,7 @@ func (x *executor) serve(ctx context.Context) error {
 			}
 		}
 	}
+	pruneIAC(x.now())
 	x.wg.Go(func() { x.resumeAll(ctx) })
 	x.wg.Go(func() { x.accept(ctx, ctl, "") })
 	x.logf("executor listening on %s", controlSocket())
@@ -670,6 +674,11 @@ func (x *executor) submit(ctx context.Context, bead string, raw json.RawMessage)
 	data, _ := json.Marshal(loose)
 	p, err := parsePlan(data)
 	if err != nil {
+		return fail(err)
+	}
+	// An apply is previewed here, from a clean checkout, before it is
+	// checked: its class comes from that preview.
+	if p, err = x.prepare(ctx, p); err != nil {
 		return fail(err)
 	}
 	digest, err := p.digest()
@@ -835,7 +844,7 @@ func executorInstall(cfg Config, dir string, lookPath func(string) (string, erro
 	}
 	lines = append(lines, "wrote "+filepath.Join(dir, executorService))
 	dropIn := filepath.Join(dir, executorService+".d", toolName+".conf")
-	if err := writeAtomic(dropIn, []byte(unitDropIn("executor install", cfg.BeadsDir, digestSearchPath(lookPath, miseShims())))); err != nil {
+	if err := writeAtomic(dropIn, []byte(unitDropIn("executor install", cfg.BeadsDir, executorSearchPath(lookPath)))); err != nil {
 		return lines, err
 	}
 	lines = append(lines, "wrote "+dropIn)
@@ -846,6 +855,18 @@ func executorInstall(cfg Config, dir string, lookPath func(string) (string, erro
 		lines = append(lines, "systemctl --user "+strings.Join(args, " "))
 	}
 	return lines, nil
+}
+
+// executorSearchPath is the digest's PATH plus the directories of the tools
+// the executor runs for applies, never the shims.
+func executorSearchPath(lookPath func(string) (string, error)) []string {
+	var dirs []string
+	for _, tool := range []string{"pulumi", "tofu"} {
+		if p, err := lookPath(tool); err == nil && !isShim(p) && filepath.Dir(p) != shimDir() {
+			dirs = append(dirs, filepath.Dir(p))
+		}
+	}
+	return dedupe(append(dirs, digestSearchPath(lookPath, miseShims())...))
 }
 
 func executorUninstall(dir string, systemctl func(args ...string) error) ([]string, error) {

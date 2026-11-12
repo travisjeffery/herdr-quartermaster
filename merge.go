@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -22,7 +23,7 @@ var errUnmet = errors.New("not ready")
 func init() {
 	opRunners["github.pr.merge"] = mergeRunner{gh: ghExec}
 	opRunners["github.pr.automerge"] = mergeRunner{auto: true, gh: ghExec}
-	opRunners[opOpaque] = opaqueRunner{run: ghExec}
+	opRunners[opOpaque] = opaqueRunner{run: ghExec, tool: toolExec}
 }
 
 type mergeRunner struct {
@@ -152,14 +153,16 @@ func (m mergeRunner) probe(ctx context.Context, s Step, _ string) (bool, bool, s
 // mid-step stops for TJ, and it is never retried.
 type opaqueRunner struct {
 	run func(ctx context.Context, dir string, args ...string) ([]byte, error)
+	// tool runs pulumi and tofu, with the env the shim carried.
+	tool func(ctx context.Context, c toolCmd) (toolOut, error)
 }
 
 func (opaqueRunner) retrySafe() bool { return false }
 
 func (opaqueRunner) argv(s Step) ([]string, error) {
 	var argv []string
-	if s.Args["tool"] != "gh" || json.Unmarshal([]byte(s.Args["argv"]), &argv) != nil || len(argv) == 0 {
-		return nil, fmt.Errorf("%w: the executor runs only an opaque gh step a shim lowered (args.tool and args.argv)", errUnmet)
+	if !slices.Contains(shimTools, s.Args["tool"]) || json.Unmarshal([]byte(s.Args["argv"]), &argv) != nil || len(argv) == 0 {
+		return nil, fmt.Errorf("%w: the executor runs only an opaque step a shim lowered (args.tool and args.argv)", errUnmet)
 	}
 	return argv, nil
 }
@@ -174,7 +177,16 @@ func (o opaqueRunner) do(ctx context.Context, s Step, _ string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	out, err := o.run(ctx, s.Args["dir"], argv...)
+	var out []byte
+	if tool := s.Args["tool"]; tool != "gh" {
+		res, terr := o.tool(ctx, toolCmd{Tool: tool, Args: argv, Dir: s.Args["dir"], Env: iacEnvList(Step{Target: tool + ":", Args: s.Args})})
+		out, err = res.Stdout, terr
+		if err == nil && res.Code != 0 {
+			err = fmt.Errorf("%s exited %d: %s", tool, res.Code, tail(string(res.Stderr), 1500))
+		}
+	} else {
+		out, err = o.run(ctx, s.Args["dir"], argv...)
+	}
 	if err != nil {
 		if ctx.Err() != nil && !errors.Is(err, errUnknown) {
 			err = fmt.Errorf("%w: %w", errUnknown, err)
