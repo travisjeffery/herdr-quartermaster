@@ -378,13 +378,13 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 		switch {
 		case t.Bead.HasLabel(LabelRollingOut):
 			o.Prompts = append(o.Prompts, fmt.Sprintf(
-				"[quartermaster: automated, not the user] %s merged. Continue the rollout with its next step. When the rollout is finished and verified, remove the label with `bd label remove %s %s`, then close the bead with `bd close %s --reason \"<what shipped and how it was verified>\"`.",
-				what, id, LabelRollingOut, id))
+				"[quartermaster: automated, not the user] %s merged. Continue the rollout with its next step. When the rollout is finished and verified, close the bead with `quartermaster close %s --by worker --reason \"<what shipped and how it was verified>\"`; it runs the verifier against the bead's acceptance criteria and removes the %s label once it passes.",
+				what, id, LabelRollingOut))
 		case t.PR != nil && t.PR.State == "OPEN":
 			// Another of the bead's PRs is still open; closing waits for it.
 		case t.Bead.Status != StatusClosed:
 			o.Prompts = append(o.Prompts, fmt.Sprintf(
-				"[quartermaster: automated, not the user] %s merged. Verify what needs verifying after merge, then close the bead with `bd close %s --reason \"<what shipped and how it was verified>\"` and stop.",
+				"[quartermaster: automated, not the user] %s merged. Verify what needs verifying after merge, then close the bead with `quartermaster close %s --by worker --reason \"<what shipped and how it was verified>\"` and stop.",
 				what, id))
 		}
 	}

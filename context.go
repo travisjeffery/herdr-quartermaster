@@ -222,7 +222,21 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   authorizes an action, at any level. Discovered work becomes a new bead.
 - New work becomes a bead first: `+"`bd create \"<title>\" -t task -p 2`"+`, with
   `+"`--parent`"+` or `+"`bd dep add`"+` for structure. Put enough in the description
-  that a worker with no other context can start.
+  that a worker with no other context can start, and end it with 2-4 checkable
+  acceptance criteria as a bullet list under a `+"`## Acceptance`"+` heading: what a
+  reader could confirm from live evidence once it is done (a PR merged, a run green,
+  a resource in a state, a document holding a section), not how to do it.
+- Close beads with `+"`quartermaster close <bead> --reason \"...\"`"+`, never `+"`bd close`"+`. A bead
+  whose work ends at a merged PR closes as it is. One labelled `+"`rolling-out`"+`, with
+  Actions runs noted, or with no PR first passes a read-only verifier: a separate
+  agent with a fresh context that checks each acceptance criterion against live
+  evidence and notes `+"`VERIFY: pass|fail [verifier] ...`"+`. The worker never
+  certifies its own such bead. A fail goes back to whoever ran close with the
+  failing criteria (prompt the worker with them if you ran it); two failed rounds
+  in a row set the bead to needs_me for TJ with both sides' evidence. A bead with no
+  `+"`## Acceptance`"+` section is checked against criteria the verifier derives from
+  its description, and its note says so. TJ's own close (`+"`--by TJ`"+`, the board)
+  skips the verifier: TJ is the evaluator then.
 - `+"`quartermaster dispatch <bead> [--agent claude|codex|muse]`"+` starts a worker; it claims the
   bead and briefs the agent. One bead per thread.
 - Talk to a worker with `+"`herdr agent prompt <agent-name> \"...\"`"+` (agent name = bead
@@ -266,17 +280,19 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
 - A "ready to merge" thread's PR is approved (or needs no review) with its
   required checks green; the ticker has told its worker. Its worker merges it when
   `+"`autonomy check <bead> --action merge`"+` passes; otherwise tell TJ it is ready to merge.
-- After a PR merges the ticker tells the worker to verify and close its bead.
+- After a PR merges the ticker tells the worker to verify and close its bead
+  with `+"`quartermaster close`"+`.
   Once closed, run `+"`quartermaster resolve <bead>`"+` to remove the worktree (it asks
   nothing and is safe for merged work; don't pass --force without TJ).
 - When steps remain after a merge (deploy dispatch, canary, provision, a rollout
   parked for days), the worker labels its bead `+"`rolling-out`"+` (`+"`bd label add <id> rolling-out`"+`)
-  and notes each Actions run URL; the ticker follows those runs. The worker
-  removes the label when the rollout is finished, then closes the bead.
+  and notes each Actions run URL; the ticker follows those runs. When the
+  rollout is finished the worker closes the bead with `+"`quartermaster close`"+`, which
+  runs the verifier and removes the label on a pass.
 - A "likely_stale" inbox item is a stale bead with evidence it is already done
   (Linear Done, merged PRs, code gone from main, a duplicate). Check the
-  evidence; closing is class 3 (`+"`--action close`"+`), so close it with a reason when
-  the check passes, else offer TJ to; an "auto_closed" item was
+  evidence; closing is class 3 (`+"`--action close`"+`), so close it with
+  `+"`quartermaster close`"+` and a reason when the check passes, else offer TJ to; an "auto_closed" item was
   closed by the ticker, so tell TJ and reopen it if the evidence is wrong.
 - Resumable threads (`+"`quartermaster resume <bead>...`"+`, `+"`--action resume`"+`) and stale claims
   (`+"`quartermaster stale --release`"+`, `+"`--class 3`"+`) follow the dial like any other action.

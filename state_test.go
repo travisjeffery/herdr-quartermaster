@@ -106,7 +106,7 @@ func TestNewReviewPromptsOnlyOnSamePR(t *testing.T) {
 func TestMergedAsksWorkerToClose(t *testing.T) {
 	th := thread(bead(StatusInProgress), agent("idle", 1), &PR{Number: 7, State: "MERGED"})
 	o := transition(th, Snapshot{PRNumber: 7, PRState: "OPEN"}, false, t0)
-	if !o.Notify || len(o.Prompts) != 1 || !strings.Contains(o.Prompts[0], "bd close backend-ab12") {
+	if !o.Notify || len(o.Prompts) != 1 || !strings.Contains(o.Prompts[0], "quartermaster close backend-ab12") {
 		t.Fatalf("got %+v", o)
 	}
 	if o := transition(th, Snapshot{PRNumber: 7, PRState: "MERGED"}, false, t0); len(o.Prompts) != 0 {
@@ -301,7 +301,7 @@ func TestMergedBehindAnotherOpenPR(t *testing.T) {
 	th = thread(bead(StatusInProgress), agent("idle", 1), &b)
 	th.Merged = []PR{a, b}
 	o = transition(th, prev, false, t0)
-	if len(o.Events) != 1 || o.Events[0].Summary != "PR #2 merged" || len(o.Prompts) != 1 || !strings.Contains(o.Prompts[0], "bd close") {
+	if len(o.Events) != 1 || o.Events[0].Summary != "PR #2 merged" || len(o.Prompts) != 1 || !strings.Contains(o.Prompts[0], "quartermaster close") {
 		t.Fatalf("got %+v", o)
 	}
 }
@@ -450,8 +450,8 @@ func TestRollingOutAfterMerge(t *testing.T) {
 		t.Fatalf("want one merge prompt, got %q", o.Prompts)
 	}
 	p := o.Prompts[0]
-	if !strings.Contains(p, "Continue the rollout") || !strings.Contains(p, "bd label remove backend-ab12 rolling-out") ||
-		!strings.Contains(p, "bd close backend-ab12") || strings.Contains(p, "and stop") {
+	if !strings.Contains(p, "Continue the rollout") || !strings.Contains(p, "removes the rolling-out label") ||
+		!strings.Contains(p, "quartermaster close backend-ab12") || strings.Contains(p, "bd close") || strings.Contains(p, "and stop") {
 		t.Fatalf("merge prompt should continue the rollout, not close now: %q", p)
 	}
 }

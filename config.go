@@ -79,6 +79,10 @@ type Config struct {
 	// docs/design/autonomy-dial.md. It also decides what auto_close and
 	// auto_resolve did: the ticker closes and resolves at level 3 and above.
 	Autonomy AutonomyConfig `toml:"autonomy"`
+
+	// Verifier checks in-scope beads before `quartermaster close` closes
+	// them; see accept.go.
+	Verifier VerifierConfig `toml:"verifier"`
 }
 
 type AgentConfig struct {

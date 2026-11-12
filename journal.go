@@ -28,6 +28,8 @@ const (
 	journalLease   = "lease"
 	journalBreaker = "breaker"
 	journalCheck   = "check"
+	// journalVerify is a verifier verdict on closing a bead (accept.go).
+	journalVerify = "verify"
 )
 
 type journalRecord struct {

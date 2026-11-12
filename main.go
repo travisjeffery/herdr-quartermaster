@@ -35,6 +35,9 @@ Usage:
   quartermaster inbox done [<bead>...]                 mark inbox items handled (all if none given)
   quartermaster resolve <bead> [--force]               remove a finished bead's worktree and merged branch;
                                                        --force also removes an open or dirty one
+  quartermaster close <bead> --reason R [--by WHO]     close a bead; one with steps after its merge (rolling-out,
+                                                       runs noted) or no PR must first pass a read-only verifier
+                                                       against its ## Acceptance criteria; TJ's close skips it
   quartermaster sweep [--yes]                          list finished linked worktrees; --yes removes the safe ones
   quartermaster resume [<bead>...] [--agent K]         restart exited agents in their worktrees, continuing
                 [--by WHO]                             their last conversation (all resumable if none given)
@@ -73,7 +76,7 @@ Usage:
   quartermaster version
 
 K is the agent kind: claude, codex or muse; dispatch and focus also take auto.
-WHO is who decided: coordinator (the default) or TJ. Without --by TJ, dispatch, resume,
+WHO is who decided: coordinator (the default), worker (close) or TJ. Without --by TJ, dispatch, resume,
 stale --release and answer refuse a step above the bead's autonomy level and note
 the ones they take ("AUTO: [coordinator L4 C3] ...").
 `
@@ -182,7 +185,8 @@ func run(args []string) error {
 	targetFlag := fs.String("target", "", "autonomy check: the stack or environment an apply, deploy or rollout lands on")
 	forFlag := fs.Duration("for", 0, "autonomy level: how long a level 8 or 9 lease lasts (8 defaults to 4h)")
 	expect := fs.String("expect", "", "answer: the hash of the prompt being answered, from quartermaster prompt")
-	by := fs.String("by", "coordinator", "dispatch, focus, resume, stale --release, answer: who decided; anyone but TJ needs the bead's autonomy level to reach the step's class")
+	reasonFlag := fs.String("reason", "", "close: what shipped and how it was verified")
+	by := fs.String("by", "coordinator", "dispatch, focus, resume, stale --release, answer, close: who decided; anyone but TJ needs the bead's autonomy level to reach the step's class")
 	pos, err := interspersed(fs, rest)
 	if err != nil {
 		return err
@@ -289,6 +293,11 @@ func run(args []string) error {
 			return err
 		}
 		fmt.Println(msg)
+	case "close":
+		if len(pos) != 1 {
+			return fmt.Errorf("usage: quartermaster close <bead> --reason \"...\" [--by worker|coordinator|TJ]")
+		}
+		return closeBead(cfg, liveCloseEnv(cfg), pos[0], *reasonFlag, *by, os.Stdout)
 	case "sweep":
 		return sweep(cfg, liveSweepEnv(h), *yes, os.Stdout)
 	case "resume":
