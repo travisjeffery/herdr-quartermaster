@@ -84,6 +84,9 @@ type Config struct {
 type AgentConfig struct {
 	// Args go to the agent's own CLI on every start, dispatch and resume.
 	Args []string `toml:"args"`
+	// CoordinatorArgs replace Args when this kind runs the coordinator, such
+	// as a different model from the workers'; unset uses Args.
+	CoordinatorArgs []string `toml:"coordinator_args"`
 	// BypassArgs follow Args when a worker starts under a 9 lease, turning
 	// the agent's own permission checks off; unset takes the kind's default,
 	// and [] keeps a kind off bypass. The coordinator never gets them.
@@ -167,6 +170,16 @@ func (c Config) agentArgs(kind string, bypass bool, extra ...string) []string {
 		args = append(args, c.bypassArgs(kind)...)
 	}
 	return append(args, extra...)
+}
+
+// coordinatorArgs is what a kind starts the coordinator with: its
+// coordinator_args if set, else what a worker of that kind starts with. The
+// coordinator never gets bypass args.
+func (c Config) coordinatorArgs(kind string) []string {
+	if a, ok := c.Agents[kind]; ok && a.CoordinatorArgs != nil {
+		return slices.Clone(a.CoordinatorArgs)
+	}
+	return c.agentArgs(kind, false)
 }
 
 func (c Config) bypassArgs(kind string) []string {

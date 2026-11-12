@@ -252,6 +252,44 @@ func TestAgentArgsFromConfigFile(t *testing.T) {
 	}
 }
 
+func TestCoordinatorArgs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("QUARTERMASTER_CONFIG_DIR", dir)
+	conf := "repo = \"/r\"\n[agents.claude]\nargs = [\"--model\", \"opus\"]\ncoordinator_args = [\"--model\", \"fable\"]\nenv = [\"X=1\"]\n[agents.codex]\nargs = [\"-m\", \"x\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(conf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.coordinatorArgs("claude"), " "); got != "--model fable" {
+		t.Errorf("claude coordinator args = %q", got)
+	}
+	// Workers keep the kind's args, with or without bypass.
+	if got := strings.Join(cfg.agentArgs("claude", false), " "); got != "--model opus" {
+		t.Errorf("claude worker args = %q", got)
+	}
+	if got := strings.Join(cfg.agentArgs("claude", true, "--continue"), " "); got != "--model opus --dangerously-skip-permissions --continue" {
+		t.Errorf("claude worker bypass args = %q", got)
+	}
+	// Without coordinator_args the coordinator starts like a worker, unbypassed.
+	if got := strings.Join(cfg.coordinatorArgs("codex"), " "); got != "-m x" {
+		t.Errorf("codex coordinator args = %q", got)
+	}
+	if got := strings.Join(cfg.coordinatorArgs("muse"), " "); got != "--disable-sandbox --permission-profile :auto-review" {
+		t.Errorf("muse coordinator args = %q", got)
+	}
+	// The kind's env still goes to the coordinator's pane.
+	if got := cfg.agentEnv("claude"); !strings.HasSuffix(got, " X='1'") {
+		t.Errorf("claude env = %q", got)
+	}
+	cfg.Agents["codex"] = AgentConfig{Args: []string{"-m", "x"}, CoordinatorArgs: []string{}}
+	if got := cfg.coordinatorArgs("codex"); len(got) != 0 {
+		t.Errorf("an empty coordinator_args starts the coordinator with none, got %q", got)
+	}
+}
+
 func TestAgentEnvExportsBeadsDirAndActor(t *testing.T) {
 	cfg := Config{BeadsDir: "/home/me/it's/.beads"}
 	want := `export BEADS_ACTOR='muse' BEADS_DIR='/home/me/it'\''s/.beads'`
