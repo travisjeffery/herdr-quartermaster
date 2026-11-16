@@ -33,7 +33,7 @@ meta      muse-wonder-full-1.0  1M       131.1K   yes       yes
 func fakePi(listing string, authCode int, calls *[]string) piRunner {
 	return func(args ...string) ([]byte, int, error) {
 		*calls = append(*calls, strings.Join(args, " "))
-		if args[0] == "--list-models" {
+		if slices.Contains(args, "--list-models") {
 			return []byte(listing), 0, nil
 		}
 		return nil, authCode, nil
@@ -64,6 +64,10 @@ func TestCheckPiModel(t *testing.T) {
 	err = checkPiModel(fakePi(piListing, 0, &calls), []string{"--model", "other/muse-wonder-full-1.0"}, "worker")
 	if err == nil {
 		t.Fatal("matched a model under the wrong provider")
+	}
+	calls = nil
+	if err := checkPiModel(fakePi(piListing, 0, &calls), []string{"-e", "/x/provider.ts", "--model", "meta/muse-wonder-full-1.0"}, "worker"); err != nil || calls[0] != "-e /x/provider.ts --list-models muse-wonder-full-1.0" {
+		t.Errorf("an extension's models aren't listed: %q, %v", calls, err)
 	}
 	for _, c := range calls {
 		if strings.Contains(c, "print-") {
@@ -102,12 +106,27 @@ func TestPiDefaults(t *testing.T) {
 	}
 }
 
-func TestPiResumesItsBeadSession(t *testing.T) {
-	if got := strings.Join(resumeArgsFor("pi", "backend-ab12.1"), " "); got != "--session-id backend-ab12.1" {
-		t.Errorf("pi resume args = %q", got)
+func TestPiLaunch(t *testing.T) {
+	dir := fakeTools(t)
+	fakePiTool(t, dir, "provider model\nanthropic claude-opus-5-5\n", 0)
+	cfg := defaultConfig()
+	args, err := cfg.piLaunch(localHost, cfg.agentArgs("pi", false), "worker", "backend-ab12.1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := strings.Join(resumeArgsFor("claude", "x"), " "); got != "--continue" {
-		t.Errorf("claude resume args = %q", got)
+	ext := filepath.Join(stateDir(), "pi", "quartermaster.ts")
+	if got, want := strings.Join(args, " "), "--approve --model anthropic/claude-opus-5-5 -e "+ext+" --session-id backend-ab12.1"; got != want {
+		t.Errorf("worker args = %q, want %q", got, want)
+	}
+	if b, err := os.ReadFile(ext); err != nil || string(b) != string(piExtension) {
+		t.Errorf("extension not written: %v", err)
+	}
+	// The coordinator gets the extension and no session id; a remote worker
+	// gets neither file nor -e.
+	fakePiTool(t, dir, "provider model\nanthropic claude-fable-5-2\n", 0)
+	args, err = cfg.piLaunch(localHost, cfg.coordinatorArgs("pi"), "coordinator", "")
+	if err != nil || slices.Contains(args, "--session-id") || !slices.Contains(args, ext) {
+		t.Errorf("coordinator args = %q, %v", args, err)
 	}
 }
 
@@ -128,7 +147,7 @@ func TestDispatchPi(t *testing.T) {
 	if _, err := dispatch(hostsConfig(), newHerdr(), "b-1", DispatchOpts{Kind: "pi"}); err != nil {
 		t.Fatal(err)
 	}
-	if !hasLine(logLines(t, dir, "herdr"), "agent start b-1 --kind pi --pane w9:p1 --timeout 30000 -- --approve --model anthropic/claude-opus-5-5 --session-id b-1") {
+	if !hasLine(logLines(t, dir, "herdr"), "agent start b-1 --kind pi --pane w9:p1 --timeout 30000 -- --approve --model anthropic/claude-opus-5-5 -e "+filepath.Join(stateDir(), "pi", "quartermaster.ts")+" --session-id b-1") {
 		t.Errorf("pi not started on the bead's session: %q", logLines(t, dir, "herdr"))
 	}
 }

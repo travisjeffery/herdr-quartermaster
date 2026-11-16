@@ -3,10 +3,58 @@ package main
 import (
 	"bufio"
 	"bytes"
+	_ "embed"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
+
+// piExtension is quartermaster's pi extension (pi/quartermaster.ts): the
+// bash hooks and subagent guard, the prompt-source entries the ticker reads,
+// and dialogs reported to herdr as blocked.
+//
+//go:embed pi/quartermaster.ts
+var piExtension []byte
+
+// piExtensionFile writes the embedded extension to the state directory, when
+// it differs, and returns its path. pi loads it with -e, so it needs no
+// install and always matches the binary.
+func piExtensionFile() (string, error) {
+	path := filepath.Join(stateDir(), "pi", "quartermaster.ts")
+	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, piExtension) {
+		return path, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, piExtension, 0o644); err != nil {
+		return "", err
+	}
+	return path, os.Rename(tmp, path)
+}
+
+// piLaunch checks a pi start's model and adds what every quartermaster pi
+// gets: the extension, on this machine, and the bead's session for a worker
+// (id "" for the coordinator).
+func (c Config) piLaunch(host string, args []string, role, id string) ([]string, error) {
+	if err := checkPiModel(c.piOn(host), args, role); err != nil {
+		return nil, err
+	}
+	if host == localHost {
+		ext, err := piExtensionFile()
+		if err != nil {
+			return nil, fmt.Errorf("pi extension: %w", err)
+		}
+		args = append(args, "-e", ext)
+	}
+	if id != "" {
+		args = append(args, piSessionArgs(id)...)
+	}
+	return args, nil
+}
 
 // Default pi models: workers on Opus 5.5, the coordinator on Fable 5.2.
 // [agents.pi] args and coordinator_args replace them. pi's built-in catalog
@@ -68,7 +116,7 @@ func checkPiModel(run piRunner, args []string, role string) error {
 	if !ok {
 		provider, id = "", model
 	}
-	out, _, err := run("--list-models", id)
+	out, _, err := run(append(piExtensionArgs(args), "--list-models", id)...)
 	if err != nil {
 		return fmt.Errorf("pi: %w (is pi installed?)", err)
 	}
@@ -82,6 +130,21 @@ func checkPiModel(run piRunner, args []string, role string) error {
 		}
 	}
 	return fmt.Errorf("pi has no model %s for the %s: add it to ~/.pi/agent/models.json (docs/pi.md), or %s", model, role, fix)
+}
+
+// piExtensionArgs are the extensions a pi command line loads, which can
+// register providers and models of their own.
+func piExtensionArgs(args []string) []string {
+	var out []string
+	for i, a := range args {
+		switch {
+		case (a == "-e" || a == "--extension") && i+1 < len(args):
+			out = append(out, "-e", args[i+1])
+		case strings.HasPrefix(a, "--extension="):
+			out = append(out, "-e", strings.TrimPrefix(a, "--extension="))
+		}
+	}
+	return out
 }
 
 // piListed reports whether `pi --list-models` output has a row for the
