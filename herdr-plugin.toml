@@ -53,6 +53,12 @@ title = "Quartermaster: focus or start the bead on the clipboard (Muse Code)"
 contexts = ["global", "workspace"]
 command = ["bin/quartermaster", "focus", "--agent", "muse"]
 
+[[actions]]
+id = "focus-clipboard-pi"
+title = "Quartermaster: focus or start the bead on the clipboard (pi)"
+contexts = ["global", "workspace"]
+command = ["bin/quartermaster", "focus", "--agent", "pi"]
+
 [[panes]]
 id = "board"
 title = "Quartermaster"

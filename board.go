@@ -737,8 +737,8 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 			return []cmd{func() msg { return doneMsg{err: m.env.focus(name), quit: true} }}
 		}
 		m.dispatchAsk(r, "")
-	case "c", "x", "m":
-		m.dispatchAsk(r, map[string]string{"c": "claude", "x": "codex", "m": "muse"}[k])
+	case "c", "x", "m", "i":
+		m.dispatchAsk(r, map[string]string{"c": "claude", "x": "codex", "m": "muse", "i": "pi"}[k])
 	case "R":
 		if r.agent != nil {
 			m.status = id + " already has an agent (" + r.agent.Name + ")"

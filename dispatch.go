@@ -13,7 +13,7 @@ import (
 
 // kinds are the agents quartermaster starts, by their Herdr kind, which is
 // also the executable and the actor a worker claims its bead as.
-var kinds = []string{"claude", "codex", "muse"}
+var kinds = []string{"claude", "codex", "muse", "pi"}
 
 var validKinds = func() map[string]bool {
 	m := map[string]bool{}
@@ -23,7 +23,7 @@ var validKinds = func() map[string]bool {
 	return m
 }()
 
-// kindList names the kinds for messages: "claude, codex or muse".
+// kindList names the kinds for messages: "claude, codex, muse or pi".
 func kindList(extra ...string) string {
 	all := append(slices.Clone(kinds), extra...)
 	return strings.Join(all[:len(all)-1], ", ") + " or " + all[len(all)-1]
@@ -171,6 +171,15 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	if err, ok := unreachable[host]; ok && host != localHost {
 		return "", fmt.Errorf("%s: unreachable: %w", host, err)
 	}
+	args := cfg.agentArgs(kind, cfg.launchBypass(b, host))
+	if kind == "pi" {
+		// Before the worktree and the claim, so a model pi can't run leaves
+		// nothing behind.
+		if err := checkPiModel(cfg.piOn(host), args, "worker"); err != nil {
+			return "", err
+		}
+		args = append(args, piSessionArgs(id)...)
+	}
 	hh := cfg.herdrOn(h, host)
 	repo, _ := cfg.repoOn(host, b)
 	if host != localHost {
@@ -212,7 +221,7 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	}
 	_ = hh.Run(opened.PaneID, env)
 	where := opened.PaneID + onHost(host)
-	if err := hh.AgentStart(name, kind, opened.PaneID, cfg.agentArgs(kind, cfg.launchBypass(b, host))...); err != nil {
+	if err := hh.AgentStart(name, kind, opened.PaneID, args...); err != nil {
 		// A new worktree often opens on the agent's folder-trust prompt. The
 		// ticker delivers the brief once someone answers it.
 		if !strings.Contains(err.Error(), "agent_not_ready") {
@@ -372,8 +381,14 @@ func openCoordinator(cfg Config, h Herdr, kind string) (string, error) {
 	}
 	_ = tickerStart(cfg)
 	first := "Run `quartermaster context` and give me a short status: what needs me, what's in review, what's ready to start."
+	args := cfg.coordinatorArgs(kind)
+	if kind == "pi" {
+		if err := checkPiModel(cfg.piOn(localHost), args, "coordinator"); err != nil {
+			return "", err
+		}
+	}
 	_ = h.Run(opened.PaneID, cfg.agentEnv(kind))
-	if err := h.AgentStart(cfg.CoordinatorName, kind, opened.PaneID, cfg.coordinatorArgs(kind)...); err != nil {
+	if err := h.AgentStart(cfg.CoordinatorName, kind, opened.PaneID, args...); err != nil {
 		if !strings.Contains(err.Error(), "agent_not_ready") {
 			return "", err
 		}

@@ -9,11 +9,21 @@ import (
 )
 
 // resumeArgs continue an agent's most recent conversation in its working
-// directory, which is the bead's own worktree.
+// directory, which is the bead's own worktree. pi has none here: it reopens
+// the bead's own session by id (resumeArgsFor).
 var resumeArgs = map[string][]string{
 	"claude": {"--continue"},
 	"codex":  {"resume", "--last"},
 	"muse":   {"resume", "--last"},
+	"pi":     nil,
+}
+
+// resumeArgsFor is what kind resumes bead id's conversation with.
+func resumeArgsFor(kind, id string) []string {
+	if kind == "pi" {
+		return piSessionArgs(id)
+	}
+	return resumeArgs[kind]
 }
 
 type worktreeLister func(repo string) ([]Worktree, error)
@@ -237,7 +247,13 @@ func resumeOne(cfg Config, h Herdr, r Resumable, kind string) (string, error) {
 	}
 	text := fmt.Sprintf("[quartermaster] You were resumed after your agent exited. Run `bd show %s` and continue.", id)
 	_ = h.Run(pane, cfg.agentEnv(kind)+execEnv(id))
-	if err := h.AgentStart(name, kind, pane, cfg.agentArgs(kind, cfg.launchBypass(r.Bead, localHost), resumeArgs[kind]...)...); err != nil {
+	args := cfg.agentArgs(kind, cfg.launchBypass(r.Bead, localHost), resumeArgsFor(kind, id)...)
+	if kind == "pi" {
+		if err := checkPiModel(cfg.piOn(localHost), args, "worker"); err != nil {
+			return "", err
+		}
+	}
+	if err := h.AgentStart(name, kind, pane, args...); err != nil {
 		if !strings.Contains(err.Error(), "agent_not_ready") {
 			return "", fmt.Errorf("start %s in %s: %w", kind, pane, err)
 		}

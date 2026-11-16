@@ -321,7 +321,7 @@ func helpLines(gc bool) []string {
 		"  r         refresh now    T    tidy view     q     quit",
 		"",
 		"  ↵         focus the agent, or start one (confirms)",
-		"  c x m     start claude, codex or muse (confirms)",
+		"  c x m i   start claude, codex, muse or pi (confirms)",
 		"  R         resume an exited agent in its worktree (confirms)",
 		"  a         add a note                        A   answer an idle worker (confirms)",
 		"  n         toggle the next label             S   set status",
