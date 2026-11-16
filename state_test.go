@@ -697,6 +697,31 @@ func TestReadyToMergeOncePerHead(t *testing.T) {
 	}
 }
 
+func TestReadyToMergeWaitsForTheNeedsMeAnswer(t *testing.T) {
+	// The worker left auto-merge off and asked TJ: ready isn't news yet.
+	held := thread(bead(StatusNeedsMe), agent("idle", 1), readyPR())
+	prev := Snapshot{Group: GroupNeedsYou, AgentStatus: "idle", AgentSeq: 1, PRNumber: 7, PRState: "OPEN", ReviewsSplit: true, NeedsMe: true}
+	o := transition(held, prev, false, t0)
+	for _, e := range o.Events {
+		if e.Kind == EventReady {
+			t.Fatalf("announced ready to merge while needs_me: %+v", o)
+		}
+	}
+	if len(o.Prompts) != 0 {
+		t.Fatalf("queued a ready prompt while needs_me: %+v", o.Prompts)
+	}
+	prev = snapshot(held, prev, t0)
+	if prev.ReadyKey != "" {
+		t.Fatalf("recorded ReadyKey %q while needs_me", prev.ReadyKey)
+	}
+	// Once answered, the same head is announced.
+	answered := thread(bead(StatusInProgress), agent("idle", 2), readyPR())
+	o = transition(answered, prev, false, t0.Add(time.Minute))
+	if !slices.ContainsFunc(o.Events, func(e Event) bool { return e.Kind == EventReady }) || len(o.Prompts) != 1 {
+		t.Fatalf("want ready_to_merge and its prompt once answered, got %+v", o)
+	}
+}
+
 func TestReadyToMergeFirstSightIsBaseline(t *testing.T) {
 	th := thread(bead(StatusInProgress), agent("idle", 1), readyPR())
 	if o := transition(th, Snapshot{}, true, t0); len(o.Events) != 0 {
