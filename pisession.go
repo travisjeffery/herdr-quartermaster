@@ -20,8 +20,10 @@ import (
 
 // piInputType is the custom entry the quartermaster pi extension
 // (pi/quartermaster.ts) appends for every prompt, carrying where it came from:
-// "interactive" (typed into the TUI, as herdr agent prompt does), "rpc", or
-// "extension" (pi.sendUserMessage). Custom entries never reach the model.
+// "interactive" (typed into the TUI, as herdr agent prompt does), "rpc",
+// "quartermaster" (sent over the control socket, picontrol.go), or
+// "extension" (pi.sendUserMessage from any other extension). Custom entries
+// never reach the model.
 const piInputType = "quartermaster.input"
 
 // piSessionDir is where pi keeps sessions: PI_CODING_AGENT_SESSION_DIR, else
@@ -77,9 +79,10 @@ type piEntry struct {
 	} `json:"message"`
 }
 
-// piPromptedSince is promptedSince for a pi session: a prompt typed or sent
-// over RPC after since, rather than pi waking on its own (an extension's
-// message or pi.sendUserMessage). When the quartermaster extension's input
+// piPromptedSince is promptedSince for a pi session: a prompt typed, sent
+// over RPC or sent by quartermaster over the control socket after since,
+// rather than pi waking on its own (an extension's message or
+// pi.sendUserMessage). When the quartermaster extension's input
 // entries are there they decide; a session without them falls back to any
 // user message after since, which counts an extension's sendUserMessage as a
 // prompt, as the old behaviour did.

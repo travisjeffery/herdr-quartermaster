@@ -14,6 +14,8 @@ steps only you can do. Checked against pi 1.5.2 and herdr 0.9.5.
 | Models | Workers `anthropic/claude-opus-5-5`, coordinator `anthropic/claude-fable-5-2`; `[agents.pi] args` and `coordinator_args` replace them. |
 | Model check | Before starting pi, quartermaster runs `pi --list-models <id>` (with the args' `-e` extensions) and, if the model isn't listed, `pi auth check --provider <p>`, and refuses with the fix. Neither prints a credential. Dispatch checks before it creates the worktree or claims the bead. |
 | Brief | Typed in with `herdr agent prompt`, as for Claude. pi has no SessionStart hook; the brief already says to run `bd prime` first. |
+| Prompts after the brief | Over the worker's control socket (below): ticker messages, queued briefs and autonomy notices, and `quartermaster tell <bead> "..."`. A prompt sent during a turn queues behind it. Without the socket they are typed into the pane. |
+| Ask-gates | A guarded command on `[agents.pi] ask` waits for `quartermaster answer` instead of blocking (below). The list starts empty. |
 | Sessions | A worker runs `pi --session-id <bead>`, so its session file is `~/.pi/agent/sessions/--<worktree>--/<time>_<bead>.jsonl`. Dispatch and resume open that session by id. |
 | needs_me wake check | Read from the session file: a prompt after the worker settled resumes the bead, pi waking itself doesn't (below). |
 | Finished turns | The id of the session's last turn-ending assistant entry is kept in the ticker's snapshot; a new id is a finished turn even if no pass saw the agent working, and an `error` or `aborted` turn is reported as `stopped on error: <message>`. |
@@ -32,14 +34,19 @@ RPC mode (`pi --mode rpc`) would replace the TUI that the worker's herdr pane
 shows and that herdr's state extension reports from, and would need a client
 holding pi's stdin and stdout. The file is pi's own durable record, readable
 whether pi is running or not. That is the smallest thing that is correct.
+What RPC would add, a structured way to send a prompt and answer a question,
+comes from the control socket instead (below), and the pane stays the view.
 
 - **Wake check.** pi's user messages carry no origin, so quartermaster's
   extension appends a `quartermaster.input` custom entry for each prompt with
   pi's input source: `interactive` (typed, which is how `herdr agent prompt`
-  delivers), `rpc`, or `extension` (`pi.sendUserMessage`). Custom entries
+  delivers), `rpc`, `quartermaster` (sent over the control socket) or
+  `extension` (`pi.sendUserMessage` from any other extension). Custom entries
   never reach the model. A needs_me worker that starts working again resumes
-  the bead only if an `interactive` or `rpc` entry falls after it settled.
-  Without those entries, any user message after it settled counts.
+  the bead only if an `interactive`, `rpc` or `quartermaster` entry falls
+  after it settled. Without those entries, any user message after it settled
+  counts. The entry is written when pi accepts the prompt, which for a prompt
+  queued behind a turn is before the user message itself.
 - **Turns.** The ticker reads the last 1 MiB of the file each pass for the last
   assistant message whose `stopReason` is `stop`, `length`, `error` or
   `aborted`.
@@ -47,13 +54,12 @@ whether pi is running or not. That is the smallest thing that is correct.
   or creates it, so a resume after the pane or the machine went away picks up
   the bead's own conversation, not "the most recent session in this folder".
 
-## Approvals: none, by design
+## Approvals: guards that block, and ask only when told to
 
 pi asks before nothing: its `docs/security.md` says it "does not ask for
 approval before every tool call", and that the only boundary is what the
-process can reach. A quartermaster worker is unattended, so a prompt would
-only stall it. pi workers therefore run without interactive approvals, and
-`quartermaster prompt` and `answer` have nothing to answer for them.
+process can reach. A quartermaster worker is unattended, so a prompt in its
+pane would only stall it. pi workers therefore run without pane approvals.
 What replaces them is quartermaster's extension, `pi/quartermaster.ts`
 (embedded in the binary, written to `<state dir>/pi/quartermaster.ts`, and
 passed with `-e`):
@@ -61,9 +67,27 @@ passed with `-e`):
 - **Bash hooks.** It runs the PreToolUse hooks Claude Code workers run
   (`~/.claude/hooks/block-dangerous-bash.py` and `rm-guard.sh`, or the
   colon-separated `QUARTERMASTER_PI_BASH_HOOKS`) with the JSON they expect.
-  Exit 2, `deny` or `ask` blocks the call. The reason it returns tells the
-  worker to hand the step over as it would a Claude Code denial: a `RUN:`
-  note, `needs_me`, and stop.
+  Exit 2 or `deny` blocks the call. So does `ask`, unless the command is on
+  the ask list (next). The reason it returns tells the worker to hand the
+  step over as it would a Claude Code denial: a `RUN:` note, `needs_me`, and
+  stop.
+- **Ask-gates.** A command a hook would ask about, which matches a pattern in
+  `[agents.pi] ask`, waits for quartermaster instead. The worker shows as
+  blocked; the inbox gets "at an approval prompt [hash]" with the command,
+  the hook's reason and two options, `1 Yes, run it` and `2 No, block it`;
+  `quartermaster prompt <bead>` shows it and
+  `quartermaster answer <bead> <n> --expect <hash> [--class N]` answers it,
+  with the same autonomy check as a Claude prompt. The session records
+  `quartermaster.ask` and `quartermaster.answer` custom entries. With no
+  answer within `ask_timeout` (default 10m), or with no control socket, it
+  blocks with the usual hand-off. The list starts empty, so nothing asks
+  until you add to it; a hook's `deny` is never asked about.
+
+  ```toml
+  [agents.pi]
+  ask = ['^git push --force(-with-lease)? origin tj/']  # JavaScript regexps on the bash command
+  ask_timeout = "15m"
+  ```
 - **Subagents.** A `subagent` call is allowed only when every agent it names
   is read-only by its definition (`tools:` limited to read, grep, find, ls).
   A pi subagent is a separate pi process without this extension.
@@ -71,6 +95,29 @@ passed with `-e`):
   thread shows as waiting on you; answer it in the pane.
 - **Compaction.** For a beads worker, `bd prime` goes back into context after
   a compaction, like Claude Code's PreCompact hook.
+
+### The control socket
+
+quartermaster starts a local pi worker with
+`--quartermaster-control <state dir>/pi/control/<bead>.sock`. The extension
+listens there and writes a random token to `<bead>.sock.token`; both are mode
+600 in a 700 directory, and every request must carry the token. quartermaster
+is always the client, one JSON line each way (`picontrol.go`):
+
+| op | does |
+|---|---|
+| `prompt` | `pi.sendUserMessage`: at once when idle, else as a follow-up that pi delivers when the running turn ends. Recorded as source `quartermaster`. |
+| `ask` | the ask waiting on an answer, or none |
+| `answer` | answers it by id with an option number |
+| `ping` | whether pi is idle |
+
+`<state dir>/pi/control/config.json` carries the ask list and timeout,
+written from `[agents.pi]` on each pi start and read on each ask. The token
+keeps out other users and stale clients; it does not keep out the worker,
+which runs as the same user, any more than a pane does. An answer still goes
+through `quartermaster answer`'s autonomy check. If the socket is missing or
+doesn't answer, quartermaster types into the pane and the guards block, as
+before. The coordinator gets no socket.
 
 What this does not replace is Claude Code's auto-mode classifier, which judges
 intent. The hooks match known shapes (recursive deletes outside the worktree,
@@ -133,7 +180,8 @@ MCP.
 
 - **The close verifier** runs `claude -p`, on purpose.
 - **Approval prompts.** `quartermaster prompt` and `answer` parse Claude Code
-  and Codex screens. A pi dialog shows the thread as blocked with no hash to
+  and Codex screens, and read a pi worker's ask-gates from its control
+  socket. A pi extension dialog shows the thread as blocked with no hash to
   answer; answer it in the pane.
 - **The auto-mode classifier** has no pi equivalent (see above).
 - **The brief's last line** names Claude Code permission prompts and the
@@ -145,10 +193,12 @@ MCP.
   no process) blocks dispatch and resume for every kind, pi included; that is
   a separate fix. A pi worker that quits leaves no such record.
 - **Remote hosts.** The model check runs on the host, but the extension is a
-  local file, so a remote pi worker starts without it.
+  local file, so a remote pi worker starts without it, and without a control
+  socket.
 - **`worker_agent = "auto"`** never picks pi: it records no usage reading.
-- **Typed ticker messages** read as `interactive`, so a ticker prompt typed
-  into a needs_me worker resumes it, as it does for Claude.
+- **Ticker messages** read as `interactive` when typed and `quartermaster`
+  over the socket; either way a ticker prompt to a needs_me worker resumes
+  it, as it does for Claude. The ticker holds them while a bead is needs_me.
 - **Claude Code only:** global `~/.claude/CLAUDE.md`, skills under
   `~/.claude/skills`, the memory-recall SessionStart hook, the hosted
   connectors, and tools such as Artifact, ScheduleWakeup, Monitor and the

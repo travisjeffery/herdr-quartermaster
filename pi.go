@@ -49,6 +49,14 @@ func (c Config) piLaunch(host string, args []string, role, id string) ([]string,
 			return nil, fmt.Errorf("pi extension: %w", err)
 		}
 		args = append(args, "-e", ext)
+		// A worker listens for quartermaster on its control socket
+		// (picontrol.go); the coordinator doesn't.
+		if id != "" {
+			if err := c.writePiControlConfig(); err != nil {
+				return nil, fmt.Errorf("pi control: %w", err)
+			}
+			args = append(args, "--quartermaster-control", piControlSocket(agentName(id)))
+		}
 	}
 	if id != "" {
 		args = append(args, piSessionArgs(id)...)

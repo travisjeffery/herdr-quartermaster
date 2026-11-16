@@ -584,6 +584,13 @@ anthropic/claude-fable-5-2`; set `args` and `coordinator_args` to change either.
 A worker runs in the pi session named for its bead (`--session-id <bead>`), so
 dispatch and resume reopen that conversation by id.
 
+A local pi worker also listens on a control socket for quartermaster
+(`--quartermaster-control`): prompts after the brief go there and queue
+behind a running turn instead of being typed into the pane, and a guarded
+command listed in `[agents.pi] ask` waits for `quartermaster answer` instead
+of blocking. The list starts empty. Without the socket, everything goes
+through the pane as before.
+
 Before it starts pi, quartermaster checks the model is one pi can run (`pi
 --list-models`, then `pi auth check --provider`; neither prints a credential)
 and refuses with what to do: sign in with `pi auth login anthropic`, or add a
@@ -704,6 +711,8 @@ args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
 [agents.pi]               # pi's defaults: Opus 5.5 workers, a Fable 5.2 coordinator
 args = ["--approve", "--model", "anthropic/claude-opus-5-5"]
 coordinator_args = ["--approve", "--model", "anthropic/claude-fable-5-2"]
+ask = []                  # bash commands (JS regexps) a hook would ask about that wait for `quartermaster answer` instead of blocking
+ask_timeout = "10m"       # how long such a command waits before it blocks anyway
 
 [agents.claude]           # per-kind environment, exported in the agent's pane before it starts
 env = ["CLAUDE_CODE_ENABLE_TELEMETRY=1", "OTEL_EXPORTER_OTLP_ENDPOINT=https://otel.example.com"]
@@ -1014,7 +1023,8 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster autonomy check <bead> [--class N \| --action A [--target T]]` | Exit 0 only if the bead may take a step of that class without you right now and its `[autonomy.budget]` isn't spent; a worker runs it before each one. Three failed checks in a row, or the same `AUTO:` step three times running, trip the circuit breaker: the bead is capped at 2 with an inbox item until you set its level. Checks, `AUTO:` steps, prompt answers, level changes, lease expiries and breaker trips go to `journal.jsonl` in the state dir. |
 | `quartermaster autonomy on\|off` | Off caps every bead at level 2 until on. |
 | `quartermaster autonomy grant\|revoke <bead>` | Level 7 or 2 on a bead (the old `autonomous`/`supervised` labels, still read as those levels). |
-| `quartermaster prompt <bead>` | The approval prompt the bead's worker is showing: its text, options, auto-deny countdown, and a hash that names it. Exits 1 when none is showing. |
+| `quartermaster tell <bead> <text>` | Prompt the bead's worker. A local pi worker gets it over its control socket, queued behind a running turn; any other worker gets it typed into its pane, and only when it is at rest. |
+| `quartermaster prompt <bead>` | The approval prompt the bead's worker is showing: its text, options, auto-deny countdown, and a hash that names it; for a pi worker, the ask-gate waiting on its control socket. Exits 1 when none is showing. |
 | `quartermaster answer <bead> <choice> --expect HASH [--by WHO]` | Answer that prompt with an option number or label, only if it is still the prompt with `HASH`. Waits for it to clear and notes the answer on the bead, crediting `WHO` (default `coordinator`). |
 | `quartermaster gate plan <file\|-> [--expect op=N,...] [--target T]` | Print the plan's impact class on target `T`: 6 or 7 by the `[autonomy] prod` patterns (no target or no patterns means production), 8 for a delete or replace in production or of a stateful resource anywhere, 9 past `widespread` deletes or for an unknown operation. Exit 0 only if a `pulumi preview --json` or `tofu show -json` plan creates, updates or reads, with no delete, replace or unknown operation, and with `--expect`, exactly those counts. A plan that doesn't parse, or differs from `--expect`, gets no class and fails. |
 | `quartermaster plan check <file\|->` | Classify an execution plan ([design](docs/design/execution-plan.md)): JSON naming a `bead` and `steps`, each an `op` (`github.pr.merge`, `github.pr.automerge`, `iac.apply`, or anything else, which is `opaque`), a canonical `target` (`github:owner/repo#N`, `pulumi:<stack>`, `tofu:<name>`), `args` and `pre` (`head_sha` for a merge; an apply's `args.preview` is gate-checked against `args.expect` and its digest bound in as `pre.plan_digest`; an apply without `args.expect` is one class up). A step's class is the highest of the op table's, `gate plan`'s and its own stated `class`; opaque is 9. Stores the plan under its SHA-256 digest and approves it by the dial for 1h if the bead's level and budgets reach its class; else exits nonzero naming the digest. Journaled as a check. Advisory until the executor holds the credentials. |

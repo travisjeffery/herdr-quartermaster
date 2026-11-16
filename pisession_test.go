@@ -41,6 +41,7 @@ func TestPiPromptedSince(t *testing.T) {
 		{"typed, marked", mark(time.Minute, "interactive") + user(time.Minute), true},
 		{"rpc, marked", mark(time.Minute, "rpc") + user(time.Minute), true},
 		{"sendUserMessage, marked", mark(time.Minute, "extension") + user(time.Minute), false},
+		{"quartermaster over the control socket, marked", mark(time.Minute, "quartermaster") + user(time.Minute), true},
 		{"marked before since, extension after", mark(-time.Minute, "interactive") + mark(time.Minute, "extension") + user(time.Minute), false},
 	} {
 		if got := piPromptedSince(strings.NewReader(piSession+c.tail), piT0); got != c.want {

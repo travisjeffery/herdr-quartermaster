@@ -60,6 +60,9 @@ Usage:
                 [--action A [--target T]]              (or action A, on target T) without TJ right now
   quartermaster autonomy on|off                        off caps every bead at level 2 until on
   quartermaster autonomy grant|revoke <bead>           level 7 or 2 on a bead (the old autonomous/supervised)
+  quartermaster tell <bead> <text>                     prompt the bead's worker: a pi worker over its control
+                                                       socket, queued behind a running turn; others typed into
+                                                       the pane, only when at rest
   quartermaster prompt <bead>                          the approval prompt the bead's worker is showing, with
                                                        its options and a hash that names it
   quartermaster answer <bead> <choice> --expect HASH   answer that prompt (choice: option number or label) only
@@ -358,6 +361,15 @@ func run(args []string) error {
 			return err
 		}
 		fmt.Print(out)
+	case "tell":
+		if len(pos) != 2 {
+			return fmt.Errorf("usage: quartermaster tell <bead> <text>")
+		}
+		msg, err := tellCmd(cfg, h.on(cfg.coordSocket()), Beads{}.Show, pos[0], pos[1])
+		if err != nil {
+			return err
+		}
+		fmt.Println(msg)
 	case "answer":
 		if len(pos) != 2 {
 			return fmt.Errorf("usage: quartermaster answer <bead> <choice> --expect <hash> [--by coordinator|TJ] [--class N]")

@@ -738,8 +738,10 @@ type autonomyEnv struct {
 	setLabel func(id, label string, on bool) error
 	note     func(id, text string) error
 	// agent is the bead's worker on host, if one is running.
-	agent  func(host, name string) (*Agent, error)
-	prompt func(host, pane, text string) error
+	agent func(host, name string) (*Agent, error)
+	// prompt delivers text to a worker: over a pi worker's control socket,
+	// else into its pane.
+	prompt func(host string, a Agent, text string) error
 	// bypassed reports a worker running with its kind's bypass args; nil
 	// reads as no.
 	bypassed func(host string, a Agent) bool
@@ -752,7 +754,10 @@ func liveAutonomyEnv(cfg Config, h Herdr) autonomyEnv {
 		setLabel: bd.SetLabel,
 		note:     bd.Note,
 		agent:    agentOn(cfg, h),
-		prompt:   func(host, pane, text string) error { return cfg.herdrOn(h, host).Prompt(pane, text) },
+		prompt: func(host string, a Agent, text string) error {
+			_, err := promptPiAgent(cfg.herdrOn(h, host), a, text)
+			return err
+		},
 		bypassed: func(host string, a Agent) bool {
 			if host != localHost {
 				return false
@@ -916,7 +921,7 @@ func tellWorker(env autonomyEnv, b Bead, notice string) (string, error) {
 	// relaunched it, if the change calls for that (D8).
 	bypass := a != nil && env.bypassed != nil && env.bypassed(host, *a)
 	if a != nil && agentReady(a) && !held && !bypass {
-		if err := env.prompt(host, a.PaneID, notice); err != nil {
+		if err := env.prompt(host, *a, notice); err != nil {
 			return "", fmt.Errorf("tell %s: %w", name, err)
 		}
 		_ = os.Remove(path)

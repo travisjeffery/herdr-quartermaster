@@ -115,17 +115,24 @@ func TestPiLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	ext := filepath.Join(stateDir(), "pi", "quartermaster.ts")
-	if got, want := strings.Join(args, " "), "--approve --model anthropic/claude-opus-5-5 -e "+ext+" --session-id backend-ab12.1"; got != want {
+	if got, want := strings.Join(args, " "), "--approve --model anthropic/claude-opus-5-5 -e "+ext+" --quartermaster-control "+piControlSocket("backend-ab12-1")+" --session-id backend-ab12.1"; got != want {
 		t.Errorf("worker args = %q, want %q", got, want)
 	}
 	if b, err := os.ReadFile(ext); err != nil || string(b) != string(piExtension) {
 		t.Errorf("extension not written: %v", err)
 	}
-	// The coordinator gets the extension and no session id; a remote worker
+	// The control configuration starts asking about nothing.
+	if b, err := os.ReadFile(filepath.Join(piControlDir(), "config.json")); err != nil || !strings.Contains(string(b), `"ask": []`) {
+		t.Errorf("control config = %s, %v", b, err)
+	}
+	if fi, err := os.Stat(piControlDir()); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("control dir mode: %v %v", fi, err)
+	}
+	// The coordinator gets the extension and no session id or control socket; a remote worker
 	// gets neither file nor -e.
 	fakePiTool(t, dir, "provider model\nanthropic claude-fable-5-2\n", 0)
 	args, err = cfg.piLaunch(localHost, cfg.coordinatorArgs("pi"), "coordinator", "")
-	if err != nil || slices.Contains(args, "--session-id") || !slices.Contains(args, ext) {
+	if err != nil || slices.Contains(args, "--session-id") || slices.Contains(args, "--quartermaster-control") || !slices.Contains(args, ext) {
 		t.Errorf("coordinator args = %q, %v", args, err)
 	}
 }
@@ -147,7 +154,7 @@ func TestDispatchPi(t *testing.T) {
 	if _, err := dispatch(hostsConfig(), newHerdr(), "b-1", DispatchOpts{Kind: "pi"}); err != nil {
 		t.Fatal(err)
 	}
-	if !hasLine(logLines(t, dir, "herdr"), "agent start b-1 --kind pi --pane w9:p1 --timeout 30000 -- --approve --model anthropic/claude-opus-5-5 -e "+filepath.Join(stateDir(), "pi", "quartermaster.ts")+" --session-id b-1") {
+	if !hasLine(logLines(t, dir, "herdr"), "agent start b-1 --kind pi --pane w9:p1 --timeout 30000 -- --approve --model anthropic/claude-opus-5-5 -e "+filepath.Join(stateDir(), "pi", "quartermaster.ts")+" --quartermaster-control "+piControlSocket("b-1")+" --session-id b-1") {
 		t.Errorf("pi not started on the bead's session: %q", logLines(t, dir, "herdr"))
 	}
 }
