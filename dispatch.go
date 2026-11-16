@@ -250,21 +250,10 @@ func resolve(cfg Config, h Herdr, id string, force bool) (string, error) {
 			}
 		}
 	}
-	branches := []string{branchFor(cfg.BranchPrefix, b)}
-	if pr, ok := loadState().PRs[id]; ok && pr.Head != "" && pr.Head != branches[0] {
-		branches = append(branches, pr.Head)
-	}
 	repo := cfg.repoFor(b)
-	wts, err := h.Worktrees(repo)
+	target, branches, err := linkedWorktree(cfg, h, b)
 	if err != nil {
 		return "", err
-	}
-	var target *Worktree
-	for i, w := range wts {
-		if w.Linked && slices.Contains(branches, w.Branch) {
-			target = &wts[i]
-			break
-		}
 	}
 	if target == nil {
 		return "nothing to remove: no linked worktree on " + strings.Join(branches, " or "), nil
@@ -289,6 +278,26 @@ func resolve(cfg Config, h Herdr, id string, force bool) (string, error) {
 		done = append(done, "kept branch "+target.Branch+" (no merged PR)")
 	}
 	return strings.Join(done, "; "), nil
+}
+
+// linkedWorktree is the linked worktree herdr lists for b's branch, or for its
+// PR's head when the work moved to another branch; nil when there is none.
+// branches is what it looked for.
+func linkedWorktree(cfg Config, h Herdr, b Bead) (*Worktree, []string, error) {
+	branches := []string{branchFor(cfg.BranchPrefix, b)}
+	if pr, ok := loadState().PRs[b.ID]; ok && pr.Head != "" && pr.Head != branches[0] {
+		branches = append(branches, pr.Head)
+	}
+	wts, err := h.Worktrees(cfg.repoFor(b))
+	if err != nil {
+		return nil, branches, err
+	}
+	for i, w := range wts {
+		if w.Linked && slices.Contains(branches, w.Branch) {
+			return &wts[i], branches, nil
+		}
+	}
+	return nil, branches, nil
 }
 
 // gitWorktreeRemove is the git argv that removes path; force also removes a
