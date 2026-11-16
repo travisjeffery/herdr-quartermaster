@@ -602,7 +602,11 @@ func (t Ticker) leftActive(st *TickerState, id string, prev Snapshot, agents map
 		if prev.PRState == "MERGED" {
 			summary += fmt.Sprintf(" after PR #%d merged", prev.PRNumber)
 		}
-		if lvl, _ := t.cfg.beadLevel(b, autonomyStopped()); lvl >= classHousekeeping && prev.PRState == "MERGED" && (!hasAgent || agentReady(&a)) {
+		// The coordinator may have resolved it before this pass saw it close.
+		wt, _, werr := linkedWorktree(t.cfg, t.herdr, b)
+		if lvl, _ := t.cfg.beadLevel(b, autonomyStopped()); werr == nil && wt == nil {
+			summary += "; its worktree is already removed"
+		} else if lvl >= classHousekeeping && prev.PRState == "MERGED" && (!hasAgent || agentReady(&a)) {
 			if res, err := resolve(t.cfg, t.herdr, id, false); err != nil {
 				summary += "; auto-resolve failed: " + err.Error()
 			} else {
