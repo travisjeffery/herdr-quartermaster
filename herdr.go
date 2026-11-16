@@ -25,6 +25,8 @@ type Agent struct {
 	WorkspaceID string `json:"workspace_id"`
 	Cwd         string `json:"cwd"`
 	Seq         int64  `json:"state_change_seq"`
+	// Session is the conversation running in the pane, when herdr knows it.
+	Session AgentSession `json:"agent_session"`
 	// Host is the quartermaster host whose herdr server listed the agent.
 	// Names and pane ids are only unique per server.
 	Host string `json:"-"`
