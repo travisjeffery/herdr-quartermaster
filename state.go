@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"slices"
 	"strings"
@@ -57,6 +58,10 @@ type Thread struct {
 	// Prompt is the approval prompt a blocked agent is showing, when the
 	// ticker could read it.
 	Prompt *ApprovalPrompt
+	// Unprompted marks a needs_me thread whose agent went back to work with
+	// no prompt since it settled, by its transcript: it compacted or a
+	// background task finished, and nobody answered it.
+	Unprompted bool
 }
 
 func agentReady(a *Agent) bool {
@@ -207,6 +212,9 @@ type Snapshot struct {
 	// Auto is how many AUTO: notes the bead had, so each new one is journaled
 	// once.
 	Auto int `json:"auto,omitempty"`
+	// Asked is the needs_me question last seen (asked), so a thread that
+	// wakes and settles again without a new one isn't announced twice.
+	Asked string `json:"asked,omitempty"`
 }
 
 type EventKind string
@@ -247,6 +255,22 @@ type Outcome struct {
 	Resume bool
 }
 
+// wokeAfterNeedsMe reports a needs_me thread whose agent is working again
+// after the ticker saw it settled at rest: an answer, unless it woke on its own.
+func wokeAfterNeedsMe(t Thread, prev Snapshot) bool {
+	return answered(t) && prev.NeedsMe && (agentReady(&Agent{Status: prev.AgentStatus}) || prev.AgentStatus == "blocked")
+}
+
+// asked fingerprints a needs_me bead's question: its notes, where the worker
+// writes it. A thread that comes back to rest with the same notes asks nothing
+// new.
+func asked(b Bead) string {
+	if b.Status != StatusNeedsMe {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(b.Notes)))[:16]
+}
+
 // resumeNote is the note left on a bead the ticker resumed; the question
 // stays in the notes above it.
 const resumeNote = "auto: agent resumed after needs_me"
@@ -265,6 +289,14 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 	}
 	if t.Prompt != nil {
 		s.PromptHash = t.Prompt.Hash
+	}
+	// The question counts as asked once the thread has sat in needs you, and
+	// stays asked while the bead is needs_me, through any wake.
+	switch {
+	case s.Group == GroupNeedsYou:
+		s.Asked = asked(t.Bead)
+	case s.NeedsMe:
+		s.Asked = prev.Asked
 	}
 	s.Merged, s.MergedTracked = slices.Clone(prev.Merged), true
 	for _, pr := range mergedPRs(t) {
@@ -298,7 +330,7 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 	}
 	// Only a needs_me that was already settled, with the agent at rest, counts:
 	// the turn that asked the question is itself still working.
-	if answered(t) && prev.NeedsMe && (agentReady(&Agent{Status: prev.AgentStatus}) || prev.AgentStatus == "blocked") {
+	if wokeAfterNeedsMe(t, prev) && !t.Unprompted {
 		o.Resume = true
 		ev(EventResumed, "%s went back to work after needs_me; set it to in_progress", id)
 	}
@@ -317,6 +349,10 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 				id, p.Hash, p.Summary(), p.Choices(), countdown, id, p.Hash)
 		case t.Agent != nil && t.Agent.Status == "blocked":
 			ev(EventNeedsYou, "%s is waiting at an approval or question prompt", id)
+		case prev.Asked != "" && prev.Asked == asked(t.Bead):
+			// Back at rest after waking on its own: the question is the one
+			// already announced.
+			o.Notify = false
 		default:
 			ev(EventNeedsYou, "%s is marked needs_me; its latest note holds the question", id)
 		}

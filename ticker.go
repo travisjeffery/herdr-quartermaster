@@ -418,6 +418,12 @@ func (t Ticker) once(st *TickerState) error {
 		if th.Agent != nil && th.Agent.Status == "blocked" {
 			th.Prompt = t.readPrompt(th.Agent.PaneID)
 		}
+		if seen && wokeAfterNeedsMe(th, prev) {
+			if prompted, known := promptedSince(th.Agent, prev.ReadySince); known && !prompted {
+				th.Unprompted = true
+				t.log.Printf("%s woke at needs_me with no prompt since %s; not a resume", id, prev.ReadySince.Format(time.RFC3339))
+			}
+		}
 		out := transition(th, prev, !seen, now)
 		if out.Resume {
 			if err := t.resume(id); err != nil {
