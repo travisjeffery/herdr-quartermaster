@@ -745,6 +745,40 @@ func TestLinearDoneAloneFlags(t *testing.T) {
 	}
 }
 
+func TestAFollowUpsStartingPRIsNotEvidence(t *testing.T) {
+	created := vNow.Add(-24 * time.Hour)
+	prs := map[string]prRef{pr14190: {URL: pr14190, State: "MERGED", MergedAt: created.Add(-time.Hour)}}
+	b := x0w5()
+	b.CreatedAt = created
+	b.Description = "Follow-up to " + pr14190 + ": wire the alarm."
+	if ev := prEvidence(b, []string{pr14190}, prs, "tj/"); len(ev) != 0 {
+		t.Fatalf("the PR a follow-up starts from: %+v, want none", ev)
+	}
+	// One that merged after the bead was opened is still evidence, if weak.
+	prs[pr14190] = prRef{URL: pr14190, State: "MERGED", MergedAt: created.Add(time.Hour)}
+	if ev := prEvidence(b, []string{pr14190}, prs, "tj/"); len(ev) != 1 || ev[0].Strong {
+		t.Fatalf("a PR merged since: %+v, want weak", ev)
+	}
+	// So is its own PR, whenever it merged.
+	prs[pr14190] = prRef{URL: pr14190, State: "MERGED", MergedAt: created.Add(-time.Hour), Branch: "tj/backend-x0w5-aws-security-lake"}
+	if ev := prEvidence(b, []string{pr14190}, prs, "tj/"); len(ev) != 1 || !ev[0].Strong {
+		t.Fatalf("its own PR: %+v, want strong", ev)
+	}
+}
+
+func TestVerifyDoesNotFlagAFollowUpForTheMergeItStartsFrom(t *testing.T) {
+	b := x0w5()
+	b.CreatedAt = vNow.Add(-24 * time.Hour)
+	b.Description = "Follow-up to " + pr14190 + ": wire the alarm."
+	f := newFake(b)
+	f.prs[pr14190] = prRef{URL: pr14190, State: "MERGED", MergedAt: b.CreatedAt.Add(-time.Hour)}
+	st := TickerState{}
+	pass(t, f, vcfg(true), &st, vNow)
+	if len(f.closedN) != 0 || len(f.events) != 0 {
+		t.Fatalf("closed %v events %+v, want neither", f.closedN, f.events)
+	}
+}
+
 func TestOnlyItsOwnPRIsStrong(t *testing.T) {
 	prs := map[string]prRef{pr14190: {URL: pr14190, State: "MERGED"}}
 	b := x0w5()
