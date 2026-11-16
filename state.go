@@ -62,6 +62,9 @@ type Thread struct {
 	// no prompt since it settled, by its transcript: it compacted or a
 	// background task finished, and nobody answered it.
 	Unprompted bool
+	// Turn is how a pi worker's last turn ended, read from its session file;
+	// nil for other kinds.
+	Turn *PiTurn
 }
 
 func agentReady(a *Agent) bool {
@@ -206,6 +209,8 @@ type Snapshot struct {
 	// PromptHash is the approval prompt last announced, so each prompt a
 	// blocked agent shows reaches the inbox once.
 	PromptHash string `json:"prompt_hash,omitempty"`
+	// TurnID is the id of the last turn end in a pi worker's session.
+	TurnID string `json:"turn_id,omitempty"`
 	// Relaunch marks a worker asked to exit so it can be resumed in the
 	// launch mode its level calls for.
 	Relaunch bool `json:"relaunch,omitempty"`
@@ -289,6 +294,11 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 	}
 	if t.Prompt != nil {
 		s.PromptHash = t.Prompt.Hash
+	}
+	if t.Turn != nil {
+		s.TurnID = t.Turn.ID
+	} else if t.Agent != nil {
+		s.TurnID = prev.TurnID
 	}
 	// The question counts as asked once the thread has sat in needs you, and
 	// stays asked while the bead is needs_me, through any wake.
@@ -444,8 +454,17 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 	// A whole turn can fit between two ticks; a moved state counter on a ready
 	// agent means it worked since the last look.
 	turned := prev.AgentStatus == "working" || (prev.AgentSeq != 0 && t.Agent != nil && t.Agent.Seq != prev.AgentSeq)
+	// A pi session's last turn end is a durable cursor: a new one is a new
+	// turn, whatever herdr's state counter did.
+	if t.Turn != nil && prev.TurnID != "" && t.Turn.ID != prev.TurnID {
+		turned = true
+	}
 	if t.Agent != nil && agentReady(t.Agent) && turned && g != GroupNeedsYou {
-		ev(EventFinished, "%s finished a turn (%s)", id, stateLine(t))
+		if t.Turn.Failed() {
+			ev(EventFinished, "%s stopped on %s%s (%s)", id, t.Turn.StopReason, errSuffix(t.Turn.Error), stateLine(t))
+		} else {
+			ev(EventFinished, "%s finished a turn (%s)", id, stateLine(t))
+		}
 	}
 	// A relaunch asked it to exit, and the ticker resumes it itself.
 	if t.Agent == nil && prev.AgentStatus != "" && !prev.Relaunch {
@@ -558,4 +577,12 @@ func coordinatorLine(threads []Thread, inbox int) string {
 		s += fmt.Sprintf(" · %d inbox", inbox)
 	}
 	return s
+}
+
+// errSuffix is ": <err>" shortened for an event line, or nothing.
+func errSuffix(err string) string {
+	if err = strings.TrimSpace(err); err == "" {
+		return ""
+	}
+	return ": " + shortTitle(err, 120)
 }

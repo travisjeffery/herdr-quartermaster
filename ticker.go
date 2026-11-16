@@ -418,6 +418,9 @@ func (t Ticker) once(st *TickerState) error {
 		if th.Agent != nil && th.Agent.Status == "blocked" {
 			th.Prompt = t.readPrompt(th.Agent.PaneID)
 		}
+		if th.Agent != nil && th.Agent.Session.Agent == "pi" {
+			th.Turn = piLastTurn(th.Agent)
+		}
 		if seen && wokeAfterNeedsMe(th, prev) {
 			if prompted, known := promptedSince(th.Agent, prev.ReadySince); known && !prompted {
 				th.Unprompted = true
