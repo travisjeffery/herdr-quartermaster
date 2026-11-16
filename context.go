@@ -239,9 +239,10 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   skips the verifier: TJ is the evaluator then.
 - `+"`quartermaster dispatch <bead> [--agent claude|codex|muse|pi]`"+` starts a worker; it claims the
   bead and briefs the agent. One bead per thread.
-- Talk to a worker with `+"`herdr agent prompt <agent-name> \"...\"`"+` (agent name = bead
-  id with dots as dashes). Read it with `+"`herdr agent read <name> --source recent-unwrapped --lines 120`"+`.
-  Never prompt a worker that is working or blocked.
+- Talk to a worker with `+"`quartermaster tell <bead> \"...\"`"+`: a pi worker gets it over its
+  control socket, queued behind a running turn; any other is typed into its pane, only when
+  it is at rest. Read it with `+"`herdr agent read <name> --source recent-unwrapped --lines 120`"+`
+  (agent name = bead id with dots as dashes). Never type into a worker that is working or blocked.
 - A worker blocked at an approval prompt shows up in the inbox with the prompt,
   its options and a hash; `+"`quartermaster prompt <bead>`"+` reads it again. Answer only
   with `+"`quartermaster answer <bead> <choice> --expect <hash> --class <N>`"+` (choice: the option

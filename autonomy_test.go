@@ -160,8 +160,8 @@ func (f *fakeAutonomy) env() autonomyEnv {
 			return nil
 		},
 		agent: func(host, name string) (*Agent, error) { return f.agent, nil },
-		prompt: func(host, pane, text string) error {
-			f.calls = append(f.calls, "prompt "+host+" "+pane+" "+strings.SplitN(text, "]", 2)[0]+"]")
+		prompt: func(host string, a Agent, text string) error {
+			f.calls = append(f.calls, "prompt "+host+" "+a.PaneID+" "+strings.SplitN(text, "]", 2)[0]+"]")
 			return nil
 		},
 	}

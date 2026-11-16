@@ -28,6 +28,9 @@ type ApprovalPrompt struct {
 	// Hash identifies the prompt across reads: the cursor, the footer and the
 	// countdown, which change while the same prompt shows, are left out.
 	Hash string
+	// askID is set for a pi worker's ask, read from its control socket
+	// rather than its screen, and answered there (picontrol.go).
+	askID string
 }
 
 type PromptOption struct {
@@ -313,6 +316,11 @@ type promptEnv struct {
 	sleep func(time.Duration)
 	// level is the bead's effective autonomy level and the cap that lowered it.
 	level func(id string) (int, string)
+	// piAsk reads the ask a pi worker is waiting on over its control socket:
+	// ok false when it has no socket, so its screen is read instead.
+	piAsk func(host string, a *Agent) (ask *piAsk, ok bool, err error)
+	// piAnswer answers a pi worker's ask over its control socket.
+	piAnswer func(a *Agent, id string, choice int, by string) error
 }
 
 func livePromptEnv(cfg Config, h Herdr) promptEnv {
@@ -328,6 +336,14 @@ func livePromptEnv(cfg Config, h Herdr) promptEnv {
 		},
 		note:  bd.Note,
 		sleep: time.Sleep,
+		piAsk: piAskOf,
+		piAnswer: func(a *Agent, id string, choice int, by string) error {
+			c, ok := piControlFor(a.Name)
+			if !ok {
+				return fmt.Errorf("%s's control socket is gone", a.Name)
+			}
+			return c.Answer(id, choice, by)
+		},
 		level: func(id string) (int, string) {
 			b, err := bd.Show(id)
 			if err != nil {
@@ -377,6 +393,19 @@ func workerPrompt(env promptEnv, id string) (ApprovalPrompt, string, *Agent, err
 	}
 	if a == nil {
 		return ApprovalPrompt{}, host, nil, fmt.Errorf("%s has no worker running%s", id, onHost(host))
+	}
+	// A pi worker with a control socket asks there, not on screen.
+	if env.piAsk != nil {
+		ask, ok, err := env.piAsk(host, a)
+		if ok {
+			if err != nil {
+				return ApprovalPrompt{}, host, a, fmt.Errorf("ask %s over its control socket: %w", name, err)
+			}
+			if ask == nil {
+				return ApprovalPrompt{}, host, a, fmt.Errorf("%s (%s): %w", name, a.Status, errNoPrompt)
+			}
+			return ask.prompt(), host, a, nil
+		}
 	}
 	screen, err := env.read(host, a.PaneID)
 	if err != nil {
@@ -440,23 +469,30 @@ func answerPrompt(env promptEnv, id, choice, expect, by string, class int) (stri
 			return "", err
 		}
 	}
-	if err := env.keys(host, a.PaneID, p.keys(o)...); err != nil {
-		return "", fmt.Errorf("send keys to %s: %w", a.Name, err)
-	}
-	cleared := false
-	for waited := time.Duration(0); waited < answerWait; waited += 250 * time.Millisecond {
-		env.sleep(250 * time.Millisecond)
-		screen, err := env.read(host, a.PaneID)
-		if err != nil {
-			continue
+	if p.askID != "" {
+		// The extension takes the answer at once, or refuses it.
+		if err := env.piAnswer(a, p.askID, o.Number, by); err != nil {
+			return "", fmt.Errorf("answer %s over its control socket: %w", a.Name, err)
 		}
-		if now, ok := parsePrompt(screen); !ok || now.Hash != expect {
-			cleared = true
-			break
+	} else {
+		if err := env.keys(host, a.PaneID, p.keys(o)...); err != nil {
+			return "", fmt.Errorf("send keys to %s: %w", a.Name, err)
 		}
-	}
-	if !cleared {
-		return "", fmt.Errorf("sent %q to %s but prompt [%s] is still showing", strings.Join(p.keys(o), " "), a.Name, expect)
+		cleared := false
+		for waited := time.Duration(0); waited < answerWait; waited += 250 * time.Millisecond {
+			env.sleep(250 * time.Millisecond)
+			screen, err := env.read(host, a.PaneID)
+			if err != nil {
+				continue
+			}
+			if now, ok := parsePrompt(screen); !ok || now.Hash != expect {
+				cleared = true
+				break
+			}
+		}
+		if !cleared {
+			return "", fmt.Errorf("sent %q to %s but prompt [%s] is still showing", strings.Join(p.keys(o), " "), a.Name, expect)
+		}
 	}
 	msg := fmt.Sprintf("answered %s: %d %s to %s", a.Name, o.Number, o.Label, p.Summary())
 	note := fmt.Sprintf("PROMPT ANSWERED: %d %s to %s [%s] by %s", o.Number, shortTitle(o.Label, 60), p.Summary(), p.Hash, by)

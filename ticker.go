@@ -416,7 +416,7 @@ func (t Ticker) once(st *TickerState) error {
 		current[id] = true
 		prev, seen := st.Threads[id]
 		if th.Agent != nil && th.Agent.Status == "blocked" {
-			th.Prompt = t.readPrompt(th.Agent.PaneID)
+			th.Prompt = t.readPrompt(th.Agent)
 		}
 		if th.Agent != nil && th.Agent.Session.Agent == "pi" {
 			th.Turn = piLastTurn(th.Agent)
@@ -454,7 +454,7 @@ func (t Ticker) once(st *TickerState) error {
 			// A worker due a relaunch gets nothing else first (D8).
 			if len(snap.Pending) > 0 && th.Bead.Status != StatusNeedsMe && !relaunch[agentName(id)] && deliverable(snap, now, t.cfg.idle()) {
 				text := strings.Join(snap.Pending, "\n\n")
-				if err := t.herdr.Prompt(th.Agent.PaneID, text); err != nil {
+				if _, err := promptPiAgent(t.herdr, *th.Agent, text); err != nil {
 					t.log.Printf("prompt %s: %v", id, err)
 				} else {
 					t.log.Printf("prompted %s (%d item(s))", id, len(snap.Pending))
@@ -564,9 +564,22 @@ func (t Ticker) relaunch(th Thread, snap *Snapshot, due bool, now time.Time) {
 	}
 }
 
-// readPrompt is the approval prompt a pane shows, nil when there is none or
-// it can't be read.
-func (t Ticker) readPrompt(pane string) *ApprovalPrompt {
+// readPrompt is the approval prompt an agent shows, nil when there is none or
+// it can't be read: a pi worker's ask over its control socket, else what its
+// pane shows.
+func (t Ticker) readPrompt(a *Agent) *ApprovalPrompt {
+	if ask, ok, err := piAskOf(t.herdr.hostName(), a); ok {
+		if err != nil {
+			t.log.Printf("read %s's ask: %v", a.Name, err)
+		}
+		if ask != nil {
+			p := ask.prompt()
+			return &p
+		}
+		// Blocked on something else, such as an extension dialog: the screen
+		// may show it.
+	}
+	pane := a.PaneID
 	screen, err := t.herdr.Read(pane, promptReadLines, callTimeout)
 	if err != nil {
 		t.log.Printf("read prompt in %s: %v", pane, err)

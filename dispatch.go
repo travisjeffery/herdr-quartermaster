@@ -506,7 +506,7 @@ func deliverQueued(h Herdr, host string, agents map[string]Agent, needsMe, relau
 			if err != nil || (suffix == ".autonomy" && heldNotice(string(text), needsMe[name])) {
 				continue
 			}
-			if h.Prompt(a.PaneID, string(text)) == nil {
+			if _, err := promptPiAgent(h, a, string(text)); err == nil {
 				os.Remove(path)
 				sent = append(sent, name)
 			}

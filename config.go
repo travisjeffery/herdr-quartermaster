@@ -98,6 +98,15 @@ type AgentConfig struct {
 	// Env is "NAME=value" pairs exported in the agent's pane before it
 	// starts, after BEADS_ACTOR and BEADS_DIR, on every host.
 	Env []string `toml:"env"`
+	// Ask (pi only) lists the bash commands, as regular expressions, that a
+	// worker asks quartermaster about when a guard hook would ask the user,
+	// instead of blocking them: the question shows in the inbox and
+	// `quartermaster prompt`, and `quartermaster answer` answers it. Empty,
+	// the default, asks about nothing. A hook's deny still blocks.
+	Ask []string `toml:"ask"`
+	// AskTimeout (pi only) is how long a worker waits for that answer before
+	// it blocks the command anyway (default 10m).
+	AskTimeout string `toml:"ask_timeout"`
 }
 
 // defaultAgentArgs apply to a kind with no [agents.<kind>] table. Muse's
@@ -153,6 +162,9 @@ var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // name the shell can export unquoted. BEADS_ACTOR and BEADS_DIR are
 // quartermaster's to set: a remote pane must not get BEADS_DIR.
 func (c Config) validateAgents() error {
+	if err := c.validatePiAsk(); err != nil {
+		return err
+	}
 	for kind, a := range c.Agents {
 		for _, e := range a.Env {
 			k, _, ok := strings.Cut(e, "=")
