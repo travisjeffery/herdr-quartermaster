@@ -175,10 +175,9 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	if kind == "pi" {
 		// Before the worktree and the claim, so a model pi can't run leaves
 		// nothing behind.
-		if err := checkPiModel(cfg.piOn(host), args, "worker"); err != nil {
+		if args, err = cfg.piLaunch(host, args, "worker", id); err != nil {
 			return "", err
 		}
-		args = append(args, piSessionArgs(id)...)
 	}
 	hh := cfg.herdrOn(h, host)
 	repo, _ := cfg.repoOn(host, b)
@@ -383,7 +382,7 @@ func openCoordinator(cfg Config, h Herdr, kind string) (string, error) {
 	first := "Run `quartermaster context` and give me a short status: what needs me, what's in review, what's ready to start."
 	args := cfg.coordinatorArgs(kind)
 	if kind == "pi" {
-		if err := checkPiModel(cfg.piOn(localHost), args, "coordinator"); err != nil {
+		if args, err = cfg.piLaunch(localHost, args, "coordinator", ""); err != nil {
 			return "", err
 		}
 	}
