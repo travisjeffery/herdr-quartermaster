@@ -233,7 +233,8 @@ func linearEvidence(key string, issues map[string]linearIssue) []evidence {
 // prEvidence is (b): the bead links PRs, at least one merged and none still
 // open. It is strong only when every linked PR merged, one of them is the
 // bead's own, and the bead doesn't say work remains after the merge; a closed,
-// unmerged one leaves it a flag.
+// unmerged one leaves it a flag. A PR that merged before the bead was created
+// and isn't its own is where a follow-up starts, not evidence it is done.
 func prEvidence(b Bead, urls []string, prs map[string]prRef, branchPrefix string) []evidence {
 	var merged, unmerged []string
 	owned := false
@@ -241,6 +242,9 @@ func prEvidence(b Bead, urls []string, prs map[string]prRef, branchPrefix string
 		pr, ok := prs[u]
 		if !ok {
 			return nil
+		}
+		if citedBefore(b, pr, branchPrefix) {
+			continue
 		}
 		switch pr.State {
 		case "OPEN":
@@ -267,6 +271,13 @@ func prEvidence(b Bead, urls []string, prs map[string]prRef, branchPrefix string
 		e.Detail += " (but " + why + ")"
 	}
 	return []evidence{e}
+}
+
+// citedBefore reports a merged PR, not the bead's own, that merged before the
+// bead was created: a follow-up names the PR it builds on.
+func citedBefore(b Bead, pr prRef, branchPrefix string) bool {
+	return pr.State == "MERGED" && !b.CreatedAt.IsZero() && !pr.MergedAt.IsZero() &&
+		pr.MergedAt.Before(b.CreatedAt) && !ownsPR(b, pr, branchPrefix)
 }
 
 // notedOwnPR is a PR a bead's notes record as its own: the "PR: <url>" every
