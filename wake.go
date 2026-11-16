@@ -29,9 +29,19 @@ func claudeHome() string {
 // promptedSince reports whether a person (or anything typing into the pane, as
 // a person would) prompted a's conversation after since, as opposed to the
 // agent waking on its own: Claude Code compacts an idle conversation and
-// reports finished background tasks, and both make the pane work again. known
-// is false when it can't tell: another kind of agent, or no transcript found.
+// reports finished background tasks, and both make the pane work again. pi's
+// session file answers the same question for a pi worker (piPromptedSince).
+// known is false when it can't tell: another kind of agent, or no transcript
+// found.
 func promptedSince(a *Agent, since time.Time) (prompted, known bool) {
+	if a != nil && !since.IsZero() && a.Session.Agent == "pi" {
+		f, err := os.Open(piSessionFile(a))
+		if err != nil {
+			return false, false
+		}
+		defer f.Close()
+		return piPromptedSince(f, since), true
+	}
 	if a == nil || since.IsZero() || a.Session.Agent != "claude" || a.Session.Kind != "id" || a.Session.Value == "" {
 		return false, false
 	}
