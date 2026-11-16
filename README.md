@@ -574,7 +574,8 @@ installed for it. Two things differ from Claude and Codex:
 
 ### pi workers and coordinator
 
-[pi](https://github.com/earendil-works/pi) is opt-in: `--agent pi`,
+[pi](https://github.com/earendil-works/pi) is opt-in (details, guards and
+setup in [docs/pi.md](docs/pi.md)): `--agent pi`,
 `worker_agent = "pi"` or `coordinator_agent = "pi"`. Herdr starts it
 (`--kind pi`) and its pi extension reports working, idle and blocked. Without an
 `[agents.pi]` table, workers run `pi --approve --model
