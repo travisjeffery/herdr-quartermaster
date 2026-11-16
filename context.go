@@ -237,7 +237,7 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   `+"`## Acceptance`"+` section is checked against criteria the verifier derives from
   its description, and its note says so. TJ's own close (`+"`--by TJ`"+`, the board)
   skips the verifier: TJ is the evaluator then.
-- `+"`quartermaster dispatch <bead> [--agent claude|codex|muse]`"+` starts a worker; it claims the
+- `+"`quartermaster dispatch <bead> [--agent claude|codex|muse|pi]`"+` starts a worker; it claims the
   bead and briefs the agent. One bead per thread.
 - Talk to a worker with `+"`herdr agent prompt <agent-name> \"...\"`"+` (agent name = bead
   id with dots as dashes). Read it with `+"`herdr agent read <name> --source recent-unwrapped --lines 120`"+`.

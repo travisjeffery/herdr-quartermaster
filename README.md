@@ -300,7 +300,8 @@ once per head commit; otherwise the board shows
   human ones. Both go to the worker; only a human review notifies you.
 - **Resume.** Herdr restarts don't relaunch agents. `quartermaster resume` restarts
   each claimed bead's agent in its worktree with `claude --continue`,
-  `codex resume --last` or `muse resume --last`, as whichever agent claimed it. `quartermaster context`
+  `codex resume --last`, `muse resume --last` or `pi --session-id <bead>` (the
+  bead's own pi session, by id), as whichever agent claimed it. `quartermaster context`
   lists resumable threads, stale claims (in progress, no agent, worktree or
   PR, untouched 7 days) and other claims separately.
 - **Several repos.** Beads labelled `repo:<name>` work in that repo from
@@ -313,8 +314,9 @@ once per head commit; otherwise the board shows
   missing the key.
 - **Choosing the agent.** `worker_agent = "auto"` picks Codex only when both
   agents' usage readings are under 6 hours old and Codex has more left;
-  otherwise Claude. It never picks Muse, which records no usage reading to
-  compare; ask for Muse with `--agent muse` or `worker_agent = "muse"`.
+  otherwise Claude. It never picks Muse or pi, which record no usage reading
+  to compare; ask for them with `--agent muse|pi` or `worker_agent = "muse"`
+  or `"pi"`.
 - **Sweep** lists linked worktrees whose PR merged, whose bead is closed, or
   that git reports prunable. `--yes` removes only the ones that are clean,
   fully pushed, have no agent in them and whose bead isn't still active. It
@@ -547,7 +549,7 @@ Once it's installed (see below), the first ten minutes:
 
 Herdr 0.9.1+, [`bd`](https://github.com/steveyegge/beads) with a custom
 `needs_me` status (`bd config set status.custom needs_me`), `gh` logged in, and
-any of Claude Code, Codex and Muse Code. Linux or macOS, on amd64 or arm64. Go
+any of Claude Code, Codex, Muse Code and pi. Linux or macOS, on amd64 or arm64. Go
 is only needed to build from source.
 
 ### Muse Code workers
@@ -569,6 +571,30 @@ installed for it. Two things differ from Claude and Codex:
   it. The brief tells every worker to run `bd prime` first unless a session
   hook already loaded it, then names the bead and how to report; put anything else a
   worker must know in `AGENTS.md`. The coordinator's folder gets both files.
+
+### pi workers and coordinator
+
+[pi](https://github.com/earendil-works/pi) is opt-in: `--agent pi`,
+`worker_agent = "pi"` or `coordinator_agent = "pi"`. Herdr starts it
+(`--kind pi`) and its pi extension reports working, idle and blocked. Without an
+`[agents.pi]` table, workers run `pi --approve --model
+anthropic/claude-opus-5-5` and the coordinator `pi --approve --model
+anthropic/claude-fable-5-2`; set `args` and `coordinator_args` to change either.
+A worker runs in the pi session named for its bead (`--session-id <bead>`), so
+dispatch and resume reopen that conversation by id.
+
+Before it starts pi, quartermaster checks the model is one pi can run (`pi
+--list-models`, then `pi auth check --provider`; neither prints a credential)
+and refuses with what to do: sign in with `pi auth login anthropic`, or add a
+model pi's catalog lacks. Its catalog has `claude-opus-5-5` but not
+`claude-fable-5-2`; add that to `~/.pi/agent/models.json`:
+
+```json
+{ "providers": { "anthropic": { "models": [
+  { "id": "claude-fable-5-2", "name": "Claude Fable 5.2", "reasoning": true,
+    "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 128000 }
+] } } }
+```
 
 ## Install
 
@@ -621,7 +647,7 @@ command = "quartermaster.coordinator"
 ```
 
 `quartermaster.focus-clipboard` (Claude), `quartermaster.focus-clipboard-codex` and
-`quartermaster.focus-clipboard-muse` focus or start the bead whose id is on the clipboard, if you want keys for those too.
+`quartermaster.focus-clipboard-muse` and `quartermaster.focus-clipboard-pi` focus or start the bead whose id is on the clipboard, if you want keys for those too.
 
 ### Upgrading from flatcircle, kelpie or shepherd
 
@@ -655,7 +681,7 @@ too, so unlink the old plugin, link or install this one, and rename
 ```toml
 repo = "~/src/myproject"
 branch_prefix = "tj/"     # worker branches are <prefix><bead>-<slug>
-worker_agent = "claude"   # "codex", "muse", or "auto": Claude or Codex, whichever has more quota left
+worker_agent = "claude"   # "codex", "muse", "pi", or "auto": Claude or Codex, whichever has more quota left
 coordinator_agent = "claude"
 tick_seconds = 15         # how often the ticker checks threads
 gh_seconds = 60           # how often it checks PRs
@@ -673,6 +699,10 @@ coordinator_rules = ["Ask before touching the staging cluster."]  # extra bullet
 
 [agents.muse]             # per-kind args for the agent's own CLI, on dispatch, resume and the coordinator
 args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
+
+[agents.pi]               # pi's defaults: Opus 5.5 workers, a Fable 5.2 coordinator
+args = ["--approve", "--model", "anthropic/claude-opus-5-5"]
+coordinator_args = ["--approve", "--model", "anthropic/claude-fable-5-2"]
 
 [agents.claude]           # per-kind environment, exported in the agent's pane before it starts
 env = ["CLAUDE_CODE_ENABLE_TELEMETRY=1", "OTEL_EXPORTER_OTLP_ENDPOINT=https://otel.example.com"]
@@ -709,11 +739,13 @@ and replace that kind's defaults. Muse defaults to the args above:
 `gh`'s credentials, so a sandboxed worker can't use `bd` or open a PR; and the
 `:auto-review` permission profile, which keeps Muse's approval judge but lets
 it decide instead of waiting on a human nobody is watching. Set `args = []`
-for Muse's own defaults. Other kinds start with no extra args.
+for Muse's own defaults. pi defaults to its models above. Other kinds start
+with no extra args.
 
 `[agents.<kind>] coordinator_args` replace `args` when that kind runs the
 coordinator, and only then: to run the coordinator on a different model from
-the workers, say. Unset, the coordinator starts with `args` like a worker;
+the workers, say. Unset, the coordinator starts with `args` like a worker
+(pi without an `[agents.pi]` table uses its default coordinator model);
 `coordinator_args = []` starts it with none. The kind's `env` still applies.
 
 `[agents.<kind>] bypass_args` follow `args` only when a worker starts on this
@@ -994,6 +1026,6 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster bd-proxy --host NAME [--bd PATH]` | The forced command behind a worker host's Beads key in `authorized_keys`: runs the host's `bd` request (an allowlisted subcommand, `BEADS_DIR` pinned, one line per request in `bd-proxy.log` in the state dir). The host side is [`scripts/bd-shim`](scripts/bd-shim). See [worker hosts §5](docs/design/worker-hosts.md#5-beads-one-database-for-every-host). |
 | `quartermaster version` | Print the version. |
 
-`K` is `claude`, `codex`, `muse` or `auto`.
+`K` is `claude`, `codex`, `muse`, `pi` or `auto`.
 
 `qm` is a short alias for `quartermaster`: `qm context` is `quartermaster context`.

@@ -91,7 +91,7 @@ Usage:
                                                        bd request (SSH_ORIGINAL_COMMAND) on this machine's beads
   quartermaster version
 
-K is the agent kind: claude, codex or muse; dispatch and focus also take auto.
+K is the agent kind: claude, codex, muse or pi; dispatch and focus also take auto.
 WHO is who decided: coordinator (the default), worker (close) or TJ. Without --by TJ, dispatch, resume,
 stale --release and answer refuse a step above the bead's autonomy level and note
 the ones they take ("AUTO: [coordinator L4 C3] ...").
@@ -188,7 +188,7 @@ func run(args []string) error {
 	h := newHerdr()
 	cmd, rest := args[0], args[1:]
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	kind := fs.String("agent", "", "agent kind: claude, codex, muse or auto")
+	kind := fs.String("agent", "", "agent kind: claude, codex, muse, pi or auto")
 	focus := fs.Bool("focus", false, "focus the new workspace")
 	repoFlag := fs.String("repo", "", "configure: the repository quartermaster works in, written to config.toml if it has none")
 	force := fs.Bool("force", false, "resolve even if the bead is open, its agent is working or its worktree is dirty; dispatch to a host lacking a needed label")
@@ -220,7 +220,7 @@ func run(args []string) error {
 		fmt.Println(msg)
 	case "dispatch":
 		if len(pos) != 1 {
-			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex|muse] [--focus] [--host H] [--force]")
+			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex|muse|pi] [--focus] [--host H] [--force]")
 		}
 		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Focus: *focus, Host: *hostFlag, Force: *force, By: *by})
 		if err != nil {

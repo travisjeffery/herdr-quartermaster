@@ -107,6 +107,15 @@ type AgentConfig struct {
 // unattended worker doesn't wait on a prompt nobody is watching.
 var defaultAgentArgs = map[string][]string{
 	"muse": {"--disable-sandbox", "--permission-profile", ":auto-review"},
+	// pi: --approve trusts the worktree's own .pi resources, since a fresh
+	// worktree has no saved trust decision to skip the prompt with.
+	"pi": {"--approve", "--model", piWorkerModel},
+}
+
+// defaultCoordinatorArgs apply when a kind runs the coordinator and has no
+// [agents.<kind>] table.
+var defaultCoordinatorArgs = map[string][]string{
+	"pi": {"--approve", "--model", piCoordinatorModel},
 }
 
 // defaultBypassArgs are each kind's switch for its own permission checks,
@@ -177,11 +186,16 @@ func (c Config) agentArgs(kind string, bypass bool, extra ...string) []string {
 }
 
 // coordinatorArgs is what a kind starts the coordinator with: its
-// coordinator_args if set, else what a worker of that kind starts with. The
+// coordinator_args if set, else its default coordinator args when it has no
+// [agents.<kind>] table, else what a worker of that kind starts with. The
 // coordinator never gets bypass args.
 func (c Config) coordinatorArgs(kind string) []string {
-	if a, ok := c.Agents[kind]; ok && a.CoordinatorArgs != nil {
+	a, ok := c.Agents[kind]
+	switch {
+	case ok && a.CoordinatorArgs != nil:
 		return slices.Clone(a.CoordinatorArgs)
+	case !ok && defaultCoordinatorArgs[kind] != nil:
+		return slices.Clone(defaultCoordinatorArgs[kind])
 	}
 	return c.agentArgs(kind, false)
 }
