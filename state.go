@@ -274,7 +274,10 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 	}
 	if t.PR != nil {
 		s.PRNumber, s.PRState = t.PR.Number, t.PR.State
-		if k := readyKey(t); k != "" {
+		// A PR is ready to announce only once nobody is waiting on TJ: a
+		// worker at needs_me leaves auto-merge off for the decision it asked for,
+		// and the announcement follows the answer.
+		if k := readyKey(t); k != "" && t.Bead.Status != StatusNeedsMe {
 			s.ReadyKey = k
 		}
 		if t.PR.State == "OPEN" && t.PR.AutoMerge != nil {
@@ -344,7 +347,7 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 		if len(t.BotReviews) > prev.BotReviews && comparable {
 			review("a new review from " + strings.Join(slices.Compact(slices.Sorted(slices.Values(t.BotReviews[prev.BotReviews:]))), ", "))
 		}
-		if k := readyKey(t); k != "" && k != prev.ReadyKey {
+		if k := readyKey(t); k != "" && k != prev.ReadyKey && t.Bead.Status != StatusNeedsMe {
 			o.Notify = true
 			ev(EventReady, "PR #%d is ready to merge (%s)", t.PR.Number, approval(t.PR))
 			if t.PR.AutoMerge != nil {
