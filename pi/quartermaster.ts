@@ -162,6 +162,17 @@ export default function (pi) {
   // passed to the input event, so it can be recorded as their source.
   const fromQuartermaster: string[] = [];
 
+  // Adoption starts parked: neither an automated prompt nor a startup
+  // extension may turn a transport check into task execution. The supervisor
+  // removes this marker only on explicit, gated activation.
+  const migrationParked = () => {
+    const p = process.env.QUARTERMASTER_RPC_PARK_FILE;
+    if (!p) return false;
+    try { readFileSync(p); return true; } catch (e) { return e?.code !== "ENOENT"; }
+  };
+  const parkedReason = "Transport migration is parked; no task continuation or approval was granted.";
+  pi.on("user_bash", () => migrationParked() ? { result: { output: parkedReason, exitCode: 1, cancelled: false, truncated: false } } : undefined);
+
   // A native supervisor owns exactly one saved session. Never let an
   // extension command fork/switch it behind the supervisor and its lease.
   const nativeRPC = (ctx) => ctx?.mode === "rpc" && process.env.QUARTERMASTER_RPC === "1";
@@ -169,6 +180,7 @@ export default function (pi) {
   pi.on("session_before_fork", (_event, ctx) => nativeRPC(ctx) ? { cancel: true } : undefined);
 
   pi.on("input", (event) => {
+    if (migrationParked()) return { action: "handled" };
     let source = event.source;
     if (source === "extension") {
       const i = fromQuartermaster.indexOf(event.text);
@@ -226,6 +238,7 @@ export default function (pi) {
       case "ping":
         return { ok: true, idle: ctxNow ? ctxNow.isIdle() : true };
       case "prompt": {
+        if (migrationParked()) return { ok: false, error: parkedReason };
         if (typeof req.text !== "string" || req.text.trim() === "") return { ok: false, error: "no text" };
         const busy = ctxNow ? !ctxNow.isIdle() : false;
         fromQuartermaster.push(req.text);
@@ -351,6 +364,7 @@ export default function (pi) {
   }
 
   pi.on("tool_call", async (event, ctx) => {
+    if (migrationParked()) return { block: true, terminate: true, reason: parkedReason };
     ctxNow = ctx;
     const cwd = ctx?.cwd || process.cwd();
     if (event.toolName === "bash" && typeof event.input?.command === "string") {

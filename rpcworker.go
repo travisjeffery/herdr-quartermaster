@@ -88,10 +88,11 @@ func rpcID() string {
 // Each record is a backend reservation, including when stopped. Dispatching
 // the same bead through Herdr must not open a second writer to its worktree.
 type rpcWorker struct {
-	Bead   string   `json:"bead"`
-	Cwd    string   `json:"cwd"`
-	Branch string   `json:"branch"`
-	Args   []string `json:"args"`
+	Bead     string       `json:"bead"`
+	Cwd      string       `json:"cwd"`
+	Branch   string       `json:"branch"`
+	Args     []string     `json:"args"`
+	Adoption *rpcAdoption `json:"adoption,omitempty"`
 }
 type rpcStatus struct {
 	Bead        string    `json:"bead"`
@@ -300,6 +301,9 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 		s.mu.Lock()
 		st := s.status
 		s.mu.Unlock()
+		if rpcParked(s.worker.Bead) {
+			st.Phase = "parked"
+		}
 		return rpcReply{OK: true, Status: &st}
 	case "receipt":
 		if !rpcIDRE.MatchString(req.ID) {
@@ -330,7 +334,7 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 			return fail(err)
 		}
 		s.mu.Lock()
-		if s.stopping || s.status.Error != "" || s.status.Phase == "blocked" {
+		if s.stopping || s.status.Error != "" || s.status.Phase == "blocked" || rpcParked(s.worker.Bead) {
 			s.mu.Unlock()
 			return fail(errors.New("worker blocked/stopping; inspect status and bead before continuing"))
 		}
@@ -357,6 +361,25 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 			return fail(err)
 		}
 		return rpcReply{OK: true, Receipt: &receipt}
+	case "activate":
+		s.promptMu.Lock()
+		defer s.promptMu.Unlock()
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.stopping || s.status.Error != "" || s.status.Phase != "idle" || s.worker.Adoption == nil {
+			return fail(errors.New("only an idle, healthy adopted worker can leave migration parking"))
+		}
+		b, err := (Beads{}).Show(s.worker.Bead)
+		if err != nil {
+			return fail(err)
+		}
+		if b.Status != StatusInProgress {
+			return fail(errors.New("resolve the bead blocker explicitly first; migration never grants approval"))
+		}
+		if err := os.Remove(rpcParkPath(s.worker.Bead)); err != nil {
+			return fail(err)
+		}
+		return rpcReply{OK: true}
 	case "cancel":
 		// No new follow-up may slip between clear_queue and abort, which
 		// would otherwise let pi continue it after the abort.
@@ -394,9 +417,35 @@ func rpcServe(cfg Config, id string) error {
 	if err = rpcLoad(filepath.Join(rpcDir(id), "worker.json"), &w); err != nil {
 		return err
 	}
+	if w.Adoption != nil {
+		if w.Adoption.GuardEnv != "" && w.Adoption.GuardEnv != adoptionGuardEnv(append(os.Environ(), cfg.Agents["pi"].Env...)) {
+			return errors.New("adoption guard environment changed; refusing launch")
+		}
+		if !w.Adoption.Ready {
+			return errors.New("adoption prepared but not verified; use rpc adopt after old owner exits")
+		}
+		if !w.Adoption.Completed {
+			b, err := (Beads{}).Show(id)
+			if err != nil {
+				return err
+			}
+			if err := adoptionValidate(cfg.herdrOn(newHerdr(), localHost), b, w); err != nil {
+				return err
+			}
+		}
+		if err := adoptionPrefix(w.Adoption); err != nil {
+			return err
+		}
+	}
 	prev, err := rpcPreviousStatus(id)
 	if err != nil {
 		return err
+	}
+	if w.Adoption != nil && prev.SessionFile == "" {
+		if err := adoptionPrefix(w.Adoption); err != nil {
+			return err
+		}
+		prev.SessionID, prev.SessionFile = w.Adoption.SessionID, w.Adoption.SessionFile
 	}
 	if prev.ChildPID > 0 && processAlive(prev.ChildPID) {
 		return fmt.Errorf("previous pi PID %d may still own the session; refusing resume", prev.ChildPID)
@@ -440,6 +489,9 @@ func rpcServe(cfg Config, id string) error {
 	cmd := exec.Command("pi", args...)
 	cmd.Dir = w.Cwd
 	cmd.Env = rpcWorkerEnv(cfg, id)
+	if w.Adoption != nil {
+		cmd.Env = append(cmd.Env, "QUARTERMASTER_RPC_PARK_FILE="+rpcParkPath(id))
+	}
 	// Persist the launch intent before a child can create a session. If we
 	// die before get_state, the next launch refuses to guess its identity.
 	if err := s.saveLocked(); err != nil {
@@ -483,6 +535,21 @@ func rpcServe(cfg Config, id string) error {
 	if s.status.SessionID == "" || s.status.SessionFile == "" {
 		s.mu.Unlock()
 		return errors.New("pi did not identify its persistent session")
+	}
+	if w.Adoption != nil && (s.status.SessionID != w.Adoption.SessionID || s.status.SessionFile != w.Adoption.SessionFile) {
+		s.mu.Unlock()
+		return errors.New("adopted pi returned a different session identity")
+	}
+	if w.Adoption != nil && !w.Adoption.Completed {
+		if err = adoptionPrefix(w.Adoption); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		w.Adoption.Completed = true
+		if err = rpcSave(filepath.Join(rpcDir(id), "worker.json"), w); err != nil {
+			s.mu.Unlock()
+			return err
+		}
 	}
 	if s.status.Phase == "starting" {
 		s.status.Phase = "idle"
@@ -602,7 +669,7 @@ func rpcWorkerEnv(cfg Config, id string) []string {
 	env := []string{}
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(k, "HERDR_") || strings.HasPrefix(k, "PI_SESSION_") || k == "PI_MODEL" || k == "PI_PROVIDER" || k == "PI_REASONING_LEVEL" || k == "QUARTERMASTER_EXEC_SOCKET" {
+		if strings.HasPrefix(k, "HERDR_") || strings.HasPrefix(k, "PI_SESSION_") || k == "PI_MODEL" || k == "PI_PROVIDER" || k == "PI_REASONING_LEVEL" || k == "QUARTERMASTER_EXEC_SOCKET" || k == "QUARTERMASTER_RPC_PARK_FILE" {
 			continue
 		}
 		env = append(env, kv)

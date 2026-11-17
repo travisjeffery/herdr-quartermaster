@@ -38,7 +38,9 @@ func TestRPCChildProcess(t *testing.T) {
 		session = filepath.Join(arg("--session-dir"), "actual-session.jsonl")
 	}
 	if session != "actual-session.jsonl" {
-		_ = os.WriteFile(session, []byte("{\"type\":\"session\",\"id\":\"actual-pi-id\"}\n"), 0600)
+		if _, err := os.Stat(session); os.IsNotExist(err) {
+			_ = os.WriteFile(session, []byte("{\"type\":\"session\",\"id\":\"actual-pi-id\"}\n"), 0600)
+		}
 	}
 	var mu sync.Mutex
 	emit := func(v any) {

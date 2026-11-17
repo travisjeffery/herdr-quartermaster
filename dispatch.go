@@ -134,6 +134,11 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	if backend != "" && backend != "herdr" {
 		return "", fmt.Errorf("unknown backend %q", backend)
 	}
+	lease, err := rpcLease(id)
+	if err != nil {
+		return "", err
+	}
+	defer lease.Close()
 	if rpcExists(id) {
 		return "", fmt.Errorf("%s belongs to pi-rpc; use rpc resume, not a second TUI worker", id)
 	}

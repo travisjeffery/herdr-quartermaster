@@ -28,6 +28,9 @@ Usage:
   quartermaster rpc tell <bead> <request-id> <text>     idempotent submission/reconciliation; never replays intent
   quartermaster rpc receipt <bead> <request-id>        reconcile a possibly delivered prompt, even after exit
   quartermaster rpc cancel|stop|resume <bead>          clear queued work and abort; stop; restore saved session
+  quartermaster rpc prepare <bead> <exact-pane>        reserve an idle local pi TUI worker for migration
+  quartermaster rpc adopt <bead>                      verify old owner exited; start same session parked
+  quartermaster rpc activate <bead>                   explicitly unpark an adopted, unblocked worker (no prompt)
   quartermaster host list                              the worker hosts: machine, slots, labels, repos
   quartermaster focus [<bead>] [--agent K]             focus the bead's worker, else dispatch it
                                                        (no bead: read it from the clipboard)
