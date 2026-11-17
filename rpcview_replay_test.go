@@ -36,6 +36,35 @@ func TestRPCViewResetWithPartialAppend(t *testing.T) {
 		t.Fatal("mixed history on reset", track)
 	}
 }
+func TestRPCViewResetRetainsMorePages(t *testing.T) {
+	path := viewFixture(t)
+	viewWrite(t, path, viewMessage(1, "old history"))
+	p, err := rpcViewRead("demo-1", "history", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for i := 0; i < 100; i++ {
+		b.WriteString(viewMessage(i, "replacement"))
+	}
+	viewWrite(t, path+".new", b.String())
+	if err := os.Rename(path+".new", path); err != nil {
+		t.Fatal(err)
+	}
+	p, err = rpcViewRead("demo-1", "history", p.Cursor)
+	if err != nil || !p.Reset || !p.More || len(p.Events) != rpcViewRecords {
+		t.Fatal(p, err)
+	}
+	p, err = rpcViewRead("demo-1", "history", p.Cursor)
+	if err != nil || p.Reset || p.More || len(p.Events) != 100-rpcViewRecords {
+		t.Fatal(p, err)
+	}
+	track := rpcViewTrack{usageRecords: 9, model: "old", events: []rpcViewEvent{{Label: "old"}}}
+	track.append(rpcViewPage{Reset: true, Gap: "replacement unreadable"}, false)
+	if track.usageRecords != 0 || track.model != "" || len(track.events) != 0 {
+		t.Fatal("failed replacement retained old data")
+	}
+}
 func TestRPCViewStaleSnapshotDoesNotInventElapsedProgress(t *testing.T) {
 	v := rpcVisibility{State: "running", Connected: true, Started: t0, ActivityAt: t0.Add(time.Second), Observed: t0.Add(2 * time.Second)}
 	line := rpcVisibilityLine(v, t0.Add(time.Hour))

@@ -346,6 +346,7 @@ func rpcViewRead(id, source, cursor string) (rpcViewPage, error) {
 	}
 	r := bufio.NewReaderSize(io.NewSectionReader(f, start, fi.Size()-start), 64<<10)
 	size := 0
+	partial := false
 	for scanned := 0; scanned < 256 && len(page.Events) < rpcViewRecords && size < rpcViewBytes && cur.Offset-start < rpcViewScanBytes; scanned++ {
 		var line []byte
 		for {
@@ -363,6 +364,7 @@ func rpcViewRead(id, source, cursor string) (rpcViewPage, error) {
 				}
 				// An incomplete append is retried from the same cursor, never consumed.
 				if len(line) > 0 {
+					partial = true
 					page.Gap = "incomplete final record; waiting for a complete append"
 				}
 				goto complete
@@ -381,7 +383,7 @@ complete:
 	cur.Anchor = rpcViewAnchor(f, cur.Offset)
 	b, _ := json.Marshal(cur)
 	page.Cursor = base64.RawURLEncoding.EncodeToString(b)
-	page.More = cur.Offset < fi.Size() && page.Gap == ""
+	page.More = cur.Offset < fi.Size() && !partial
 	return page, nil
 }
 func rpcViewAnchor(f *os.File, offset int64) string {

@@ -83,13 +83,14 @@ func (v *rpcViewer) load() cmd {
 	}
 }
 func (t *rpcViewTrack) append(p rpcViewPage, follow bool) {
+	// Identity resets explicitly invalidate retained records and accounting,
+	// including a replacement whose first read then fails.
+	if p.Reset {
+		*t = rpcViewTrack{}
+	}
 	if p.Cursor == "" {
 		t.gap = p.Gap
 		return
-	}
-	// Identity resets explicitly invalidate retained records and accounting.
-	if p.Reset {
-		*t = rpcViewTrack{}
 	}
 	t.cursor, t.gap, t.more = p.Cursor, p.Gap, p.More
 	for _, e := range p.Events {
