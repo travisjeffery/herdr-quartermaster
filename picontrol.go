@@ -71,11 +71,12 @@ type piRequest struct {
 }
 
 type piResponse struct {
-	OK     bool   `json:"ok"`
-	Error  string `json:"error"`
-	Idle   bool   `json:"idle"`
-	Queued bool   `json:"queued"`
-	Ask    *piAsk `json:"ask"`
+	OK          bool   `json:"ok"`
+	Error       string `json:"error"`
+	Idle        bool   `json:"idle"`
+	Queued      bool   `json:"queued"`
+	HandoffHash string `json:"handoff_hash,omitempty"`
+	Ask         *piAsk `json:"ask"`
 }
 
 // piAsk is the question a worker's guard is waiting on: a bash command a hook

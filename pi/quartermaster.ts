@@ -43,7 +43,7 @@
 // @ts-nocheck
 
 import { spawnSync } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -213,6 +213,10 @@ export default function (pi) {
   let sockPath = "";
   let token = "";
   let ctxNow;
+  let handoffContext = "";
+  const hasHandoff = (ctx) => !!handoffContext && ctx.sessionManager.getBranch().some(
+    (entry) => entry.type === "custom_message" && entry.customType === "quartermaster.handoff" && entry.content === handoffContext,
+  );
   let askSeq = 0;
   // The ask waiting on quartermaster, at most one: tool calls that ask wait
   // their turn behind it.
@@ -236,7 +240,8 @@ export default function (pi) {
     }
     switch (req.op) {
       case "ping":
-        return { ok: true, idle: ctxNow ? ctxNow.isIdle() : true };
+        return { ok: true, idle: ctxNow ? ctxNow.isIdle() : true,
+          handoff_hash: hasHandoff(ctxNow) ? createHash("sha256").update(handoffContext).digest("hex") : "" };
       case "prompt": {
         if (migrationParked()) return { ok: false, error: parkedReason };
         if (typeof req.text !== "string" || req.text.trim() === "") return { ok: false, error: "no text" };
@@ -310,6 +315,14 @@ export default function (pi) {
 
   pi.on("session_start", (_event, ctx) => {
     ctxNow = ctx;
+    const handoff = process.env.QUARTERMASTER_RPC_HANDOFF_FILE;
+    if (handoff && nativeRPC(ctx)) {
+      // Verify the freshly seeded custom message, never convert old history
+      // or send a task prompt. Startup failures leave the guard socket absent.
+      handoffContext = JSON.parse(readFileSync(handoff, "utf8")).handoff.context;
+      if (typeof handoffContext !== "string" || !handoffContext) throw new Error("missing handoff context");
+      if (!hasHandoff(ctx)) throw new Error("handoff context absent from session branch");
+    }
     const p = pi.getFlag("quartermaster-control");
     if (typeof p === "string" && p !== "" && !server) {
       try {

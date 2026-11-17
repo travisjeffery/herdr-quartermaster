@@ -11,15 +11,16 @@ const [ext, sock] = process.argv.slice(2);
 const { default: factory } = await import(ext);
 const handlers = {};
 let idle = true;
+const entries = process.env.QM_TEST_PI_ENTRIES ? JSON.parse(process.env.QM_TEST_PI_ENTRIES) : [];
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
-const ctx = { cwd: process.cwd(), mode: process.env.QM_TEST_PI_MODE || "tui", isIdle: () => idle,
+const ctx = { sessionManager: { getBranch: () => entries }, cwd: process.cwd(), mode: process.env.QM_TEST_PI_MODE || "tui", isIdle: () => idle,
   ui: { setStatus: (statusKey, statusText) => out({ statusKey, statusText: statusText ?? null }) } };
 const pi = {
   registerFlag() {},
   getFlag: (name) => (name === "quartermaster-control" ? sock : undefined),
   on: (name, fn) => ((handlers[name] ||= []).push(fn)),
   appendEntry: (customType, data) => out({ entry: customType, data }),
-  sendMessage: (m) => out({ message: m.customType }),
+  sendMessage: (m, options) => { entries.push({ type: "custom_message", ...m }); out({ message: m.customType, content: m.content, options }); },
   // pi runs the input event as it accepts a message, then delivers it.
   sendUserMessage: (text, opts) => {
     for (const h of handlers.input || []) h({ text, source: "extension", streamingBehavior: opts?.deliverAs }, ctx);
@@ -43,6 +44,7 @@ for await (const line of rl) {
   const [op, ...rest] = line.split(" ");
   const arg = rest.join(" ");
   if (op === "idle") idle = arg === "true";
+  if (op === "reload") { for (const h of handlers.session_start || []) h({ reason: "reload" }, ctx); out({ reload: true, entries: entries.length }); }
   if (op === "tool") {
     // Not awaited: an ask waits on quartermaster while the test answers it.
     Promise.all((handlers.tool_call || []).map((h) => h({ toolName: "bash", input: { command: arg } }, ctx))).then((rs) => {

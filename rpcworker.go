@@ -93,6 +93,7 @@ type rpcWorker struct {
 	Branch   string       `json:"branch"`
 	Args     []string     `json:"args"`
 	Adoption *rpcAdoption `json:"adoption,omitempty"`
+	Handoff  *rpcHandoff  `json:"handoff,omitempty"`
 }
 type rpcStatus struct {
 	Bead        string    `json:"bead"`
@@ -366,7 +367,7 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 		defer s.promptMu.Unlock()
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if s.stopping || s.status.Error != "" || s.status.Phase != "idle" || s.worker.Adoption == nil {
+		if s.stopping || s.status.Error != "" || s.status.Phase != "idle" || (s.worker.Adoption == nil && s.worker.Handoff == nil) {
 			return fail(errors.New("only an idle, healthy adopted worker can leave migration parking"))
 		}
 		b, err := (Beads{}).Show(s.worker.Bead)
@@ -437,9 +438,34 @@ func rpcServe(cfg Config, id string) error {
 			return err
 		}
 	}
+	if w.Handoff != nil {
+		a := &w.Handoff.Checkpoint
+		if !a.Ready {
+			return errors.New("handoff prepared but not verified; use rpc handoff after source exits")
+		}
+		if a.GuardEnv != adoptionGuardEnv(append(os.Environ(), cfg.Agents["pi"].Env...)) {
+			return errors.New("handoff guard environment changed")
+		}
+		if !a.Completed {
+			b, err := (Beads{}).Show(id)
+			if err != nil {
+				return err
+			}
+			if err := handoffValidate(cfg.herdrOn(newHerdr(), localHost), b, w); err != nil {
+				return err
+			}
+		}
+	}
 	prev, err := rpcPreviousStatus(id)
 	if err != nil {
 		return err
+	}
+	if w.Handoff != nil && prev.SessionFile == "" {
+		prev.SessionFile, err = handoffSeed(w)
+		if err != nil {
+			return err
+		}
+		prev.SessionID = id
 	}
 	if w.Adoption != nil && prev.SessionFile == "" {
 		if err := adoptionPrefix(w.Adoption); err != nil {
@@ -489,8 +515,11 @@ func rpcServe(cfg Config, id string) error {
 	cmd := exec.Command("pi", args...)
 	cmd.Dir = w.Cwd
 	cmd.Env = rpcWorkerEnv(cfg, id)
-	if w.Adoption != nil {
+	if w.Adoption != nil || w.Handoff != nil {
 		cmd.Env = append(cmd.Env, "QUARTERMASTER_RPC_PARK_FILE="+rpcParkPath(id))
+	}
+	if w.Handoff != nil {
+		cmd.Env = append(cmd.Env, "QUARTERMASTER_RPC_HANDOFF_FILE="+filepath.Join(rpcDir(id), "worker.json"))
 	}
 	// Persist the launch intent before a child can create a session. If we
 	// die before get_state, the next launch refuses to guess its identity.
@@ -526,8 +555,12 @@ func rpcServe(cfg Config, id string) error {
 			if !ok {
 				return errors.New("pi guard control socket did not start; refusing prompts")
 			}
-			if _, err = c.call(piRequest{Op: "ping"}); err != nil {
+			ping, err := c.call(piRequest{Op: "ping"})
+			if err != nil {
 				return fmt.Errorf("pi guard not ready: %w", err)
+			}
+			if w.Handoff != nil && (!ping.Idle || ping.HandoffHash != fmt.Sprintf("%x", sha256.Sum256([]byte(w.Handoff.Context)))) {
+				return errors.New("pi did not confirm the parked handoff context")
 			}
 		}
 	}
@@ -546,6 +579,17 @@ func rpcServe(cfg Config, id string) error {
 			return err
 		}
 		w.Adoption.Completed = true
+		if err = rpcSave(filepath.Join(rpcDir(id), "worker.json"), w); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	if w.Handoff != nil && !w.Handoff.Checkpoint.Completed {
+		if s.status.SessionID != id || !strings.HasPrefix(s.status.SessionFile, filepath.Join(rpcDir(id), "sessions")+string(os.PathSeparator)) {
+			s.mu.Unlock()
+			return errors.New("fresh handoff returned an unexpected session identity")
+		}
+		w.Handoff.Checkpoint.Completed = true
 		if err = rpcSave(filepath.Join(rpcDir(id), "worker.json"), w); err != nil {
 			s.mu.Unlock()
 			return err
@@ -669,7 +713,7 @@ func rpcWorkerEnv(cfg Config, id string) []string {
 	env := []string{}
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(k, "HERDR_") || strings.HasPrefix(k, "PI_SESSION_") || k == "PI_MODEL" || k == "PI_PROVIDER" || k == "PI_REASONING_LEVEL" || k == "QUARTERMASTER_EXEC_SOCKET" || k == "QUARTERMASTER_RPC_PARK_FILE" {
+		if strings.HasPrefix(k, "HERDR_") || strings.HasPrefix(k, "PI_SESSION_") || k == "PI_MODEL" || k == "PI_PROVIDER" || k == "PI_REASONING_LEVEL" || k == "QUARTERMASTER_EXEC_SOCKET" || k == "QUARTERMASTER_RPC_PARK_FILE" || k == "QUARTERMASTER_RPC_HANDOFF_FILE" {
 			continue
 		}
 		env = append(env, kv)

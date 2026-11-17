@@ -122,13 +122,37 @@ func adoptionDigest(cwd string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	index, err := adoptionGit(cwd, "ls-files", "--stage", "-z")
+	digest, err := checkoutDigest(cwd, 0)
+	return strings.TrimSpace(string(branch)), digest, err
+}
+
+func handoffDigest(cwd string) (string, string, error) {
+	branch, err := adoptionGit(cwd, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
 		return "", "", err
 	}
+	digest, err := checkoutDigest(cwd, 16)
+	return strings.TrimSpace(string(branch)), digest, err
+}
+
+// Zero depth preserves strict adoption's submodule refusal. Fresh handoffs
+// additionally fingerprint initialized submodules (including detached HEADs).
+func checkoutDigest(cwd string, depth int) (string, error) {
+	index, err := adoptionGit(cwd, "ls-files", "--stage", "-z")
+	if err != nil {
+		return "", err
+	}
+	submodules := map[string]bool{}
 	for _, entry := range strings.Split(string(index), "\x00") {
 		if strings.HasPrefix(entry, "160000 ") {
-			return "", "", errors.New("submodule checkouts are unsupported for adoption; preserve worker")
+			if depth == 0 {
+				return "", errors.New("submodule checkouts are unsupported for adoption or nesting limit exceeded; preserve worker")
+			}
+			_, name, ok := strings.Cut(entry, "\t")
+			if !ok {
+				return "", errors.New("invalid submodule index entry")
+			}
+			submodules[name] = true
 		}
 	}
 	hash := sha256.New()
@@ -137,14 +161,14 @@ func adoptionDigest(cwd string) (string, string, error) {
 	for _, args := range [][]string{{"rev-parse", "HEAD"}, {"status", "--porcelain=v1", "-z", "--untracked-files=all"}, {"diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD"}, {"diff", "--no-ext-diff", "--no-textconv", "--binary", "--cached"}} {
 		b, err := adoptionGit(cwd, args...)
 		if err != nil {
-			return "", "", err
+			return "", err
 		}
 		fmt.Fprintf(hash, "%d:", len(b))
 		hash.Write(b)
 	}
 	names, err := adoptionGit(cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	for _, name := range strings.Split(string(names), "\x00") {
 		if name == "" {
@@ -157,31 +181,50 @@ func adoptionDigest(cwd string) (string, string, error) {
 			continue
 		}
 		if err != nil {
-			return "", "", err
+			return "", err
 		}
 		fmt.Fprintf(hash, "%d:%s:%s:%d:", len(name), name, fi.Mode(), fi.Size())
 		switch {
+		case submodules[name] && fi.IsDir():
+			if _, err := os.Lstat(filepath.Join(p, ".git")); errors.Is(err, os.ErrNotExist) {
+				entries, err := os.ReadDir(p)
+				if err != nil {
+					return "", err
+				}
+				if len(entries) != 0 {
+					return "", fmt.Errorf("uninitialized submodule %s is not empty", name)
+				}
+				hash.Write([]byte("uninitialized"))
+			} else if err != nil {
+				return "", err
+			} else {
+				sum, err := checkoutDigest(p, depth-1)
+				if err != nil {
+					return "", err
+				}
+				hash.Write([]byte(sum))
+			}
 		case fi.Mode().IsRegular():
 			f, err := os.Open(p)
 			if err != nil {
-				return "", "", err
+				return "", err
 			}
 			_, err = io.Copy(hash, f)
 			f.Close()
 			if err != nil {
-				return "", "", err
+				return "", err
 			}
 		case fi.Mode()&os.ModeSymlink != 0:
 			target, err := os.Readlink(p)
 			if err != nil {
-				return "", "", err
+				return "", err
 			}
 			hash.Write([]byte(target))
 		default:
-			return "", "", fmt.Errorf("unsupported checkout file %s", name)
+			return "", fmt.Errorf("unsupported checkout file %s", name)
 		}
 	}
-	return strings.TrimSpace(string(branch)), fmt.Sprintf("%x", hash.Sum(nil)), nil
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 func adoptionSession(path, cwd string) (string, int64, string, error) {
@@ -697,7 +740,14 @@ func adoptionHeldAgent(a Agent) bool {
 	entries, _ := os.ReadDir(rpcRoot())
 	for _, e := range entries {
 		var w rpcWorker
-		if rpcLoad(filepath.Join(rpcDir(e.Name()), "worker.json"), &w) == nil && w.Adoption != nil && (w.Adoption.Source.PaneID == a.PaneID || w.Adoption.Source.Name == a.Name) {
+		if rpcLoad(filepath.Join(rpcDir(e.Name()), "worker.json"), &w) != nil {
+			continue
+		}
+		checkpoint := w.Adoption
+		if w.Handoff != nil {
+			checkpoint = &w.Handoff.Checkpoint
+		}
+		if checkpoint != nil && ((a.PaneID != "" && checkpoint.Source.PaneID == a.PaneID) || (a.Name != "" && checkpoint.Source.Name == a.Name)) {
 			return true
 		}
 	}

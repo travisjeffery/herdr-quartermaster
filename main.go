@@ -30,6 +30,8 @@ Usage:
   quartermaster rpc cancel|stop|resume <bead>          clear queued work and abort; stop; restore saved session
   quartermaster rpc prepare <bead> <exact-pane>        reserve an idle local pi TUI worker for migration
   quartermaster rpc adopt <bead>                      verify old owner exited; start same session parked
+  quartermaster rpc handoff-prepare <bead> <pane> <json> checkpoint non-pi worker and durable fresh-session context
+  quartermaster rpc handoff <bead>                    verify source exit; start a fresh pi session parked
   quartermaster rpc activate <bead>                   explicitly unpark an adopted, unblocked worker (no prompt)
   quartermaster host list                              the worker hosts: machine, slots, labels, repos
   quartermaster focus [<bead>] [--agent K]             focus the bead's worker, else dispatch it
