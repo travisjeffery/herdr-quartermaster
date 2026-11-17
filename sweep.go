@@ -46,7 +46,16 @@ type sweepEnv struct {
 
 func liveSweepEnv(h Herdr) sweepEnv {
 	return sweepEnv{
-		worktrees:   h.Worktrees,
+		worktrees: func(repo string) ([]Worktree, error) {
+			wts, err := h.Worktrees(repo)
+			var kept []Worktree
+			for _, w := range wts {
+				if !rpcReservedPath(w.Path) {
+					kept = append(kept, w)
+				}
+			}
+			return kept, err
+		},
 		mergedHeads: func(repo string) (map[string]bool, error) { return GH{repo: repo}.MergedHeads() },
 		closedBeads: func() ([]Bead, error) { return Beads{}.list("--status", StatusClosed) },
 		activeBeads: Beads{}.Active,

@@ -162,6 +162,12 @@ export default function (pi) {
   // passed to the input event, so it can be recorded as their source.
   const fromQuartermaster: string[] = [];
 
+  // A native supervisor owns exactly one saved session. Never let an
+  // extension command fork/switch it behind the supervisor and its lease.
+  const nativeRPC = (ctx) => ctx?.mode === "rpc" && process.env.QUARTERMASTER_RPC === "1";
+  pi.on("session_before_switch", (_event, ctx) => nativeRPC(ctx) ? { cancel: true } : undefined);
+  pi.on("session_before_fork", (_event, ctx) => nativeRPC(ctx) ? { cancel: true } : undefined);
+
   pi.on("input", (event) => {
     let source = event.source;
     if (source === "extension") {
@@ -312,9 +318,11 @@ export default function (pi) {
         const id = String(++askSeq) + "-" + randomBytes(3).toString("hex");
         pi.appendEntry("quartermaster.ask", { id, command, reason });
         pi.events.emit("herdr:blocked", { active: true, label: "asking quartermaster: " + command.slice(0, 80) });
+        if (ctxNow?.mode === "rpc") ctxNow.ui.setStatus("quartermaster.ask", command);
         const finish = (out: string | undefined, entry: any) => {
           clearTimeout(timer);
           pending = undefined;
+          if (ctxNow?.mode === "rpc") ctxNow.ui.setStatus("quartermaster.ask", undefined);
           pi.events.emit("herdr:blocked", { active: false });
           pi.appendEntry("quartermaster.answer", { id, ...entry });
           resolve(out);

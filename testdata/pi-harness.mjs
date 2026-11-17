@@ -12,7 +12,8 @@ const { default: factory } = await import(ext);
 const handlers = {};
 let idle = true;
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
-const ctx = { cwd: process.cwd(), isIdle: () => idle };
+const ctx = { cwd: process.cwd(), mode: process.env.QM_TEST_PI_MODE || "tui", isIdle: () => idle,
+  ui: { setStatus: (statusKey, statusText) => out({ statusKey, statusText: statusText ?? null }) } };
 const pi = {
   registerFlag() {},
   getFlag: (name) => (name === "quartermaster-control" ? sock : undefined),
@@ -48,6 +49,14 @@ for await (const line of rl) {
       const r = rs.find((x) => x);
       out({ tool: arg, block: !!r?.block, reason: r?.reason ?? null });
     });
+  }
+  if (op === "switch" || op === "fork") {
+    const rs = await Promise.all((handlers[op === "switch" ? "session_before_switch" : "session_before_fork"] || []).map((h) => h({}, ctx)));
+    out({ op, cancel: rs.some((r) => r?.cancel) });
+  }
+  if (op === "subagent") {
+    const rs = await Promise.all((handlers.tool_call || []).map((h) => h({ toolName: "subagent", input: { agent: arg } }, ctx)));
+    out({ op, block: rs.some((r) => r?.block) });
   }
   if (op === "shutdown") {
     for (const h of handlers.session_shutdown || []) h({ reason: "quit" }, ctx);

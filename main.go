@@ -23,6 +23,11 @@ Usage:
   quartermaster dispatch <bead> [--agent K] [--focus]  start a worker on a bead in its own worktree
                 [--host H] [--force] [--by WHO]        on host H (default: the bead's host: label, else
                                                        local); --force ignores the bead's needs: labels
+                [--backend herdr|pi-rpc]               opt in to native pi RPC; no default or live sessions change
+  quartermaster rpc status|output|events <bead>        inspect a native worker (no Herdr needed)
+  quartermaster rpc tell <bead> <request-id> <text>     idempotent submission/reconciliation; never replays intent
+  quartermaster rpc receipt <bead> <request-id>        reconcile a possibly delivered prompt, even after exit
+  quartermaster rpc cancel|stop|resume <bead>          clear queued work and abort; stop; restore saved session
   quartermaster host list                              the worker hosts: machine, slots, labels, repos
   quartermaster focus [<bead>] [--agent K]             focus the bead's worker, else dispatch it
                                                        (no bead: read it from the clipboard)
@@ -192,6 +197,7 @@ func run(args []string) error {
 	cmd, rest := args[0], args[1:]
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	kind := fs.String("agent", "", "agent kind: claude, codex, muse, pi or auto")
+	backend := fs.String("backend", "", "dispatch: herdr (default) or pi-rpc (local, headless)")
 	focus := fs.Bool("focus", false, "focus the new workspace")
 	repoFlag := fs.String("repo", "", "configure: the repository quartermaster works in, written to config.toml if it has none")
 	force := fs.Bool("force", false, "resolve even if the bead is open, its agent is working or its worktree is dirty; dispatch to a host lacking a needed label")
@@ -225,11 +231,13 @@ func run(args []string) error {
 		if len(pos) != 1 {
 			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex|muse|pi] [--focus] [--host H] [--force]")
 		}
-		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Focus: *focus, Host: *hostFlag, Force: *force, By: *by})
+		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Backend: *backend, Focus: *focus, Host: *hostFlag, Force: *force, By: *by})
 		if err != nil {
 			return err
 		}
 		fmt.Println(msg)
+	case "rpc":
+		return rpcCmd(cfg, pos, *by, os.Stdout)
 	case "host":
 		if len(pos) != 1 || pos[0] != "list" {
 			return fmt.Errorf("usage: quartermaster host list")
