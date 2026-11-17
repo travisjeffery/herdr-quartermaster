@@ -173,6 +173,73 @@ adopt and retire the migration worker last. No batch stop/close is provided.
 These are managed-worker safeguards, not isolation against the same OS user
 manually opening a session, typing into a pane or modifying configuration.
 
+## Fresh cross-harness handoff (explicit, local)
+
+For an explicitly authorized change from Claude, Codex or Muse to pi, use a
+**fresh session with a written handoff**, not native transcript conversion.
+This separate route uses the existing configured pi protection baseline; it
+does **not** certify classifier/sandbox equivalence. Strict pi-to-pi adoption
+above is unchanged, including its full process-census refusal cases.
+
+1. Inventory the exact named worker and pane, excluding the coordinator and
+   caller. Retire closed tasks without creating a replacement. Wait for a safe
+   checkpoint (idle/done, or an unanswered question with no in-flight action).
+   Inspect the source transcript and process tree; independently detached jobs
+   or ambiguous worktree ownership remain exceptions, not a reason to kill
+   another process. Preserve all original transcripts and files.
+2. Write a private JSON file with absolute `cwd` (the bead's linked worktree),
+   absolute `transcript` (the original harness's exact transcript file), and
+   `context` (current progress, the unanswered question **verbatim**, relevant
+   evidence/PRs and the next separately authorized step). When a legacy pane
+   reports a stale home-directory cwd, establish the actual worktree from its
+   transcript and bead rather than guessing from the current pane directory.
+3. `quartermaster rpc handoff-prepare <bead> <exact-pane> <handoff.json>`
+   reserves the existing checkout under the usual lease/admission locks. It
+   saves task context, transcript prefix, source process identities and a raw
+   checkout fingerprint (including initialized submodules). It neither stops
+   anything nor prompts a model. Existing reservations are never overwritten.
+4. Reconfirm the exact source identity and safe checkpoint; gracefully stop
+   only that source process. Wait for its recorded descendants and remaining
+   source-session processes to exit. No force-kill or blanket process command.
+   `quartermaster rpc handoff <bead>` checks those exits, the original idle
+   shell, fresh Herdr ownership, unchanged files/history and task status, then
+   starts a bounded, **parked** pi replacement. Its new v3 session contains
+   only a freshly authored handoff custom message (no converted source entries
+   or invented assistant response). This seed is durable before launch because
+   pi otherwise buffers a fresh session until its first assistant response.
+   An interrupted initial launch must pass the same validation; `rpc resume`
+   cannot skip preparation.
+5. Check `rpc status` is parked with a **new** session in the private RPC
+   directory. The configured guard must confirm the exact handoff context in
+   the active session branch; it is a `quartermaster.handoff` custom message,
+   not a task prompt. Verify no startup `agent_start`, retained source history
+   and dirty files, and refusal of `tell`. Only then close the exact old pane
+   after freshly confirming it is still the original idle shell.
+
+All replacements start parked, regardless of task status. Blocked/needs_me
+questions stay unanswered. Activation is separate and never an approval; do
+not activate a live worker merely to test transport. The ticker treats parked
+workers as blocked. The new session retains the handoff on resume; the old
+transcript is never passed to pi as a native session or rewritten. Initial
+handoff context also remains durable in private `worker.json`.
+
+Unlike strict adoption, this route checks exact recorded owners and source
+Linux sessions, **not every process's cwd on the host**. It does not claim to
+exclude an independently detached writer. Unrelated protected services do not
+need to be stopped or made inspectable. No guard configuration, permission or
+reservation bypass is provided. On failure preserve the reservation, pane and
+files, stop expansion, and inspect; do not restart the old harness alongside
+the replacement. Keep this version installed while fresh-handoff reservations
+exist. There is no automatic rollback into the old transcript.
+
+Isolated validation (fixture legacy source, real guarded pi, no live panes):
+
+```sh
+python3 scripts/pi-handoff-trial.py --model <authorized-provider/model>
+# Repeat after installation:
+python3 scripts/pi-handoff-trial.py --binary /absolute/quartermaster --model <authorized-provider/model>
+```
+
 ## Reconnection is not resume
 
 A detached supervisor process owns pi's stdin/stdout for the worker's lifetime.
@@ -198,7 +265,7 @@ new-session fallback, or force-resume command is provided.
 An exclusive flock is held by the supervisor and inherited by pi. A new
 supervisor also refuses a potentially live previous child PID. Git refuses
 adopting an existing branch/worktree on initial dispatch; the explicit staged
-adoption path above is the only supported exception. The reservation
+adoption and fresh-handoff paths above are the only supported exceptions. The reservation
 continues to block TUI dispatch even after stop. These protections cover
 quartermaster-managed workers, not someone manually opening the session in
 another pi process or modifying files as the same OS user. Never manually
@@ -261,7 +328,7 @@ worker run.
 
 All native data is under `<state dir>/rpc/<bead>/`:
 
-- `worker.json`: backend reservation, argv, worktree and branch; adoption checkpoint when applicable.
+- `worker.json`: backend reservation, argv, worktree and branch; adoption or fresh-handoff checkpoint/context when applicable.
 - `parked`: durable migration barrier, removed only by explicit activation.
 - `status.json`: actual pi session ID/file, supervisor/child PIDs and lifecycle.
 - `requests/<id>.json`: durable request receipts, retained across resume.

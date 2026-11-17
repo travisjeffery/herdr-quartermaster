@@ -236,6 +236,12 @@ func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 		return errors.New("invalid bead id")
 	}
 	switch op {
+	case "handoff-prepare", "handoff":
+		msg, err := rpcHandoffCmd(cfg, cfg.herdrOn(newHerdr(), localHost), pos, by)
+		if msg != "" {
+			fmt.Fprintln(out, msg)
+		}
+		return err
 	case "prepare", "adopt":
 		msg, err := rpcAdoptionCmd(cfg, cfg.herdrOn(newHerdr(), localHost), pos, by)
 		if msg != "" {
