@@ -18,6 +18,7 @@ const source = toolName
 
 type Agent struct {
 	Name        string `json:"name"`
+	Backend     string `json:"backend,omitempty"`
 	Kind        string `json:"agent"`
 	Status      string `json:"agent_status"`
 	PaneID      string `json:"pane_id"`
@@ -135,8 +136,15 @@ func (h Herdr) call(timeout time.Duration, args ...string) (json.RawMessage, err
 const callTimeout = 10 * time.Second
 
 func (h Herdr) Agents() ([]Agent, error) {
+	var native []Agent
+	if h.hostName() == localHost {
+		native = rpcAgents()
+	}
 	res, err := h.call(callTimeout, "agent", "list")
 	if err != nil {
+		if len(native) > 0 {
+			return native, nil
+		}
 		return nil, err
 	}
 	var out struct {
@@ -148,7 +156,7 @@ func (h Herdr) Agents() ([]Agent, error) {
 	for i := range out.Agents {
 		out.Agents[i].Host = h.hostName()
 	}
-	return out.Agents, nil
+	return append(out.Agents, native...), nil
 }
 
 type Opened struct {
@@ -327,12 +335,19 @@ func (h Herdr) Panes(workspace string) ([]Pane, error) {
 }
 
 func (h Herdr) Prompt(target, text string) error {
+	if id, ok := rpcAgentID(target); ok {
+		_, err := rpcTell(id, text)
+		return err
+	}
 	_, err := h.call(callTimeout, "agent", "prompt", target, text)
 	return err
 }
 
 // Read is the last lines of what an agent's pane shows, as plain text.
 func (h Herdr) Read(target string, lines int, timeout time.Duration) (string, error) {
+	if id, ok := rpcAgentID(target); ok {
+		return rpcRead(id, lines)
+	}
 	out, err := h.output(timeout, "agent", "read", target, "--source", "visible", "--lines", strconv.Itoa(lines), "--format", "text")
 	return string(out), err
 }
@@ -340,6 +355,9 @@ func (h Herdr) Read(target string, lines int, timeout time.Duration) (string, er
 // SendKeys presses keys in an agent's pane: names such as enter, down and esc,
 // or literal characters.
 func (h Herdr) SendKeys(target string, keys ...string) error {
+	if _, ok := rpcAgentID(target); ok {
+		return fmt.Errorf("native RPC workers have no terminal; use rpc cancel/stop")
+	}
 	_, err := h.call(callTimeout, append([]string{"agent", "send-keys", target}, keys...)...)
 	return err
 }
@@ -350,6 +368,9 @@ func (h Herdr) Rename(pane, name string) error {
 }
 
 func (h Herdr) Focus(target string) error {
+	if _, ok := rpcAgentID(target); ok {
+		return fmt.Errorf("native RPC workers have no terminal; use rpc output/events")
+	}
 	_, err := h.call(callTimeout, "agent", "focus", target)
 	return err
 }
@@ -361,6 +382,9 @@ func (h Herdr) Notify(title, body string) {
 // ReportState sets this tool's sidebar tokens on a pane. A TTL makes stale rows
 // disappear on their own if the ticker dies.
 func (h Herdr) ReportState(pane string, tokens map[string]string, ttl time.Duration) error {
+	if _, ok := rpcAgentID(pane); ok {
+		return nil
+	}
 	args := []string{"pane", "report-metadata", pane, "--source", source, "--ttl-ms", strconv.FormatInt(ttl.Milliseconds(), 10)}
 	for k, v := range tokens {
 		args = append(args, "--token", k+"="+v)
@@ -370,6 +394,9 @@ func (h Herdr) ReportState(pane string, tokens map[string]string, ttl time.Durat
 }
 
 func (h Herdr) ClearState(pane string) {
+	if _, ok := rpcAgentID(pane); ok {
+		return
+	}
 	for _, src := range append([]string{source}, legacyNames...) {
 		_, _ = h.call(callTimeout, "pane", "report-metadata", pane, "--source", src, "--clear-token", "sh_state", "--clear-token", "sh_rank")
 	}

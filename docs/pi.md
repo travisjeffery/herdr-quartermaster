@@ -22,7 +22,14 @@ steps only you can do. Checked against pi 1.5.2 and herdr 0.9.5.
 | Guards | quartermaster's pi extension, loaded into every pi it starts (below). |
 | Close verifier | Unchanged: `claude -p`, whatever the worker's kind. |
 
-## Durable sessions, and why the file rather than RPC
+## Native RPC alternative
+
+For local headless workers, use `dispatch <bead> --backend pi-rpc --agent pi`.
+This is an additional opt-in transport, with a persistent supervisor, rather
+than a migration of these TUI sessions. See [native RPC workers](pi-rpc.md) for
+the isolated trial, approvals, lifecycle, limitations and rollback.
+
+## TUI durable sessions, and why the file rather than RPC
 
 pi stores a conversation as an append-only JSONL tree of entries with stable
 ids (pi's `docs/session-format.md`); `docs/rpc-commands.md` calls an entry id

@@ -65,8 +65,9 @@ func brief(b Bead, branch, path, linear, instructions string) string {
 }
 
 type DispatchOpts struct {
-	Kind  string
-	Focus bool
+	Backend string
+	Kind    string
+	Focus   bool
 	// Host runs the worker there; empty means the bead's host: label, else
 	// local.
 	Host string
@@ -123,6 +124,19 @@ func onHost(host string) string {
 // worker runs on the host --host names, else the one the bead's host: label
 // records, else local; the bead is labelled with where it went.
 func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
+	backend := o.Backend
+	if backend == "" {
+		backend = cfg.WorkerBackend
+	}
+	if backend == rpcBackend {
+		return dispatchRPC(cfg, h, id, o)
+	}
+	if backend != "" && backend != "herdr" {
+		return "", fmt.Errorf("unknown backend %q", backend)
+	}
+	if rpcExists(id) {
+		return "", fmt.Errorf("%s belongs to pi-rpc; use rpc resume, not a second TUI worker", id)
+	}
 	name := agentName(id)
 	// Agent names are per herdr server, so an existing worker can be on any
 	// host.
@@ -244,6 +258,9 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 // force resolves an open bead or a working agent's, and removes a worktree
 // with modified or untracked files; without it, a dirty worktree is kept.
 func resolve(cfg Config, h Herdr, id string, force bool) (string, error) {
+	if rpcExists(id) {
+		return "", fmt.Errorf("native RPC worktree retained for session recovery; stop with quartermaster rpc stop %s before explicit cleanup (docs/pi-rpc.md)", id)
+	}
 	b, err := Beads{}.Show(id)
 	if err != nil {
 		return "", err

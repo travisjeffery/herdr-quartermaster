@@ -179,6 +179,14 @@ func unattended(cfg Config, h Herdr, prs map[string]PR) ([]Resumable, []Bead, er
 // resume restarts the picked beads' agents; by is who decided, as for
 // dispatch.
 func resume(cfg Config, h Herdr, ids []string, kind, by string) ([]string, error) {
+	// Explicit native resumes restore only the saved session, with no replay.
+	if len(ids) == 1 && rpcExists(ids[0]) {
+		if kind != "" && kind != "pi" {
+			return nil, errors.New("cannot change a native worker to a TUI agent implicitly")
+		}
+		msg, err := rpcResume(cfg, ids[0], by)
+		return []string{msg}, err
+	}
 	if kind != "" && !validKinds[kind] {
 		return nil, fmt.Errorf("unknown agent kind %q (%s)", kind, kindList())
 	}
@@ -215,6 +223,9 @@ func resume(cfg Config, h Herdr, ids []string, kind, by string) ([]string, error
 }
 
 func resumeOne(cfg Config, h Herdr, r Resumable, kind string) (string, error) {
+	if rpcExists(r.Bead.ID) {
+		return "", errors.New("native worker: use quartermaster rpc resume explicitly; no automatic replay")
+	}
 	if !validKinds[kind] {
 		return "", fmt.Errorf("unknown agent kind %q (%s)", kind, kindList())
 	}

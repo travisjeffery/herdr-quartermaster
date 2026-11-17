@@ -160,6 +160,9 @@ func (a piAsk) prompt() ApprovalPrompt {
 // local pi worker whose extension is listening, else types it into its pane
 // as herdr agent prompt does. viaSocket reports which.
 func promptPiAgent(h Herdr, a Agent, text string) (viaSocket bool, err error) {
+	if id, ok := rpcAgentID(a.PaneID); ok {
+		return true, rpcPromptOnce(id, text)
+	}
 	if h.hostName() == localHost && isLocalPi(&a) {
 		if c, ok := piControlFor(a.Name); ok {
 			if _, err := c.Prompt(text); err == nil {
@@ -274,6 +277,9 @@ func tellCmd(cfg Config, h Herdr, show func(string) (Bead, error), id, text stri
 	b, err := show(id)
 	if err != nil {
 		return "", err
+	}
+	if rpcExists(b.ID) {
+		return rpcTell(b.ID, text)
 	}
 	host, name := beadHost(b), agentName(b.ID)
 	if host == "" {

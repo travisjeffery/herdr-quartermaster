@@ -418,7 +418,7 @@ func (t Ticker) once(st *TickerState) error {
 		if th.Agent != nil && th.Agent.Status == "blocked" {
 			th.Prompt = t.readPrompt(th.Agent)
 		}
-		if th.Agent != nil && th.Agent.Session.Agent == "pi" {
+		if th.Agent != nil && th.Agent.Session.Agent == "pi" && (th.Agent.Backend != rpcBackend || th.Agent.Status == "idle") {
 			th.Turn = piLastTurn(th.Agent)
 		}
 		if seen && wokeAfterNeedsMe(th, prev) {

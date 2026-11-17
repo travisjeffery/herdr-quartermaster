@@ -21,6 +21,7 @@ type Config struct {
 	BranchPrefix     string `toml:"branch_prefix"`
 	BaseBranch       string `toml:"base_branch"`
 	WorkerAgent      string `toml:"worker_agent"`
+	WorkerBackend    string `toml:"worker_backend"` // empty/herdr (default), or pi-rpc; local workers only
 	CoordinatorAgent string `toml:"coordinator_agent"`
 	CoordinatorName  string `toml:"coordinator_name"`
 	TickSeconds      int    `toml:"tick_seconds"`
@@ -162,6 +163,9 @@ var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // name the shell can export unquoted. BEADS_ACTOR and BEADS_DIR are
 // quartermaster's to set: a remote pane must not get BEADS_DIR.
 func (c Config) validateAgents() error {
+	if c.WorkerBackend != "" && c.WorkerBackend != "herdr" && c.WorkerBackend != rpcBackend {
+		return fmt.Errorf("unknown worker_backend %q (herdr or pi-rpc)", c.WorkerBackend)
+	}
 	if err := c.validatePiAsk(); err != nil {
 		return err
 	}
