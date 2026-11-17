@@ -18,19 +18,29 @@ import (
 //go:embed pi/quartermaster.ts
 var piExtension []byte
 
+//go:embed pi/coordinator.ts
+var piCoordinatorExtension []byte
+
 // piExtensionFile writes the embedded extension to the state directory, when
 // it differs, and returns its path. pi loads it with -e, so it needs no
 // install and always matches the binary.
 func piExtensionFile() (string, error) {
-	path := filepath.Join(stateDir(), "pi", "quartermaster.ts")
-	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, piExtension) {
+	if _, err := writePiExtension("coordinator.ts", piCoordinatorExtension); err != nil {
+		return "", err
+	}
+	return writePiExtension("quartermaster.ts", piExtension)
+}
+
+func writePiExtension(name string, content []byte) (string, error) {
+	path := filepath.Join(stateDir(), "pi", name)
+	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, content) {
 		return path, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, piExtension, 0o644); err != nil {
+	if err := os.WriteFile(tmp, content, 0o644); err != nil {
 		return "", err
 	}
 	return path, os.Rename(tmp, path)
@@ -49,8 +59,10 @@ func (c Config) piLaunch(host string, args []string, role, id string) ([]string,
 			return nil, fmt.Errorf("pi extension: %w", err)
 		}
 		args = append(args, "-e", ext)
-		// A worker listens for quartermaster on its control socket
-		// (picontrol.go); the coordinator doesn't.
+		// Worker prompts and coordinator notifications use separate protocols.
+		if role == "coordinator" {
+			args = append(args, "--quartermaster-coordinator", piCoordinatorSocket())
+		}
 		if id != "" {
 			if err := c.writePiControlConfig(); err != nil {
 				return nil, fmt.Errorf("pi control: %w", err)

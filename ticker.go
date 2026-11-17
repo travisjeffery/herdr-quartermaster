@@ -642,6 +642,14 @@ func (t Ticker) nudgeCoordinator(st *TickerState, agents map[string]Agent, now t
 		st.CoordReady = time.Time{}
 		return
 	}
+	// Pi owns its editor/UI readiness. Never infer an empty draft from an
+	// idle process, and never fall back to terminal input for notifications.
+	if coord.Session.Agent == "pi" || (coord.Session.Agent == "" && t.cfg.CoordinatorAgent == "pi") {
+		if t.cfg.Nudge {
+			t.nudgePiCoordinator(st, coord, now)
+		}
+		return
+	}
 	if !agentReady(&coord) {
 		st.CoordReady = time.Time{}
 	} else if st.CoordReady.IsZero() || coord.Seq != st.CoordSeq {

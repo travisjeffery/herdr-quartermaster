@@ -1,7 +1,9 @@
 # Native pi RPC workers (opt-in)
 
 `pi-rpc` is an additional **local worker backend**, not a replacement for
-Herdr. Existing TUI dispatch, coordinator sessions and defaults are unchanged.
+Herdr. Existing TUI dispatch and defaults are unchanged. TUI coordinator ticker
+notifications use the separate [draft-safe inbox](pi-coordinator-inbox.md); that
+does not turn the coordinator into an RPC worker.
 Tested with pi 1.5.2 on Linux. Start with a code-only trial, not infrastructure
 or production work: the [pi guard limitations](pi.md#approvals-guards-that-block-and-ask-only-when-told-to)
 still apply. There is no new sandbox or Claude auto-mode classifier.

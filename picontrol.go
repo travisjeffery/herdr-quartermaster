@@ -62,12 +62,14 @@ func piControlFor(name string) (piControl, bool) {
 }
 
 type piRequest struct {
-	Token  string `json:"token"`
-	Op     string `json:"op"`
-	Text   string `json:"text,omitempty"`
-	ID     string `json:"id,omitempty"`
-	Choice int    `json:"choice,omitempty"`
-	By     string `json:"by,omitempty"`
+	Token   string `json:"token"`
+	Op      string `json:"op"`
+	Text    string `json:"text,omitempty"`
+	ID      string `json:"id,omitempty"`
+	Choice  int    `json:"choice,omitempty"`
+	By      string `json:"by,omitempty"`
+	Session string `json:"session,omitempty"`
+	Through string `json:"through,omitempty"`
 }
 
 type piResponse struct {
@@ -76,6 +78,8 @@ type piResponse struct {
 	Idle        bool   `json:"idle"`
 	Queued      bool   `json:"queued"`
 	HandoffHash string `json:"handoff_hash,omitempty"`
+	Session     string `json:"session,omitempty"`
+	Ack         string `json:"ack,omitempty"`
 	Ask         *piAsk `json:"ask"`
 }
 

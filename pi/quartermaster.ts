@@ -42,6 +42,7 @@
 //
 // @ts-nocheck
 
+import { installCoordinatorInbox } from "./coordinator.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -152,6 +153,7 @@ function controlConfig(sock: string): { ask: RegExp[]; timeoutMs: number } {
 const askOptions = ["Yes, run it", "No, block it"];
 
 export default function (pi) {
+  installCoordinatorInbox(pi);
   pi.registerFlag("quartermaster-control", {
     description: "unix socket quartermaster talks to this worker on (set by quartermaster)",
     type: "string",
