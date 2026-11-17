@@ -17,6 +17,7 @@ const ctx = { sessionManager: { getBranch: () => entries }, cwd: process.cwd(), 
   ui: { setStatus: (statusKey, statusText) => out({ statusKey, statusText: statusText ?? null }) } };
 const pi = {
   registerFlag() {},
+  registerCommand() {},
   getFlag: (name) => (name === "quartermaster-control" ? sock : undefined),
   on: (name, fn) => ((handlers[name] ||= []).push(fn)),
   appendEntry: (customType, data) => out({ entry: customType, data }),

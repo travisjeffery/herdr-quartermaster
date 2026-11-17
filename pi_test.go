@@ -128,11 +128,11 @@ func TestPiLaunch(t *testing.T) {
 	if fi, err := os.Stat(piControlDir()); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Errorf("control dir mode: %v %v", fi, err)
 	}
-	// The coordinator gets the extension and no session id or control socket; a remote worker
-	// gets neither file nor -e.
+	// The coordinator gets a separate inbox channel, not worker prompt access.
+	// A remote worker gets neither file nor -e.
 	fakePiTool(t, dir, "provider model\nanthropic claude-fable-5-2\n", 0)
 	args, err = cfg.piLaunch(localHost, cfg.coordinatorArgs("pi"), "coordinator", "")
-	if err != nil || slices.Contains(args, "--session-id") || slices.Contains(args, "--quartermaster-control") || !slices.Contains(args, ext) {
+	if err != nil || slices.Contains(args, "--session-id") || slices.Contains(args, "--quartermaster-control") || !slices.Contains(args, "--quartermaster-coordinator") || !slices.Contains(args, piCoordinatorSocket()) || !slices.Contains(args, ext) {
 		t.Errorf("coordinator args = %q, %v", args, err)
 	}
 }

@@ -82,6 +82,7 @@ def run(*argv, check=True):
 extension = state / "pi" / "quartermaster.ts"
 extension.parent.mkdir(mode=0o700)
 extension.write_bytes(Path("pi/quartermaster.ts").read_bytes())
+extension.with_name("coordinator.ts").write_bytes(Path("pi/coordinator.ts").read_bytes())
 control = state / "pi" / "control" / f"{bead}.sock"
 argv = ["pi", *args, "-e", str(extension), "--quartermaster-control", str(control), "--session-id", bead]
 master, slave = pty.openpty()

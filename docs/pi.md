@@ -14,7 +14,7 @@ steps only you can do. Checked against pi 1.5.2 and herdr 0.9.5.
 | Models | Workers `anthropic/claude-opus-5-5`, coordinator `anthropic/claude-fable-5-2`; `[agents.pi] args` and `coordinator_args` replace them. |
 | Model check | Before starting pi, quartermaster runs `pi --list-models <id>` (with the args' `-e` extensions) and, if the model isn't listed, `pi auth check --provider <p>`, and refuses with the fix. Neither prints a credential. Dispatch checks before it creates the worktree or claims the bead. |
 | Brief | Typed in with `herdr agent prompt`, as for Claude. pi has no SessionStart hook; the brief already says to run `bd prime` first. |
-| Prompts after the brief | Over the worker's control socket (below): ticker messages, queued briefs and autonomy notices, and `quartermaster tell <bead> "..."`. A prompt sent during a turn queues behind it. Without the socket they are typed into the pane. |
+| Prompts after the brief | Workers use their control socket (below), with the existing pane fallback. **Coordinator ticker notifications** use a separate authenticated, durable inbox channel, never terminal paste, even when the socket is absent. |
 | Ask-gates | A guarded command on `[agents.pi] ask` waits for `quartermaster answer` instead of blocking (below). The list starts empty. |
 | Sessions | A worker runs `pi --session-id <bead>`, so its session file is `~/.pi/agent/sessions/--<worktree>--/<time>_<bead>.jsonl`. Dispatch and resume open that session by id. |
 | needs_me wake check | Read from the session file: a prompt after the worker settled resumes the bead, pi waking itself doesn't (below). |
@@ -124,7 +124,10 @@ keeps out other users and stale clients; it does not keep out the worker,
 which runs as the same user, any more than a pane does. An answer still goes
 through `quartermaster answer`'s autonomy check. If the socket is missing or
 doesn't answer, quartermaster types into the pane and the guards block, as
-before. The coordinator gets no socket.
+before. This fallback applies only to workers; the coordinator has a separate
+[notification-only channel](pi-coordinator-inbox.md), with durable coalescing,
+editor-aware delivery and no terminal fallback. That page also covers safe
+user-issued activation for an already-running coordinator.
 
 What this does not replace is Claude Code's auto-mode classifier, which judges
 intent. The hooks match known shapes (recursive deletes outside the worktree,
