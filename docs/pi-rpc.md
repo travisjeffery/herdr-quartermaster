@@ -41,6 +41,130 @@ supervisor PIDs. Active cancellation and crash/framing/guard cases are covered
 by no-model fixtures; the real-model trial cancels at idle to avoid unnecessary
 model work. No live infrastructure or third-party approval was exercised.
 
+## Read-only conversations in the board
+
+Select a native worker in the existing Quartermaster board and press **Enter**
+or **V**. This opens a conversation screen **in the same plugin pane**, not a
+worker pane. Enter retains its old focus/start behavior for non-native rows;
+V only views native history. A native reservation is enough: stopped workers
+and parked native-adopted/fresh-handoff workers do not need a live agent row.
+The board lists open tasks; use the CLI for a closed task's retained history:
+
+```sh
+quartermaster rpc view <bead>
+quartermaster rpc inspect <bead>          # normalized visibility JSON
+quartermaster rpc history <bead>         # one saved-session page
+quartermaster rpc feed <bead>            # one execution-log page
+quartermaster rpc history <bead> <cursor> # reconnect after a returned cursor
+```
+
+These entrypoints never dispatch, activate, resume, prompt, cancel, stop, fork,
+answer an approval, or write task state. They read retained files; only
+`inspect`/the screen asks the **supervisor** for its existing read-only status.
+The supervisor remains pi's sole stdin/stdout owner. Closing a screen affects
+only that screen. Do not use the plugin's **focus-or-start clipboard action**
+as a viewer: it is a separate control, not a read-only entrypoint.
+
+### Screen keys and evidence
+
+- **h / e / Tab:** saved session history / live execution log. They are
+  separate views because a completed message occurs in both sources; merging
+  their records would duplicate messages and usage. Saved history is append
+  order across **all branches**, including pre-compaction entries, not a
+  reconstructed active model context. A fresh handoff shows its saved handoff
+  message, not a converted legacy transcript.
+- **j / k:** select a record and pause following. **Enter / Space:** expand
+  output, entry/parent/tool-call IDs and PR/artifact URLs. **J / K:** scroll
+  expanded output. Links are plain text; the viewer never opens a URL or file.
+- **g:** replay from the beginning, paused. **n:** next bounded page.
+  **f:** catch up and follow both files. **r:** read another page/refresh status.
+  **q / Esc:** return to the board (or leave the standalone screen).
+
+Assistant/user messages appear when finalized. Tool starts, results and errors
+appear as they are recorded; token deltas and partial tool-result bodies are
+intentionally omitted so fragmented credentials cannot escape per-message
+redaction. Images, thinking/signatures, system prompts and opaque extension/tool
+metadata are not rendered. Tool start detail includes only command/path, not
+arbitrary argument objects. Output is expandable up to the documented limit.
+
+The board's native row reports transport state separately from task state.
+Details and the conversation header show run elapsed time, current action,
+last meaningful activity and its timestamp, and when visibility was sampled.
+Snapshots older than three seconds are marked stale; paused views freeze run
+elapsed time at their observation rather than inventing ongoing progress.
+PR checks in the task detail are explicitly **cached external evidence**, not
+proof that the worker is progressing. State semantics:
+
+| State | Evidence |
+|---|---|
+| running | Supervisor has seen a run start/accepted submission, not just a live PID. |
+| idle (not parked) | pi settled; neither task completion nor migration parking. |
+| parked | Live supervisor confirms the durable parking barrier. |
+| waiting on approval | Existing quartermaster ask gate is waiting. |
+| blocked (intervention) | Supervisor latched an unsupported-dialog error; viewing cannot answer it. |
+| stopped | Saved supervisor terminal state (`stopped` or `failed`); no live status connection. |
+| disconnected | No status connection and no saved terminal state; never inferred to be stopped or parked. |
+| unknown | No supported evidence; no invented activity/model/usage. |
+
+An old supervisor/session can be viewed without restarting it. Older raw
+execution events have no receipt timestamp, so the viewer says **time unknown**
+unless the message carries a timestamp. Older status files lack action/run
+metadata: those fields remain unknown; recorded model/usage still come from
+saved history. No live supervisor migration is required or performed.
+
+### Replay, limits and privacy
+
+Cursors bind the source, file identity, byte offset, and prefix/boundary hashes.
+`seq` is the durable byte position, not a task-progress counter. Every call
+opens a fresh read-only file descriptor and reads a size snapshot. A detected
+replacement/truncation or mismatched cursor produces an explicit **GAP** and
+restarts replay (`reset: true` is independent of the gap text). An incomplete
+last line is retained for the next poll;
+malformed records become gap records. No model call repairs or summarizes gaps.
+Files are expected to be append-only; this is not a tamper-proof audit log.
+
+Each page scans at most 256 records or 2 MiB **plus at most one 16 MiB record**
+(with 256 bytes of headroom for the supervisor's log timestamp),
+returns at most 64 records or 256 KiB plus one bounded projection, and clips
+text to 16 KiB per field *after* redaction. Oversized records fail closed with
+an explicit error rather than unbounded allocation. The screen retains at most
+128 records / roughly 512 KiB of text per source, marks eviction, and permits
+replay from disk. There is at most one read in flight per screen and a one-item
+result channel. Viewers have no producer-side subscription queue: slow,
+disconnected or absent screens cannot block the worker's stdout drain. Durable
+logs still grow on disk; retention is a separate feature.
+
+Usage is summed **only from saved records**, including assistant/tool usage,
+compaction, branch-summary and standalone usage entries. Streaming/duplicate
+event usage is never added. The screen labels totals incomplete until replay
+catches up; no recorded usage is **unknown**, not zero. Costs are recorded pi
+estimates, not a subscription balance or invoice. Provider/model metadata is
+recorded evidence, not a request to select or query a model.
+
+The normalized APIs and screen allowlist fields, strip terminal controls and
+formatting overrides, and redact credential-shaped assignments, authorization
+headers, cookies, private-key blocks, URL credentials and common token formats.
+Redaction happens before clipping and links exclude query strings/userinfo.
+This is defense in depth, **not a guarantee that arbitrary free-form output is
+safe to publish**. Keep screenshots/exports private and review them manually.
+Existing raw `rpc events`, `rpc output`, session/log files and task notes remain
+private sensitive artifacts; these legacy diagnostic commands are not the
+normalized viewer API. No credentials are copied from environment/config into
+visibility or usage metadata.
+
+Isolated real-pi and PTY validation (no model prompts, live tasks, Herdr
+connection, settings changes or installation):
+
+```sh
+go test -race . -run 'TestRPCView|TestRPCBoard|TestRPCHandledAndLateResponse'
+python3 scripts/pi-viewer-trial.py --model <configured-provider/model>
+```
+
+The trial opens/reopens the direct and board views, replays external saved
+history, verifies unchanged worker/session/task fingerprints, and views again
+after stopping **only its own fixture**. Live Herdr smoke/installation is a
+separate coordinator-owned step; no worker needs `HERDR_ENV` or a pane.
+
 ## Dispatch an actual bead
 
 Use a fresh bead whose branch/worktree does not already exist:
@@ -349,8 +473,9 @@ honor backpressure; write errors stop the transport because a partial record
 cannot safely be followed by another command. Malformed/oversized stdout,
 partial EOF, disk-write failures and child exit stop the worker, never trigger
 a fallback launch. Clients never participate in the stdout drain. Event and
-session logs currently grow on disk; `output` is a snapshot of completed
-assistant text, not a streaming viewer. Monitor disk usage and keep trials
+session logs currently grow on disk; `output` is a legacy raw snapshot of
+completed assistant text. Use `view`/`history`/`feed` for the bounded, normalized
+read-only viewer described above. Monitor disk usage and keep trials
 bounded. Socket paths must fit the platform's Unix socket path limit; use a
 short absolute `QUARTERMASTER_STATE_DIR` for deep scratch directories.
 
@@ -375,6 +500,6 @@ session/receipt artifacts, and use Git's normal non-force `worktree remove`
 on the recorded path. Keep the reservation/history until a later cleanup tool
 can preserve the needed recovery evidence. No automatic deletion is shipped.
 
-Separately tracked follow-ons: structured viewer/usage, steering/forks,
+Separately tracked follow-ons: steering/forks,
 retention/cleanup, and a headless coordinator. No remote fleet, new UI, or
 live-default change is included here.

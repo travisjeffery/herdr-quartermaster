@@ -34,6 +34,7 @@ type boardRow struct {
 	linear string
 	moves  []string
 	runs   []Run
+	native *rpcVisibility
 }
 
 func searchText(parts ...string) string {
@@ -85,6 +86,10 @@ type boardEnv struct {
 	show  func(id string) (Bead, error)
 	read  func(pane string) (string, error)
 	gc    func(data boardData) ([]gcItem, error)
+	// Native viewing is independent of focus/dispatch and of live agents.
+	native     func() map[string]rpcVisibility
+	isNative   func(id string) bool
+	viewNative func(id, title string, links []string) error
 
 	note        func(id, text string) error
 	setStatus   func(id, status string) error
@@ -120,9 +125,12 @@ func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 			inbox, _ := readInbox()
 			return loadState(), inbox
 		},
-		show: bd.Show,
-		read: func(pane string) (string, error) { return h.Read(pane, 40, detailTimeout) },
-		gc:   func(data boardData) ([]gcItem, error) { return loadGC(cfg, h, data) },
+		show:       bd.Show,
+		read:       func(pane string) (string, error) { return h.Read(pane, 40, detailTimeout) },
+		gc:         func(data boardData) ([]gcItem, error) { return loadGC(cfg, h, data) },
+		native:     rpcVisibilityAll,
+		isNative:   rpcExists,
+		viewNative: runRPCView,
 
 		note:      bd.Note,
 		setStatus: bd.SetStatus,
@@ -245,6 +253,8 @@ type board struct {
 	ask    *ask
 
 	beadsLoading, agentsLoading, localLoading bool
+	nativeLoading                             bool
+	nativeAt                                  time.Time
 	// reloadAgain asks for another bead load once the running one returns,
 	// because an action wrote after it started.
 	reloadAgain       bool
@@ -309,6 +319,10 @@ func (m *board) sel() *boardRow {
 func (m *board) tick() []cmd {
 	now := m.now()
 	var cmds []cmd
+	if m.env.native != nil && !m.nativeLoading && now.Sub(m.nativeAt) >= agentsEvery {
+		m.nativeLoading = true
+		cmds = append(cmds, func() msg { return nativeViewMsg{m.env.native()} })
+	}
 	if !m.agentsLoading && now.Sub(m.agentsAt) >= agentsEvery {
 		m.agentsLoading = true
 		cmds = append(cmds, func() msg {
@@ -410,6 +424,11 @@ func (m *board) loadDetail() []cmd {
 // apply takes in one finished load or action.
 func (m *board) apply(x msg) []cmd {
 	switch x := x.(type) {
+	case nativeViewMsg:
+		m.nativeLoading = false
+		m.nativeAt = m.now()
+		m.data.Native = x.workers
+		m.rebuild()
 	case beadsMsg:
 		m.beadsLoading = false
 		var cmds []cmd
@@ -731,7 +750,12 @@ func (m *board) jump(id string) {
 func (m *board) beadKey(k string, r boardRow) []cmd {
 	id := r.bead.ID
 	switch k {
+	case "V":
+		m.openNative(r)
 	case "\r":
+		if m.openNative(r) {
+			return nil
+		}
 		if r.agent != nil {
 			name := r.agent.Name
 			return []cmd{func() msg { return doneMsg{err: m.env.focus(name), quit: true} }}
@@ -1305,6 +1329,11 @@ func runBoard(cfg Config) error {
 					return err
 				}
 				fmt.Print("\x1b[?1049h\x1b[?25l")
+				// Keys buffered beside the viewer/pager entry key belong to
+				// that transition, not to the board after it returns. Never
+				// let a pasted Vn become a task-label write on viewer close.
+				partial = nil
+				break
 			}
 			if m.quit {
 				break

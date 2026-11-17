@@ -92,13 +92,13 @@ func rpcRead(id string, lines int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	start := max(int64(0), fi.Size()-rpcMaxRecord)
+	start := max(int64(0), fi.Size()-rpcLogMaxRecord)
 	r := bufio.NewReader(io.NewSectionReader(f, start, fi.Size()-start))
 	if start > 0 {
 		_, _ = r.ReadBytes('\n')
 	} // discard a partial first record
 	var b bytes.Buffer
-	err = readRPC(r, func(raw []byte) error { _, err := b.WriteString(rpcAssistantText(raw)); return err })
+	err = readRPCLog(r, func(raw []byte) error { _, err := b.WriteString(rpcAssistantText(raw)); return err })
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return "", err
 	}

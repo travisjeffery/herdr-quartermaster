@@ -112,8 +112,10 @@ func TestRPCHandledAndLateResponse(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	b, _ := os.ReadFile(filepath.Join(rpcDir("b-1"), "events.jsonl"))
-	if bytes.Count(b, []byte(`"type":"agent_settled"`)) != 8 {
-		t.Fatal("stdout stopped without viewer")
-	}
+	// Prompt acceptance precedes output/settlement; wait for the actual
+	// boundary instead of depending on how quickly the drain fsyncs metadata.
+	waitRPC(t, func() bool {
+		b, _ := os.ReadFile(filepath.Join(rpcDir("b-1"), "events.jsonl"))
+		return bytes.Count(b, []byte(`"type":"agent_settled"`)) == 8
+	})
 }
