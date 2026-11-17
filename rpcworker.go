@@ -105,6 +105,13 @@ type rpcStatus struct {
 	Seq         int64     `json:"seq"`
 	Error       string    `json:"error,omitempty"`
 	Updated     time.Time `json:"updated"`
+	RunStarted  time.Time `json:"run_started,omitempty"`
+	RunEnded    time.Time `json:"run_ended,omitempty"`
+	Activity    string    `json:"activity,omitempty"`
+	ActivityAt  time.Time `json:"activity_at,omitempty"`
+	Current     string    `json:"current,omitempty"`
+	Provider    string    `json:"provider,omitempty"`
+	Model       string    `json:"model,omitempty"`
 }
 type rpcReceipt struct {
 	ID            string    `json:"id"`
@@ -178,15 +185,17 @@ func rpcClient(id string, req rpcRequest) (rpcReply, error) {
 // disconnects do not cancel accepted work. The socket is 0600 inside 0700;
 // like the existing pi control channel this is NOT a same-user sandbox.
 type rpcSupervisor struct {
-	worker   rpcWorker
-	mu       sync.Mutex
-	status   rpcStatus
-	proc     *rpcProcess
-	log      *os.File
-	promptMu sync.Mutex
-	stop     chan struct{}
-	stopOnce sync.Once
-	stopping bool // monotonic admission barrier, independent of pi lifecycle events
+	worker            rpcWorker
+	mu                sync.Mutex
+	status            rpcStatus
+	proc              *rpcProcess
+	log               *os.File
+	promptMu          sync.Mutex
+	stop              chan struct{}
+	stopOnce          sync.Once
+	viewTools         map[string]string // bounded, metadata only; never a viewer queue
+	viewToolsOverflow bool
+	stopping          bool // monotonic admission barrier, independent of pi lifecycle events
 }
 
 func (s *rpcSupervisor) saveLocked() error {
@@ -201,9 +210,19 @@ func (s *rpcSupervisor) phaseLocked(phase string) {
 func (s *rpcSupervisor) event(raw []byte, rec rpcRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := s.log.Write(append(append([]byte(nil), raw...), '\n')); err != nil {
+	now := time.Now()
+	// Keep the original top-level pi shape for existing readers. The private
+	// log adds receipt time; old records remain valid with unknown timestamps.
+	stamp, _ := json.Marshal(struct {
+		At time.Time `json:"at"`
+	}{now})
+	logged := append([]byte(`{"_quartermaster":`), stamp...)
+	logged = append(logged, ',')
+	logged = append(logged, raw[1:]...)
+	if _, err := s.log.Write(append(logged, '\n')); err != nil {
 		return err
 	}
+	viewSave := s.observeView(raw, rec, now)
 	switch rec.Type {
 	case "agent_start":
 		if s.status.Error == "" {
@@ -271,7 +290,7 @@ func (s *rpcSupervisor) event(raw []byte, rec rpcRecord) error {
 	}
 	// Persist on boundaries, not every token. events.jsonl remains continuously
 	// drained regardless of how slowly a client reads it.
-	if rec.Type == "agent_start" || rec.Type == "agent_settled" || rec.Type == "response" || rec.Type == "extension_ui_request" {
+	if viewSave || rec.Type == "agent_start" || rec.Type == "agent_settled" || rec.Type == "response" || rec.Type == "extension_ui_request" {
 		return s.saveLocked()
 	}
 	return nil
@@ -487,6 +506,9 @@ func rpcServe(cfg Config, id string) error {
 	}
 	defer stderr.Close()
 	s := &rpcSupervisor{worker: w, status: rpcStatus{Bead: id, Phase: "starting", PID: os.Getpid(), Seq: prev.Seq + 1, SessionID: prev.SessionID, SessionFile: prev.SessionFile}, log: log, stop: make(chan struct{})}
+	s.status.RunStarted, s.status.RunEnded = prev.RunStarted, prev.RunEnded
+	s.status.Activity, s.status.ActivityAt = prev.Activity, prev.ActivityAt
+	s.status.Provider, s.status.Model = prev.Provider, prev.Model
 	if err = rpcPrivateDir(filepath.Join(rpcDir(id), "requests")); err != nil {
 		return err
 	}
@@ -657,6 +679,10 @@ func rpcServe(cfg Config, id string) error {
 	defer s.mu.Unlock()
 	s.status.Phase = "stopped"
 	s.status.ChildPID = 0
+	s.status.Current = ""
+	if !s.status.RunStarted.IsZero() && s.status.RunEnded.IsZero() {
+		s.status.RunEnded = time.Now()
+	}
 	select {
 	case <-s.stop:
 	default:

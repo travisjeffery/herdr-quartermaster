@@ -490,15 +490,28 @@ type, matching id, title, status, agent, state, PR, Linear key and labels
 (every word, any case); `↵` keeps the filter and `esc` clears it. `?` lists
 every key.
 
+**Native pi RPC workers:** `Enter` or `V` opens a **read-only conversation
+view in the existing board pane**, including parked/stopped workers with a
+saved reservation. It never starts, resumes or prompts them. `h` shows saved
+history, `e` the live tool/event log, `Enter` expands output, `g` replays,
+`n` reads the next page, `f` follows, and `q` returns. The native row/detail
+separates execution state, run elapsed time and last activity from task/PR
+state; the view reports recorded model/usage without model calls. For closed
+tasks use `quartermaster rpc view <bead>`. See [limits, privacy, state evidence
+and replay APIs](docs/pi-rpc.md#read-only-conversations-in-the-board).
+The focus-or-start clipboard action is **not** a viewer.
+
 Moving work forward, on the selected bead:
 
 - `a` adds a note; `n` toggles `next`; `S` sets the status, `P` the priority.
 - `A` answers the worker: you type the reply, confirm it, and it goes to the
   agent with `herdr agent prompt`. Only an idle agent is prompted, checked
   again just before sending. A worker at an approval prompt (`!`) is never
-  answered from the board; `↵` focuses it so you can.
-- `↵` focuses the bead's agent, or starts one; `c`/`x`/`m` start Claude, Codex
-  or Muse; `R` resumes an exited agent in its worktree.
+  answered from the board; `↵` focuses a TUI worker. Native RPC views have no
+  approval controls: use the existing `prompt`/`answer` flow separately.
+- `↵` views native RPC history; for other rows it focuses the bead's agent,
+  or starts one. `c`/`x`/`m` start Claude, Codex or Muse; `R` resumes an exited
+  agent in its worktree.
 - `+` creates a child task; `C` closes the bead with a reason.
 - `y` copies the id, `p` a pending `RUN:` command, `o` opens the PR, `l` the
   Linear issue (set `linear_workspace` unless the bead's notes link it), `b`
