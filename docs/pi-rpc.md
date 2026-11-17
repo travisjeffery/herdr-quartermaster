@@ -88,6 +88,91 @@ listing fails but native workers exist, the combined context contains the
 native workers only: use native status as the authoritative transport view,
 not absence from that combined list as proof a TUI worker died.
 
+## Explicit adoption of existing pi TUI workers
+
+Adoption is **Linux/local, pi-to-pi only**. It never stops a process, closes a
+pane, claims a bead, changes task status, sends a prompt, or changes defaults.
+Claude/Codex/Muse classifiers, sandboxes and transcripts are not equivalent:
+keep those workers intact as named exceptions. A later cross-harness path
+needs an explicit durable handoff into a fresh session and verified guard
+parity, not a renamed transcript or removal of a permission gate.
+
+Test before installation:
+
+```sh
+go test -race . -run 'TestRPCAdoption|TestPiRPC' -count=1
+python3 scripts/pi-adoption-trial.py --model openai-codex/gpt-6-astra
+```
+
+The isolated trial starts one tools-disabled real pi TUI on a private PTY,
+using fixture Herdr/Beads and a scratch linked checkout; then adopts its exact
+session. It verifies history, parking, refusal while the old owner lives,
+refusal to activate a needs_me bead, explicit tell after activation, and
+untracked-file preservation. It retains private evidence and stops its own
+processes. Use `--binary /absolute/installed/quartermaster` to test an installed
+build; run from the matching source checkout so the TUI guard matches.
+
+For an explicitly authorized live migration, inventory **actual live managed
+workers** first. Never dispatch restored empty panes or backlog. Protect the
+coordinator, caller and workers still performing commands. Record individual
+exceptions for unsupported approvals, uncertain ownership, other harnesses,
+remote hosts and incompatible sessions. Unmanaged background jobs that detach
+from both their process session and the checkout are unsupported: process
+snapshots are not cgroup containment. Preserve workers with such jobs or an
+uncertain process history. The exit census tracks process start/boot identity
+and scans for surviving process-session members and newer checkout processes,
+including children orphaned after checkpoint. Review global extensions for RPC
+compatibility: argv parity does not certify a TUI-only approval extension.
+
+For each eligible idle code-only pi worker, one at a time:
+
+1. Save a private before inventory: bead/status/blocker, exact pane, process
+   tree, worktree/branch, dirty/untracked files and transcript pointer.
+2. `quartermaster rpc prepare <bead> <exact-pane>` atomically reserves it.
+   This requires idle/done Herdr state plus an idle guard socket and no pending
+   ask, a linked bead-owned worktree, matching guarded launch argv and guard
+   environment, and a v3 session with the exact bead ID/cwd. Custom agent
+   environments are not supported. The checkpoint in `worker.json` includes
+   bead context, original descendants, git status/content digest and session
+   prefix hash. TUI dispatch/resume share the reservation lock; managed legacy
+   deliveries are held. Nothing is stopped.
+3. Reconfirm the original process is idle with no in-flight command, then
+   gracefully stop **that exact process only**. Pi handles SIGTERM with an
+   orderly session shutdown. Wait for it and its recorded descendants to exit;
+   never force-kill to pass an adoption check. Keep its pane.
+4. `quartermaster rpc adopt <bead>` requires proof of exit, a fresh successful
+   Herdr listing, the original pane back at its original shell, unchanged
+   branch/HEAD/index/working/untracked state, preserved session prefix and
+   unchanged bead status/assignee. It starts the exact saved session **parked**.
+   `rpc resume` cannot bypass an unfinished prepare.
+5. Verify live `rpc status` says `parked` with the exact session file/ID,
+   inspect `events` (no `agent_start`) and the preserved session history,
+   verify `tell` refuses while parked, compare files, and confirm the
+   coordinator can see it as blocked. Only then close that one original pane
+   after freshly verifying it is still the original idle shell.
+6. Keep blocked/needs_me workers parked on their exact unanswered question.
+   Migration is not approval. `rpc activate <bead>` is a separate class-3
+   action, refuses anything other than a healthy idle in_progress worker,
+   and sends no prompt. Use it only after verification and when substantive
+   continuation is separately authorized; then `tell` works normally.
+   Activation resumes ticker deliveries, so do not activate merely to test a
+   live worker's transport. A parked worker's direct guard socket and tool
+   calls also refuse execution.
+
+On failure, **stop expansion**. A prepared reservation remains intact, as do
+all files and histories. Do not delete locks/reservations or rewrite metadata
+to make a check pass. If RPC started, `rpc stop` and verify both PIDs exited;
+leave the saved reservation for inspection/recovery. There is intentionally
+no force-adopt or automatic TUI rollback into the same session. The explicit
+`--backend herdr` override remains available for other fresh tasks. Do not
+downgrade the installed binary to a pre-adoption version while reservations
+exist: older binaries do not understand the prepared/parked barriers.
+
+The caller cannot prepare itself. An external verified owner must checkpoint,
+adopt and retire the migration worker last. No batch stop/close is provided.
+These are managed-worker safeguards, not isolation against the same OS user
+manually opening a session, typing into a pane or modifying configuration.
+
 ## Reconnection is not resume
 
 A detached supervisor process owns pi's stdin/stdout for the worker's lifetime.
@@ -112,7 +197,8 @@ new-session fallback, or force-resume command is provided.
 
 An exclusive flock is held by the supervisor and inherited by pi. A new
 supervisor also refuses a potentially live previous child PID. Git refuses
-adopting an existing branch/worktree on initial dispatch. The reservation
+adopting an existing branch/worktree on initial dispatch; the explicit staged
+adoption path above is the only supported exception. The reservation
 continues to block TUI dispatch even after stop. These protections cover
 quartermaster-managed workers, not someone manually opening the session in
 another pi process or modifying files as the same OS user. Never manually
@@ -175,7 +261,8 @@ worker run.
 
 All native data is under `<state dir>/rpc/<bead>/`:
 
-- `worker.json`: backend reservation, argv, isolated worktree and branch.
+- `worker.json`: backend reservation, argv, worktree and branch; adoption checkpoint when applicable.
+- `parked`: durable migration barrier, removed only by explicit activation.
 - `status.json`: actual pi session ID/file, supervisor/child PIDs and lifecycle.
 - `requests/<id>.json`: durable request receipts, retained across resume.
 - `events.jsonl`: continuously drained pi stdout, strict LF JSON records.

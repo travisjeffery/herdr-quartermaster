@@ -236,6 +236,12 @@ func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 		return errors.New("invalid bead id")
 	}
 	switch op {
+	case "prepare", "adopt":
+		msg, err := rpcAdoptionCmd(cfg, cfg.herdrOn(newHerdr(), localHost), pos, by)
+		if msg != "" {
+			fmt.Fprintln(out, msg)
+		}
+		return err
 	case "serve":
 		return rpcServe(cfg, id)
 	case "resume":
@@ -299,7 +305,7 @@ func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 			return errors.New("request unresolved or rejected; inspect receipt/events, not replayed")
 		}
 		return nil
-	case "cancel", "stop":
+	case "activate", "cancel", "stop":
 		b, err := (Beads{}).Show(id)
 		if err != nil {
 			return err

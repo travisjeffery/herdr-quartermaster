@@ -160,6 +160,16 @@ func (a piAsk) prompt() ApprovalPrompt {
 // local pi worker whose extension is listening, else types it into its pane
 // as herdr agent prompt does. viaSocket reports which.
 func promptPiAgent(h Herdr, a Agent, text string) (viaSocket bool, err error) {
+	if h.hostName() == localHost && a.Backend != rpcBackend {
+		gate, e := adoptionAdmission(false)
+		if e != nil {
+			return false, e
+		}
+		defer gate.Close()
+	}
+	if h.hostName() == localHost && a.Backend != rpcBackend && adoptionHeldAgent(a) {
+		return false, errors.New("worker reserved for migration; no legacy prompt sent")
+	}
 	if id, ok := rpcAgentID(a.PaneID); ok {
 		return true, rpcPromptOnce(id, text)
 	}
@@ -278,6 +288,15 @@ func tellCmd(cfg Config, h Herdr, show func(string) (Bead, error), id, text stri
 	if err != nil {
 		return "", err
 	}
+	if rpcExists(b.ID) {
+		return rpcTell(b.ID, text)
+	}
+	gate, err := adoptionAdmission(false)
+	if err != nil {
+		return "", err
+	}
+	defer gate.Close()
+	// Recheck after admission: prepare may have published while we waited.
 	if rpcExists(b.ID) {
 		return rpcTell(b.ID, text)
 	}

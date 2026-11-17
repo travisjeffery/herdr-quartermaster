@@ -335,6 +335,16 @@ func (h Herdr) Panes(workspace string) ([]Pane, error) {
 }
 
 func (h Herdr) Prompt(target, text string) error {
+	if h.hostName() == localHost {
+		gate, err := adoptionAdmission(false)
+		if err != nil {
+			return err
+		}
+		defer gate.Close()
+	}
+	if h.hostName() == localHost && adoptionHeldAgent(Agent{PaneID: target, Name: target}) {
+		return fmt.Errorf("worker reserved for migration; no legacy prompt sent")
+	}
 	if id, ok := rpcAgentID(target); ok {
 		_, err := rpcTell(id, text)
 		return err

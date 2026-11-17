@@ -223,6 +223,11 @@ func resume(cfg Config, h Herdr, ids []string, kind, by string) ([]string, error
 }
 
 func resumeOne(cfg Config, h Herdr, r Resumable, kind string) (string, error) {
+	lease, err := rpcLease(r.Bead.ID)
+	if err != nil {
+		return "", err
+	}
+	defer lease.Close()
 	if rpcExists(r.Bead.ID) {
 		return "", errors.New("native worker: use quartermaster rpc resume explicitly; no automatic replay")
 	}

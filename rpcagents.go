@@ -15,6 +15,13 @@ import (
 // Native agents join the existing ticker/thread model, without pretending
 // there is a terminal. The rpc: handle is routed before any Herdr operation.
 func rpcReservedPath(path string) bool {
+	entries, _ := os.ReadDir(rpcRoot())
+	for _, e := range entries {
+		var w rpcWorker
+		if rpcLoad(filepath.Join(rpcDir(e.Name()), "worker.json"), &w) == nil && w.Cwd == path {
+			return true
+		}
+	}
 	rel, err := filepath.Rel(rpcRoot(), path)
 	if err != nil {
 		return false
@@ -44,6 +51,9 @@ func rpcAgents() []Agent {
 			continue
 		}
 		st := r.Status
+		if st.Phase == "parked" {
+			st.Phase = "blocked"
+		}
 		out = append(out, Agent{Name: agentName(id), Kind: "pi", Backend: rpcBackend, Status: st.Phase, PaneID: "rpc:" + id, Cwd: w.Cwd, Seq: st.Seq, Host: localHost, Session: AgentSession{Agent: "pi", Kind: "path", Value: st.SessionFile}})
 	}
 	return out
