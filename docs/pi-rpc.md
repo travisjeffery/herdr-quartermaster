@@ -193,6 +193,8 @@ above is unchanged, including its full process-census refusal cases.
    evidence/PRs and the next separately authorized step). When a legacy pane
    reports a stale home-directory cwd, establish the actual worktree from its
    transcript and bead rather than guessing from the current pane directory.
+   An inherited/legacy branch or detached primary HEAD additionally requires
+   an explicit `checkout_mapping` as described below; no branch is renamed.
 3. `quartermaster rpc handoff-prepare <bead> <exact-pane> <handoff.json>`
    reserves the existing checkout under the usual lease/admission locks. It
    saves task context, transcript prefix, source process identities and a raw
@@ -232,11 +234,52 @@ files, stop expansion, and inspect; do not restart the old harness alongside
 the replacement. Keep this version installed while fresh-handoff reservations
 exist. There is no automatic rollback into the old transcript.
 
+### Explicit legacy checkout mapping
+
+The default handoff still requires an attached bead-named branch. For a verified
+existing worker on a legacy/inherited branch or detached HEAD, add this object
+to its private handoff JSON (the values below are placeholders, not runnable):
+
+```json
+{
+  "checkout_mapping": {
+    "head": "FULL_CURRENT_COMMIT_OBJECT_ID",
+    "ref": "refs/heads/original-legacy-branch",
+    "source_pid": 12345,
+    "source_start_ticks": "EXACT_PROC_STAT_START_TICKS",
+    "source_boot_id": "CURRENT_BOOT_ID",
+    "evidence": "How the exact source transcript and task notes establish ownership of this original checkout; explain inherited task names and any secondary checkouts."
+  }
+}
+```
+
+Use `ref: "HEAD"` only for a detached checkout; otherwise use the **full**
+symbolic ref. Record the full commit ID, not a branch expression or short SHA.
+The source PID must be the unique foreground root selected by process-tree
+inspection, with its `/proc/<pid>/stat` start ticks and the current Linux boot
+ID. Evidence is required (at most 32 KiB); it is an operator attestation, not
+an automated proof of ownership. If provenance or independent writers are
+uncertain, leave the worker intact instead of supplying a guessed mapping.
+
+Preparation checks those exact identities and preserves the mapping in
+`worker.json` and its ownership explanation in the fresh session context.
+The cwd must still be a linked worktree of the configured bead repository;
+other managed occupants and existing reservations still refuse preparation.
+Source exclusion, quiescence, shutdown, transcript/file preservation and parking
+checks are unchanged. Ref/HEAD and raw checkout bytes are rechecked before
+reservation and again before the first launch, including interrupted launches.
+Changing from attached to detached (even at the same commit) is a mismatch.
+No branch, task label, live guard or existing reservation is rewritten. This
+mapping applies only to this fresh handoff, never to strict pi adoption or
+ordinary dispatch. Keep a mapping-aware binary installed while it is reserved.
+
 Isolated validation (fixture legacy source, real guarded pi, no live panes):
 
 ```sh
 python3 scripts/pi-handoff-trial.py --model <authorized-provider/model>
-# Repeat after installation:
+python3 scripts/pi-handoff-trial.py --checkout legacy --model <authorized-provider/model>
+python3 scripts/pi-handoff-trial.py --checkout detached --model <authorized-provider/model>
+# Repeat the relevant checkout variants after installation:
 python3 scripts/pi-handoff-trial.py --binary /absolute/quartermaster --model <authorized-provider/model>
 ```
 

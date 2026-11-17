@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -19,14 +20,57 @@ import (
 )
 
 type rpcHandoff struct {
-	Checkpoint rpcAdoption `json:"checkpoint"`
-	Context    string      `json:"context"`
+	Checkpoint rpcAdoption             `json:"checkpoint"`
+	Context    string                  `json:"context"`
+	Mapping    *handoffCheckoutMapping `json:"checkout_mapping,omitempty"`
+}
+
+// A per-handoff operator attestation, not a global branch alias or force flag.
+// Pin both the checkout and the exact source incarnation before preparation.
+// All other admission, exit, file, transcript and parking checks still apply.
+type handoffCheckoutMapping struct {
+	Head        string `json:"head"`
+	Ref         string `json:"ref"` // full refs/heads/... or HEAD for detached
+	SourcePID   int    `json:"source_pid"`
+	SourceStart string `json:"source_start_ticks"`
+	SourceBoot  string `json:"source_boot_id"`
+	Evidence    string `json:"evidence"`
+}
+
+func handoffCheckout(cwd string, mapping *handoffCheckoutMapping) (string, string, error) {
+	if mapping == nil {
+		return handoffDigest(cwd) // default and strict native adoption stay unchanged
+	}
+	if strings.TrimSpace(mapping.Evidence) == "" || len(mapping.Evidence) > 32<<10 || mapping.SourcePID <= 0 || mapping.SourceStart == "" || mapping.SourceBoot == "" {
+		return "", "", errors.New("checkout mapping requires source identity and 1..32KiB ownership evidence")
+	}
+	if mapping.Ref != "HEAD" && !strings.HasPrefix(mapping.Ref, "refs/heads/") {
+		return "", "", errors.New("checkout mapping requires a full branch ref or HEAD for detached")
+	}
+	ref, err := adoptionGit(cwd, "symbolic-ref", "--quiet", "HEAD")
+	if err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			return "", "", err // only symbolic-ref's documented detached status
+		}
+		ref = []byte("HEAD")
+	}
+	head, err := adoptionGit(cwd, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return "", "", err
+	}
+	if mapping.Ref != strings.TrimSpace(string(ref)) || mapping.Head != strings.TrimSpace(string(head)) {
+		return "", "", errors.New("checkout mapping ref/HEAD does not match; preserve source and inspect")
+	}
+	digest, err := checkoutDigest(cwd, 16)
+	return strings.TrimPrefix(mapping.Ref, "refs/heads/"), digest, err
 }
 
 type handoffInput struct {
-	Cwd        string `json:"cwd"`
-	Transcript string `json:"transcript"`
-	Context    string `json:"context"` // progress, pending question verbatim, next authorized step
+	Cwd        string                  `json:"cwd"`
+	Transcript string                  `json:"transcript"`
+	Context    string                  `json:"context"` // progress, pending question verbatim, next authorized step
+	Mapping    *handoffCheckoutMapping `json:"checkout_mapping,omitempty"`
 }
 
 // Pi 1.5 buffers a new session until its first assistant response. Seed a
@@ -138,11 +182,11 @@ func handoffPrepare(cfg Config, h Herdr, b Bead, pane, input string) error {
 	if !found {
 		return errors.New("handoff cwd must be a linked worktree of the bead repository")
 	}
-	branch, digest, err := handoffDigest(cwd)
+	branch, digest, err := handoffCheckout(cwd, in.Mapping)
 	if err != nil {
 		return err
 	}
-	if !onBeadBranch(cfg.BranchPrefix, branch, b) {
+	if in.Mapping == nil && !onBeadBranch(cfg.BranchPrefix, branch, b) {
 		return errors.New("worktree branch does not belong to bead")
 	}
 	for _, a := range agents {
@@ -181,6 +225,12 @@ func handoffPrepare(cfg Config, h Herdr, b Bead, pane, input string) error {
 			return err
 		}
 		owner.SessionStart = leader.Start
+		if in.Mapping != nil && pid == ownerPID {
+			m := in.Mapping
+			if m.SourcePID != owner.PID || m.SourceStart != owner.Start || m.SourceBoot != owner.Boot {
+				return errors.New("checkout mapping source identity changed; preserve source and inspect")
+			}
+		}
 		a.Owners = append(a.Owners, owner)
 	}
 	a.Shell, err = adoptionIdentity("/proc", info.ShellPID)
@@ -219,13 +269,25 @@ func handoffPrepare(cfg Config, h Herdr, b Bead, pane, input string) error {
 		return errors.New("source changed during checkpoint; wait for quiescence")
 	}
 	context := fmt.Sprintf("Fresh harness handoff for %s: %s\nOriginal %s transcript (read-only history): %s\nWorktree: %s\nBranch: %s\nStatus: %s; original assignee: %s\n\nThis is task context, not approval. Preserve unresolved questions; migration authorizes no task action. Existing configured pi guards apply; no cross-harness equivalence is claimed.\n\n%s\n\nTask description:\n%s\n\nWorking notes at handoff:\n%s", b.ID, b.Title, source.Kind, in.Transcript, cwd, branch, b.Status, b.Assignee, in.Context, b.Description, b.Notes)
+	if in.Mapping != nil {
+		// Check the pinned ref/HEAD again after the source census, before any
+		// reservation. Mapping is not permission to adopt a moving checkout.
+		currentBranch, currentDigest, err := handoffCheckout(cwd, in.Mapping)
+		if err != nil {
+			return err
+		}
+		if currentBranch != branch || currentDigest != digest {
+			return errors.New("mapped checkout changed during checkpoint")
+		}
+		context += fmt.Sprintf("\n\nExplicit operator checkout mapping (not task approval):\nRef: %s\nHEAD: %s\nOwnership evidence:\n%s", in.Mapping.Ref, in.Mapping.Head, in.Mapping.Evidence)
+	}
 	if len(context) > 512<<10 {
 		return errors.New("handoff context exceeds 512KiB; prepare a bounded summary")
 	}
 	if err := rpcSave(rpcParkPath(b.ID), map[string]string{"reason": "fresh harness handoff; no continuation or approval"}); err != nil {
 		return err
 	}
-	return rpcSave(filepath.Join(rpcDir(b.ID), "worker.json"), rpcWorker{Bead: b.ID, Cwd: cwd, Branch: branch, Args: args, Handoff: &rpcHandoff{Checkpoint: a, Context: context}})
+	return rpcSave(filepath.Join(rpcDir(b.ID), "worker.json"), rpcWorker{Bead: b.ID, Cwd: cwd, Branch: branch, Args: args, Handoff: &rpcHandoff{Checkpoint: a, Context: context, Mapping: in.Mapping}})
 }
 
 // Some harnesses place their MCP children in the foreground process group.
@@ -346,7 +408,7 @@ func handoffValidate(h Herdr, b Bead, w rpcWorker) error {
 	if err := adoptionStopped(h, paneWorker); err != nil {
 		return err
 	}
-	branch, digest, err := handoffDigest(w.Cwd)
+	branch, digest, err := handoffCheckout(w.Cwd, w.Handoff.Mapping)
 	if err != nil {
 		return err
 	}

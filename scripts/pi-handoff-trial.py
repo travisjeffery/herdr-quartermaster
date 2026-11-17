@@ -17,6 +17,8 @@ import time
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--model', required=True)
 p.add_argument('--binary')
+p.add_argument('--checkout', choices=('default', 'legacy', 'detached'), default='default',
+               help='exercise an explicit legacy/detached checkout mapping')
 o = p.parse_args()
 root = Path(tempfile.mkdtemp(prefix='qm-handoff-'))
 root.chmod(0o700)
@@ -24,7 +26,8 @@ print(f'Evidence: {root}', flush=True)
 for name in ('repo', 'state', 'config', 'bin'):
     (root / name).mkdir(mode=0o700)
 repo, state, config = (root / n for n in ('repo', 'state', 'config'))
-bead, branch = 'handoff-trial', 'tj/handoff-trial-work'
+bead = 'handoff-trial'
+branch = 'tj/legacy-work' if o.checkout == 'legacy' else 'tj/handoff-trial-work'
 worktree = root / 'checkout'
 env = os.environ.copy()
 for name in list(env):
@@ -39,6 +42,8 @@ if not o.binary:
 subprocess.run(['git', 'init', '-b', 'main', str(repo)], check=True, capture_output=True)
 subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Trial', '-c', 'user.email=trial@invalid', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture'], check=True, capture_output=True)
 subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-b', branch, str(worktree), 'main'], check=True, capture_output=True)
+if o.checkout == 'detached':
+    subprocess.run(['git', '-C', str(worktree), 'switch', '--detach', 'HEAD'], check=True, capture_output=True)
 (worktree / 'untracked.txt').write_text('Retain these exact bytes.\n')
 transcript = root / 'legacy-session.jsonl'
 transcript.write_text(json.dumps({'type': 'assistant', 'text': 'Awaiting explicit deployment approval.'}) + '\n')
@@ -97,6 +102,19 @@ def wait(fn, seconds=120):
 
 process(old.pid)
 try:
+    if o.checkout != 'default':
+        # Naming exceptions remain refused without a source-bound attestation.
+        assert run('rpc', 'handoff-prepare', bead, 'source:p1', str(root / 'handoff.json'), check=False).returncode != 0
+        assert not (state / 'rpc' / bead / 'worker.json').exists() and old.poll() is None
+        data = json.loads((root / 'handoff.json').read_text())
+        data['checkout_mapping'] = dict(
+            head=subprocess.check_output(['git', '-C', str(worktree), 'rev-parse', 'HEAD'], text=True).strip(),
+            ref='HEAD' if o.checkout == 'detached' else 'refs/heads/' + branch,
+            source_pid=old.pid,
+            source_start_ticks=Path(f'/proc/{old.pid}/stat').read_text().rsplit(') ', 1)[1].split()[19],
+            source_boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+            evidence='Fixture operator verified this exact source owns the original legacy/detached checkout; retain unanswered question.')
+        (root / 'handoff.json').write_text(json.dumps(data))
     print(run('rpc', 'handoff-prepare', bead, 'source:p1', str(root / 'handoff.json')).stdout, flush=True)
     assert run('rpc', 'handoff', bead, check=False).returncode != 0
     assert run('rpc', 'resume', bead, check=False).returncode != 0
@@ -110,6 +128,9 @@ try:
     assert st['phase'] == 'parked' and st['session_id'] == bead and st['session_file'] != str(transcript), st
     reservation = json.loads((state / 'rpc' / bead / 'worker.json').read_text())
     assert reservation['handoff']['checkpoint']['completed']
+    if o.checkout != 'default':
+        assert reservation['handoff']['checkout_mapping'] == data['checkout_mapping']
+        assert data['checkout_mapping']['evidence'] in reservation['handoff']['context']
     assert run('tell', bead, 'This must be refused', check=False).returncode != 0
     assert run('rpc', 'activate', bead, check=False).returncode != 0
     assert 'agent_start' not in (state / 'rpc' / bead / 'events.jsonl').read_text()
@@ -138,7 +159,7 @@ try:
     messages = [json.loads(line) for line in Path(st['session_file']).read_text().splitlines()]
     assert len([m for m in messages if m.get('customType') == 'quartermaster.handoff']) == 1
     assert transcript.read_bytes() == history
-    result = dict(result='PASS', source_pid=old.pid, replacement_pid=st['pi_pid'], session=st['session_file'], transcript_sha256=hashlib.sha256(history).hexdigest(), assertions='live-source refusal; unfinished-resume refusal; no duplicate managed writer; fresh context; no startup turn; parked tell/activation refusal; original bytes preserved; explicit fixture continuation; exact session resume')
+    result = dict(result='PASS', checkout=o.checkout, source_pid=old.pid, replacement_pid=st['pi_pid'], session=st['session_file'], transcript_sha256=hashlib.sha256(history).hexdigest(), assertions='live-source refusal; unfinished-resume refusal; no duplicate managed writer; fresh context; no startup turn; parked tell/activation refusal; original bytes preserved; explicit fixture continuation; exact session resume')
     (root / 'result.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result), flush=True)
 finally:

@@ -14,17 +14,30 @@ import (
 )
 
 func TestFreshHandoffCheckpointAndExit(t *testing.T) {
-	for _, kind := range []string{"claude", "codex", "muse"} {
-		t.Run(kind, func(t *testing.T) {
+	for _, mode := range []string{"claude", "codex", "muse", "legacy-branch", "detached"} {
+		t.Run(mode, func(t *testing.T) {
+			kind := mode
+			if mode == "legacy-branch" || mode == "detached" {
+				kind = "claude"
+			}
 			t.Setenv("QUARTERMASTER_STATE_DIR", rpcTestDir(t))
 			t.Setenv("HERDR_PANE_ID", "coordinator:p1")
 			cwd := adoptionRepo(t)
+			if mode == "legacy-branch" {
+				mappingGit(t, cwd, "switch", "-c", "tj/legacy-work")
+			} else if mode == "detached" {
+				mappingGit(t, cwd, "switch", "--detach", "HEAD")
+				if _, _, err := adoptionDigest(cwd); err == nil {
+					t.Fatal("strict native adoption accepted detached HEAD")
+				}
+			}
 			transcript := filepath.Join(t.TempDir(), "original-id.jsonl")
 			os.WriteFile(transcript, []byte("original history\n"), 0600)
 			untracked := filepath.Join(cwd, "notes")
 			os.WriteFile(untracked, []byte("preserve dirty bytes"), 0600)
 			input := filepath.Join(t.TempDir(), "handoff.json")
-			rpcSave(input, handoffInput{Cwd: cwd, Transcript: transcript, Context: "Question: may I deploy? Unanswered. No deployment authorized."})
+			in := handoffInput{Cwd: cwd, Transcript: transcript, Context: "Question: may I deploy? Unanswered. No deployment authorized."}
+			rpcSave(input, in)
 			child := exec.Command("sleep", "60")
 			child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 			if err := child.Start(); err != nil {
@@ -36,6 +49,17 @@ func TestFreshHandoffCheckpointAndExit(t *testing.T) {
 			h := adoptionHerdr(t, []Agent{a}, info, []Worktree{{Linked: true, Path: cwd}})
 			cfg := Config{Repo: cwd, BranchPrefix: "tj/", Agents: map[string]AgentConfig{"pi": {Args: []string{}}}}
 			b := Bead{ID: "b-1", Status: StatusNeedsMe, Assignee: kind, Notes: "Pending permission remains unanswered"}
+			if mode == "legacy-branch" || mode == "detached" {
+				if err := handoffPrepare(cfg, h, b, a.PaneID, input); err == nil || rpcExists(b.ID) {
+					t.Fatal("unmapped legacy/detached checkout admitted", err)
+				}
+				ref := "refs/heads/tj/legacy-work"
+				if mode == "detached" {
+					ref = "HEAD"
+				}
+				in.Mapping = mappingFixture(t, cwd, child.Process.Pid, ref)
+				rpcSave(input, in)
+			}
 			if err := handoffPrepare(cfg, h, b, a.PaneID, input); err != nil {
 				t.Fatal(err)
 			}
@@ -43,6 +67,9 @@ func TestFreshHandoffCheckpointAndExit(t *testing.T) {
 			rpcLoad(filepath.Join(rpcDir(b.ID), "worker.json"), &w)
 			if w.Adoption != nil || w.Handoff == nil || w.Handoff.Checkpoint.Ready || !rpcParked(b.ID) || !strings.Contains(w.Handoff.Context, b.Notes) {
 				t.Fatalf("checkpoint: %+v", w)
+			}
+			if in.Mapping != nil && (w.Handoff.Mapping == nil || *w.Handoff.Mapping != *in.Mapping || !strings.Contains(w.Handoff.Context, in.Mapping.Evidence)) {
+				t.Fatal("mapping evidence not persisted in reservation/context")
 			}
 			if !adoptionHeldAgent(a) || !rpcReservedPath(cwd) {
 				t.Fatal("reservation did not hold legacy delivery/sweep")
@@ -82,6 +109,14 @@ func TestFreshHandoffCheckpointAndExit(t *testing.T) {
 			os.WriteFile(transcript, []byte("changed history\n"), 0600)
 			if err := handoffValidate(h, b, w); err == nil {
 				t.Fatal("lost transcript accepted")
+			}
+			os.WriteFile(transcript, []byte("original history\n"), 0600)
+			if in.Mapping != nil {
+				// Same commit/files, different attached/detached identity.
+				mappingGit(t, cwd, "switch", "-c", "tj/rebound")
+				if err := handoffValidate(h, b, w); err == nil {
+					t.Fatal("changed ref accepted")
+				}
 			}
 		})
 	}
