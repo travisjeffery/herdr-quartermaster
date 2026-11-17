@@ -36,7 +36,7 @@ func renderBoard(m *board, w, hgt int) string {
 			if r.bead.ID != m.scrolledOn {
 				m.scroll, m.scrolledOn = 0, r.bead.ID
 			}
-			detail = detailLines(*r, m.details[r.bead.ID], w)
+			detail = append(rpcBoardDetail(*r, m.now()), detailLines(*r, m.details[r.bead.ID], w)...)
 			m.scroll = min(m.scroll, max(0, len(detail)-1))
 			detail = detail[m.scroll:]
 		}
@@ -136,9 +136,9 @@ func (m *board) hint() string {
 	case m.view == viewGC:
 		return "space mark  * all  C close  u release  d resolve  i dismiss  ↵ focus  r rescan  esc back  ? help"
 	case m.view == viewDetail:
-		return "J/K scroll  a note  A answer  o PR  l Linear  b bd show  ↵ focus/start  esc back  ? help"
+		return "J/K scroll  V RPC view  a note  A answer  o PR  l Linear  b bd show  ↵ view/focus/start  esc back"
 	}
-	return "↵ focus/start  space detail  a note  A answer  n next  S status  T tidy  / filter  ? help"
+	return "↵ RPC view or focus/start  V read-only RPC view  space detail  a note  A answer  T tidy  / filter  ? help"
 }
 
 // agentGlyph is the agent column: working, idle or done, waiting on an
@@ -194,17 +194,31 @@ func listLines(rows []boardRow, cur int, detail []styledLine, now time.Time, w, 
 			continue
 		}
 		glyph, gColor := agentGlyph(r.agent)
+		if r.native != nil {
+			r.line = rpcViewOneLine(rpcBoardBrief(*r.native, now))
+			r.bead.Title = rpcViewOneLine(r.bead.Title)
+			if r.linear != "" && !strings.Contains(r.bead.Title, r.linear) {
+				r.bead.Title = r.linear + " " + r.bead.Title
+			}
+			glyph, gColor = "○", ansiDim
+			if r.native.State == "running" {
+				glyph, gColor = "●", ansiGreen
+			}
+			if r.native.State == "waiting on approval" {
+				glyph, gColor = "!", ansiRed
+			}
+		}
 		when := fmt.Sprintf("%3s", age(r.bead.UpdatedAt, now))
 		title := ""
 		if titleW > 0 {
-			title = " " + fit(r.bead.Title, titleW)
+			title = " " + rpcViewFit(r.bead.Title, titleW)
 		}
 		head := fit(r.bead.ID, idW) + " " + fmt.Sprintf("P%d", r.bead.Priority) + " "
 		if i == cur {
-			out = append(out, ansiInvert+fit("▌ "+head+glyph+" "+when+" "+fit(r.line, stateW)+title, w)+ansiReset)
+			out = append(out, ansiInvert+rpcViewFit("▌ "+head+glyph+" "+when+" "+rpcViewFit(r.line, stateW)+title, w)+ansiReset)
 			continue
 		}
-		out = append(out, "  "+head+gColor+glyph+ansiReset+" "+ansiDim+when+ansiReset+" "+r.color+fit(r.line, stateW)+ansiReset+title)
+		out = append(out, "  "+head+gColor+glyph+ansiReset+" "+ansiDim+when+ansiReset+" "+r.color+rpcViewFit(r.line, stateW)+ansiReset+title)
 	}
 	if detail != nil {
 		out = append(out, ansiDim+strings.Repeat("─", w)+ansiReset)
@@ -216,7 +230,7 @@ func listLines(rows []boardRow, cur int, detail []styledLine, now time.Time, w, 
 			if i >= room {
 				break
 			}
-			out = append(out, l.style+fit(l.text, w)+ansiReset)
+			out = append(out, l.style+rpcViewFit(l.text, w)+ansiReset)
 		}
 	}
 	return out
@@ -320,7 +334,8 @@ func helpLines(gc bool) []string {
 		"  esc q     close the pane, clear the filter, or quit",
 		"  r         refresh now    T    tidy view     q     quit",
 		"",
-		"  ↵         focus the agent, or start one (confirms)",
+		"  ↵         view native RPC history; otherwise focus/start (confirms start)",
+		"  V         read-only native history (including parked/stopped workers)",
 		"  c x m i   start claude, codex, muse or pi (confirms)",
 		"  R         resume an exited agent in its worktree (confirms)",
 		"  a         add a note                        A   answer an idle worker (confirms)",
@@ -331,7 +346,7 @@ func helpLines(gc bool) []string {
 		"  C         close with a reason (confirms)",
 		"  o l       open the PR / Linear issue        y p copy the id / RUN command",
 		"",
-		"A worker at an approval prompt (!) is never answered from here: ↵ focuses it.",
+		"Approval prompts are never answered here; native RPC viewing has no controls.",
 	}
 }
 

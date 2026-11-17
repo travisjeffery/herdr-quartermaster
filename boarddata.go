@@ -42,6 +42,7 @@ type boardData struct {
 	Agents  []Agent   `json:"-"`
 	State   TickerState
 	Inbox   []InboxItem
+	Native  map[string]rpcVisibility `json:"-"`
 }
 
 func boardCachePath() string { return filepath.Join(stateDir(), "board.json") }
@@ -104,6 +105,10 @@ func buildRows(cfg Config, data boardData, mode sortMode) []boardRow {
 			}
 		default:
 			continue
+		}
+		if v, ok := data.Native[b.ID]; ok {
+			r.native = &v
+			r.search += " " + searchText(v.State, v.Activity, v.Current)
 		}
 		sections[r.group] = append(sections[r.group], r)
 	}

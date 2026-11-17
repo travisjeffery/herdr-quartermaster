@@ -16,6 +16,7 @@ import (
 )
 
 const rpcMaxRecord = 16 << 20
+const rpcLogMaxRecord = rpcMaxRecord + 256 // supervisor receipt timestamp envelope
 const rpcCommandTimeout = 15 * time.Second
 
 type rpcRecord struct {
@@ -35,11 +36,17 @@ type rpcRecord struct {
 // readRPC splits only on LF (including CRLF), never Unicode separators. A
 // partial final record is a protocol failure, not a completed response.
 func readRPC(r io.Reader, consume func([]byte) error) error {
+	return readRPCLimit(r, rpcMaxRecord, consume)
+}
+func readRPCLog(r io.Reader, consume func([]byte) error) error {
+	return readRPCLimit(r, rpcLogMaxRecord, consume)
+}
+func readRPCLimit(r io.Reader, limit int, consume func([]byte) error) error {
 	br := bufio.NewReaderSize(r, 64<<10)
 	var line []byte
 	for {
 		part, err := br.ReadSlice('\n')
-		if len(line)+len(part) > rpcMaxRecord {
+		if len(line)+len(part) > limit {
 			return errors.New("pi RPC record exceeds 16 MiB")
 		}
 		line = append(line, part...)

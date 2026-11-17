@@ -229,13 +229,38 @@ func rpcAssistantText(raw []byte) string {
 // switching, arbitrary shell execution, or approval responses.
 func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 	if len(pos) < 2 {
-		return errors.New("usage: quartermaster rpc status|output|events|receipt|tell|cancel|stop|resume <bead> [request-id] [text]")
+		return errors.New("usage: quartermaster rpc view|inspect|history|feed|status|output|events|receipt|tell|cancel|stop|resume <bead> [cursor|request-id] [text]")
 	}
 	op, id := pos[0], pos[1]
 	if !rpcIDRE.MatchString(id) {
 		return errors.New("invalid bead id")
 	}
 	switch op {
+	case "view":
+		return runRPCView(id, "", nil)
+	case "inspect":
+		v, err := rpcViewStatus(id)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(out).Encode(v)
+	case "history", "feed":
+		if len(pos) > 3 {
+			return errors.New("usage: rpc history|feed <bead> [cursor]")
+		}
+		cursor := ""
+		if len(pos) == 3 {
+			cursor = pos[2]
+		}
+		source := "history"
+		if op == "feed" {
+			source = "events"
+		}
+		p, err := rpcViewRead(id, source, cursor)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(out).Encode(p)
 	case "handoff-prepare", "handoff":
 		msg, err := rpcHandoffCmd(cfg, cfg.herdrOn(newHerdr(), localHost), pos, by)
 		if msg != "" {
@@ -267,7 +292,7 @@ func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 			return err
 		}
 		// Only authoritative completed assistant messages, not duplicate deltas.
-		err = readRPC(f, func(raw []byte) error {
+		err = readRPCLog(f, func(raw []byte) error {
 			_, err := io.WriteString(out, rpcAssistantText(raw))
 			return err
 		})
