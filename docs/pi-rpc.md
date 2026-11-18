@@ -34,8 +34,11 @@ model turns exercise the brief and a follow-up. It checks duplicate request
 reconciliation, cancellation, stop, saved-session resume, and refusal of an
 implicit TUI fallback. It stops its worker in `finally` and retains the printed
 scratch directory (logs, session and worktree) for inspection. It installs
-nothing and changes no live defaults. Each model turn has a 90-second limit;
-the process stop has a five-second graceful window before killing pi.
+nothing and changes no live defaults. Each model turn has a 90-second limit.
+New supervisors request shutdown with stdin EOF only and never escalate to
+forced termination. An unresponsive child keeps its supervisor and inherited
+session lease. Older running supervisors retain their old five-second kill
+fallback; installing a new CLI does not change them (see below).
 
 Verified 2026-11-17 using pi 1.5.2 and the existing OpenAI Codex subscription:
 all checks passed, including the same actual session file across different
@@ -167,6 +170,109 @@ history, verifies unchanged worker/session/task fingerprints, and views again
 after stopping **only its own fixture**. Live Herdr smoke/installation is a
 separate coordinator-owned step; no worker needs `HERDR_ENV` or a pane.
 
+## Guarded graceful-only lifecycle
+
+For one **explicitly selected, authorized** native worker:
+
+```sh
+quartermaster rpc status <bead>          # inspect live capability and identity
+quartermaster rpc stop-graceful <bead>  # existing class-3 lifecycle gate
+# Only after confirmed exit and separate authorization to resume:
+quartermaster rpc resume <bead>
+```
+
+`stop-graceful` is a distinct supervisor operation, not an extra field on
+`stop`: old binaries ignore unknown fields, which would otherwise invoke their
+force-capable path. The CLI requires a live `graceful_stop: true` capability
+and nonempty `generation`, never a saved-status fallback. It selects that
+in-memory generation, supervisor/child PIDs, exact session ID/file, lifecycle
+sequence and parking state. The supervisor revalidates that selection before
+and after its read-only pi preflight, under serialized admission. A restarted
+supervisor or intervening lifecycle/parking change requires fresh inspection.
+No OS signal or PID-only process targeting is used.
+
+Only healthy **underlying idle** workers qualify. Parking is an additional
+barrier, not evidence of quiescence. Running, blocked, errored, pending
+prompt/cancel/activation operations, unresolved or malformed receipt files,
+pending transport calls, streaming/compaction/queued pi state, missing state
+fields and missing/busy managed guards are refused. The supervisor sends only
+`get_state` (and managed guard `ping`) before latching admission and requesting
+EOF. It never sends a prompt, clear-queue, abort, approval, or activation.
+New prompts, cancellation and activation cannot enter after the latch; late
+lifecycle events cannot reopen it. An already recorded receipt remains
+reconcilable without replaying its request.
+
+The CLI waits up to five seconds **after preflight/acceptance** for the inherited
+lease to become free and the same generation/session to have durable `stopped`
+state with no child PID. Preflight itself uses existing bounded RPC deadlines.
+A disconnected socket alone never proves shutdown. On timeout or client loss,
+**do not repeat shutdown, send signals, delete reservations, edit metadata, or
+start a replacement**. Inspect `rpc status`, receipts, events and stderr. The
+supervisor remains in `stopping` with its lease while the child lives, including
+when stdout has closed or framing failed. There is no timer that kills it.
+`resume` refuses a live stopping owner. If the child later exits naturally,
+its supervisor saves `stopped` and releases ownership; only then may an
+explicitly authorized `resume` restore the exact saved session. Incomplete
+exit evidence requires investigation, not an automatic retry or forced cleanup.
+A client RPC timeout can occur before acceptance is known: the server may still
+complete its preflight. The CLI records an attempt before sending it and reports
+an ambiguous outcome rather than treating loss of the reply as refusal.
+
+If the final pre-EOF status write fails, admission stays latched but EOF has
+**not** been requested. Preserve both processes while fixing the storage fault.
+A separately authorized `rpc stop` on the **same confirmed capable generation**
+can then finish EOF-only shutdown; this is deliberate recovery, never an
+automatic fallback and never valid for a legacy supervisor. A missing durable
+terminal checkpoint from a guarded stop prevents resume.
+
+Resume never replays receipts, submits a brief or removes parking. After a
+recorded graceful stop it refuses unresolved/malformed receipt records. Ordinary
+crash recovery retains its previous behavior: exact-session resume may preserve
+an ambiguous intent unchanged, without replay, but such a worker remains
+ineligible for guarded stop until the uncertainty is resolved. Resume preserves
+the recorded session identity if pi reports a different one, and retains
+worktree and reservation files.
+Read-only viewing does not require resume. These controls serialize managed
+admission; they are not a sandbox against arbitrary same-user processes or
+extensions independently starting work.
+
+### Legacy supervisors: precise refusal, no live migration
+
+A supervisor without the live capability is **untouched**: only `status` is
+sent. Its old `stop` operation and supervisor signal cleanup close stdin and
+arm `Process.Kill` after five seconds; stdout/framing failure also reaches that
+same timer. Sending SIGTERM directly to the child cannot install a new atomic
+admission barrier in the old supervisor and does not remove that force-capable
+cleanup path. An already parked worker still has that cleanup hazard. No safe
+in-place upgrade is claimed, and there is no raw-socket, signal, metadata-edit,
+manual-unpark, permissions/config/provider, or headless-enrollment fallback.
+
+The preservation-only remaining option is to leave the old owner alone until
+it exits naturally, confirm ownership release and exact saved-session evidence,
+then separately authorize resume under the new binary. If waiting is not
+acceptable, the operator must explicitly decide on a different transition
+policy; **this implementation does not authorize or perform it**. This means
+an installation alone does not unblock a no-force restart of legacy owners.
+
+Installation, stopping selected live owners, and resuming them are separate
+authorization/rollout steps. Development and review use only isolated fixtures:
+
+```sh
+go test -race . -run 'TestRPCGraceful|TestRPCStopBarrier|TestRPCDialogAbort'
+```
+
+Fixtures cover legacy status-only refusal, stale selection, idle/parked
+stop+exact-session resume, unchanged history/receipts/parking/worktree files,
+no model turn/replay, uncertain receipts, and an unresponsive child retained
+past the former five-second kill window even after stdout closes. Fixture
+cleanup acts only on fixture-owned processes, never selected live workers.
+Independent read-only review covered identity revalidation, failed-stop recovery
+and separate rollout authorization. An isolated real-pi 1.5.2 trial also passed
+two parked CLI stop/resume rounds with the managed guard and no model turns:
+exact session, preserved conversation prefix and unchanged receipts, parking and
+worktree. Pi may append normal model/thinking metadata on opening a session;
+prefix preservation does not require whole-session byte equality.
+
 ## Dispatch an actual bead
 
 Use a fresh bead whose branch/worktree does not already exist:
@@ -288,7 +394,9 @@ For each eligible idle code-only pi worker, one at a time:
 
 On failure, **stop expansion**. A prepared reservation remains intact, as do
 all files and histories. Do not delete locks/reservations or rewrite metadata
-to make a check pass. If RPC started, `rpc stop` and verify both PIDs exited;
+to make a check pass. If RPC started, use the explicitly authorized lifecycle
+path and verify both PIDs exited (new supervisors can wait indefinitely; legacy
+`rpc stop` can force termination);
 leave the saved reservation for inspection/recovery. There is intentionally
 no force-adopt or automatic TUI rollback into the same session. The explicit
 `--backend herdr` override remains available for other fresh tasks. Do not
@@ -428,7 +536,14 @@ Idle is driven by `agent_settled`, not prompt acceptance, assistant output or
 `agent_end`. Provider failures/aborts remain in the event/session stream; idle
 means no automatic work remains, **not task success**. `cancel` clears queued
 messages before aborting the current run; `stop` closes stdin, waits for orderly
-shutdown and kills the direct pi child after five seconds if necessary.
+shutdown. New supervisors never send a kill or signal to pi, even on transport
+failure or supervisor signal cleanup. A stuck child can therefore retain its
+supervisor indefinitely, including after stdout closes; further supervisor
+signals do not escalate. This favors preservation/ownership over automatic
+recovery and does not claim that an unresponsive child is still observable.
+Older running supervisors still arm their five-second kill timer: plain `stop`
+is **not** a graceful-only operation across versions. Use `stop-graceful` for
+guarded preservation-only work; it refuses those legacy owners untouched.
 
 ## Approvals and guards
 
