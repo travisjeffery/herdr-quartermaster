@@ -94,17 +94,15 @@ func buildRows(cfg Config, data boardData, mode sortMode) []boardRow {
 	}
 	sections := map[Group][]boardRow{}
 	for _, b := range data.Beads {
-		var r boardRow
-		switch b.Status {
-		case StatusInProgress, StatusNeedsMe, StatusBlocked:
-			r = threadRow(data.State, threadFor(cfg, data.State, b, byName))
-		case StatusOpen:
-			r = openRow(cfg, data.State, b, live)
-			if a, ok := byName[agentName(b.ID)]; ok {
-				r.agent = &a
-			}
-		default:
+		if b.Status != StatusOpen && b.Status != StatusInProgress && b.Status != StatusNeedsMe && b.Status != StatusBlocked {
 			continue
+		}
+		th := threadFor(cfg, data.State, b, byName)
+		th.Blockers = waitsOn(b, live)
+		th = th.derive()
+		r := threadRow(data.State, th)
+		if th.derived().Kind == ThreadQueued || b.Status == StatusOpen && th.derived().Kind == ThreadBlocked {
+			r = queuedRow(data.State, th)
 		}
 		if v, ok := data.Native[b.ID]; ok {
 			r.native = &v
@@ -126,8 +124,9 @@ func buildRows(cfg Config, data boardData, mode sortMode) []boardRow {
 }
 
 func threadRow(st TickerState, th Thread) boardRow {
-	g := classify(th)
-	r := boardRow{bead: th.Bead, agent: th.Agent, group: g, line: stateLine(th), color: groupColor(g), run: runCommand(th),
+	state := th.derived()
+	g := state.group()
+	r := boardRow{state: &state, bead: th.Bead, agent: th.Agent, group: g, line: stateLine(th), color: groupColor(g), run: runCommand(th),
 		prs: linkedPRs(st, th.Bead), linear: th.Linear, moves: linearMoves([]Thread{th}), runs: th.Runs}
 	agent, pr := "", ""
 	if th.Agent != nil {
@@ -143,29 +142,38 @@ func threadRow(st TickerState, th Thread) boardRow {
 // openRow is an open bead: what kind it is, what it waits on, and what PR or
 // Linear issue its notes already link.
 func openRow(cfg Config, st TickerState, b Bead, live map[string]bool) boardRow {
-	g, color := sectionBacklog, ansiDim
-	if b.HasLabel(LabelNext) {
-		g, color = sectionNext, ansiCyan
+	th := threadFor(cfg, st, b, nil)
+	th.Blockers = waitsOn(b, live)
+	return queuedRow(st, th.derive())
+}
+
+func queuedRow(st TickerState, th Thread) boardRow {
+	b, state := th.Bead, th.derived()
+	g, color := state.group(), ansiDim
+	if g == sectionNext {
+		color = ansiCyan
+	} else if g == GroupBlocked {
+		color = groupColor(g)
 	}
 	parts := []string{orDash(b.Type)}
-	if w := waitsOn(b, live); len(w) > 0 {
-		parts = append(parts, "waits on "+strings.Join(w, ", "))
+	if len(state.Blockers) > 0 {
+		parts = append(parts, "waits on "+strings.Join(state.Blockers, ", "))
 	}
 	prs := linkedPRs(st, b)
-	if len(prs) > 0 {
-		parts = append(parts, fmt.Sprintf("PR #%d", prs[len(prs)-1].Number))
+	if state.PR != nil {
+		parts = append(parts, fmt.Sprintf("PR #%d", state.PR.Number))
 	}
-	key := linearKey(b, cfg.LinearPrefixes)
+	key := th.Linear
 	if key != "" {
 		parts = append(parts, key)
 	}
-	parts = append(parts, cfg.beadMark(b))
+	parts = append(parts, th.Level)
 	line := strings.Join(parts, " · ")
 	var urls []string
 	for _, pr := range prs {
 		urls = append(urls, pr.URL)
 	}
-	return boardRow{bead: b, group: g, line: line, color: color, prs: prs, linear: key,
+	return boardRow{state: &state, bead: b, agent: th.Agent, group: g, line: line, color: color, prs: prs, linear: key,
 		search: searchText(sectionName(g), b.ID, b.Title, b.Status, line, strings.Join(urls, " "), labelText(b))}
 }
 

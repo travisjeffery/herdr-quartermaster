@@ -25,9 +25,10 @@ type Shipped struct {
 }
 
 type InFlight struct {
-	Bead  Bead
-	PR    PR
-	State string
+	Derived ThreadState
+	Bead    Bead
+	PR      PR
+	State   string
 }
 
 // AutoSteps are the steps a bead's worker took without TJ: its AUTO: notes.
@@ -87,7 +88,7 @@ func gatherReport(cfg Config, since time.Time) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	active, err := Beads{}.Active()
+	active, err := Beads{}.list()
 	if err != nil {
 		return Report{}, err
 	}
@@ -101,7 +102,7 @@ func gatherReport(cfg Config, since time.Time) (Report, error) {
 		}
 		merged = append(merged, prs...)
 	}
-	r := buildReport(since, closed, active, merged, loadState(), cfg.BranchPrefix)
+	r := buildReportFor(cfg, since, closed, active, merged, loadState())
 	r.Warnings = append(r.Warnings, warnings...)
 	return r, nil
 }
@@ -110,11 +111,17 @@ func gatherReport(cfg Config, since time.Time) (Report, error) {
 // belongs to a bead when the bead's notes link it, the ticker last saw it as
 // the bead's PR, or it is on the bead's branch.
 func buildReport(since time.Time, closed, active []Bead, merged []MergedPR, st TickerState, branchPrefix string) Report {
+	return buildReportFor(Config{BranchPrefix: branchPrefix}, since, closed, active, merged, st)
+}
+
+func buildReportFor(cfg Config, since time.Time, closed, active []Bead, merged []MergedPR, st TickerState) Report {
 	r := Report{Since: since}
 	links := func(b Bead) []string {
-		urls := NotedPRs(b.Notes)
-		if pr, ok := st.PRs[b.ID]; ok && pr.URL != "" {
-			urls = append(urls, pr.URL)
+		var urls []string
+		for _, pr := range linkedPRs(st, b) {
+			if pr.URL != "" {
+				urls = append(urls, pr.URL)
+			}
 		}
 		return urls
 	}
@@ -141,7 +148,7 @@ func buildReport(since time.Time, closed, active []Bead, merged []MergedPR, st T
 			continue
 		}
 		seen[pr.URL] = true
-		if b, ok := beadForBranch(branchPrefix, pr.Head, beads); ok {
+		if b, ok := beadForBranch(cfg.BranchPrefix, pr.Head, beads); ok {
 			onBranch[b.ID] = append(onBranch[b.ID], pr.URL)
 		} else {
 			r.Unbeaded = append(r.Unbeaded, pr)
@@ -151,21 +158,30 @@ func buildReport(since time.Time, closed, active []Bead, merged []MergedPR, st T
 		r.Shipped = append(r.Shipped, Shipped{Bead: b, PRs: dedupe(append(links(b), onBranch[b.ID]...))})
 	}
 
+	agents := map[string]Agent{}
+	live := map[string]bool{}
 	for _, b := range active {
-		if b.Status == StatusNeedsMe {
-			r.NeedsYou = append(r.NeedsYou, b)
+		live[b.ID] = b.Status != StatusClosed
+		if snap := st.Threads[b.ID]; snap.AgentStatus != "" {
+			agents[agentName(b.ID)] = Agent{Name: agentName(b.ID), Status: snap.AgentStatus, Seq: snap.AgentSeq}
 		}
-		pr, ok := st.PRs[b.ID]
-		if !ok || pr.State != "OPEN" {
+	}
+	for _, b := range active {
+		th := threadFor(cfg, st, b, agents)
+		th.Level = "" // the report is a work summary, not the autonomy dashboard
+		th.Blockers = waitsOn(b, live)
+		th = th.derive()
+		state := th.derived()
+		if state.Kind == ThreadWaiting {
+			r.NeedsYou = append(r.NeedsYou, b)
 			continue
 		}
-		f := InFlight{Bead: b, PR: pr}
-		if snap, ok := st.Threads[b.ID]; ok {
-			th := Thread{Bead: b, PR: &pr, Checks: summarizeChecks(pr.Checks), Reviews: reviewsNotBy(pr.Reviews, st.Login)}
-			if snap.AgentStatus != "" {
-				th.Agent = &Agent{Status: snap.AgentStatus}
-			}
-			f.State = stateLine(th)
+		if state.Kind == ThreadQueued || b.Status == StatusClosed || b.Status == StatusOpen && state.Kind == ThreadBlocked {
+			continue
+		}
+		f := InFlight{Bead: b, Derived: state, State: stateLine(th)}
+		if state.PR != nil {
+			f.PR = *state.PR
 		}
 		r.InFlight = append(r.InFlight, f)
 	}
@@ -230,9 +246,14 @@ func renderReport(r Report, now time.Time) string {
 		s.WriteString("_None._\n")
 	}
 	for _, f := range r.InFlight {
-		fmt.Fprintf(&s, "- **%s** (`%s`): %s", oneLine(f.Bead.Title), f.Bead.ID, f.PR.URL)
+		fmt.Fprintf(&s, "- **%s** (`%s`)", oneLine(f.Bead.Title), f.Bead.ID)
+		sep := ": "
+		if f.PR.URL != "" {
+			fmt.Fprintf(&s, "%s%s", sep, f.PR.URL)
+			sep = " · "
+		}
 		if f.State != "" {
-			fmt.Fprintf(&s, " · %s", f.State)
+			fmt.Fprintf(&s, "%s%s", sep, f.State)
 		}
 		s.WriteString("\n")
 	}

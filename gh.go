@@ -447,17 +447,11 @@ func prForBead(b Bead, branchPrefix string, mine []PR, byURL map[string]PR, owne
 		}
 		add(pr)
 	}
-	var best PR
-	var merged []PR
-	for i, pr := range cands {
-		if i == 0 || prRank(pr, best) {
-			best = pr
-		}
-		if pr.State == "MERGED" {
-			merged = append(merged, pr)
-		}
+	s := selectPR(cands)
+	if s.PR == nil {
+		return PR{}, s.Merged, false
 	}
-	return best, merged, len(cands) > 0
+	return *s.PR, s.Merged, true
 }
 
 // prRank reports whether a outranks b as a bead's PR: open beats merged beats
