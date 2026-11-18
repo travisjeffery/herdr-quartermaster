@@ -18,10 +18,11 @@ type gcItem struct {
 	// keep is why its worktree must stay; resolve is refused while it is set.
 	keep string
 
-	canRelease bool // a stale claim: back to open
-	canClose   bool // not closed yet: close with a reason
-	canResolve bool // closed with a linked worktree: quartermaster resolve
-	canDismiss bool // an unhandled inbox item: mark it done
+	canRelease bool     // a stale claim: back to open
+	canClose   bool     // not closed yet: close with a reason
+	canResolve bool     // closed with a linked worktree: quartermaster resolve
+	canDismiss bool     // an unhandled inbox item: mark it done
+	inboxFiles []string // only the items whose evidence this row displays
 }
 
 // gcInputs is everything the tidy view is built from. closed is bd list
@@ -103,6 +104,7 @@ func gcItems(prefix string, in gcInputs, now time.Time) []gcItem {
 		if !ok {
 			b = Bead{ID: ev.Bead, Status: StatusClosed}
 		}
+		item(b).inboxFiles = append(item(b).inboxFiles, ev.File)
 		if ev.Kind == EventLikelyStale && b.Status == StatusClosed {
 			// Closed since it was flagged: nothing left to decide but the inbox item.
 			it := item(b)

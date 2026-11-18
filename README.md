@@ -541,7 +541,11 @@ that makes removing it unsafe (dirty, unpushed commits, an agent inside).
 `space` marks items and `*` marks all; `C` closes them with a reason, `u`
 releases stale claims back to open (with a note), `d` runs `quartermaster
 resolve` (never `--force`; a worktree that isn't safe to remove is refused),
-and `i` marks their inbox items handled. Each action applies to the marked
+and `i` marks only the inbox items shown in those rows handled (not unseen
+items for the same bead). Obsolete condition-keyed notices are automatically
+archived in `inbox/done`, preserving coordinator acknowledgement evidence.
+`quartermaster context` shows each inbox filename; `quartermaster inbox done
+<file>` dismisses just that item, including global lease-expiry notices. Each action applies to the marked
 items it fits, or the selected one, and confirms first.
 
 ## Getting started

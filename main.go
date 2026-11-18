@@ -45,7 +45,7 @@ Usage:
                                                        writes digest.md, notifies when something changed or needs you
                                                        (T: desktop, slack, stdout, none; default desktop)
   quartermaster digest show|install|uninstall          page the last digest; set up or remove the hourly timer
-  quartermaster inbox done [<bead>...]                 mark inbox items handled (all if none given)
+  quartermaster inbox done [<bead>|<file>...]          mark inbox items handled (all if none given)
   quartermaster resolve <bead> [--force]               remove a finished bead's worktree and merged branch;
                                                        --force also removes an open or dirty one
   quartermaster close <bead> --reason R [--by WHO]     close a bead; one with steps after its merge (rolling-out,
@@ -317,7 +317,7 @@ func run(args []string) error {
 		}
 	case "inbox":
 		if len(pos) == 0 || pos[0] != "done" {
-			return fmt.Errorf("usage: quartermaster inbox done [<bead>...]")
+			return fmt.Errorf("usage: quartermaster inbox done [<bead>|<file>...]")
 		}
 		n, err := inboxDone(pos[1:])
 		if err != nil {

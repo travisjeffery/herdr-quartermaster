@@ -93,7 +93,7 @@ func (f *fakeBoard) env() boardEnv {
 			return "autonomy set", rec("autonomy %s %d %s", id, n, d)
 		},
 		focus:     func(a string) error { return rec("focus %s", a) },
-		inboxDone: func(id string) error { return rec("dismiss %s", id) },
+		inboxDone: func(files []string) error { return rec("dismiss %s", strings.Join(files, ",")) },
 		copy:      func(text string) error { return rec("copy %s", text) },
 		open:      func(u string) string { rec("open %s", u); return "opened " + u },
 	}

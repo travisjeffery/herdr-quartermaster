@@ -61,12 +61,15 @@ func renderContext(cfg Config, threads []Thread, next, ready []Bead, inbox []Inb
 	s.WriteString("\n## Autonomy (`quartermaster autonomy level`)\n")
 	s.WriteString(dialContext(cfg.Autonomy, now))
 
-	s.WriteString("\n## Inbox (unhandled; `quartermaster inbox done [bead...]` when dealt with)\n")
+	s.WriteString("\n## Inbox (unhandled; `quartermaster inbox done <file>` for one item, [bead...] for bulk)\n")
 	if len(inbox) == 0 {
 		s.WriteString("(empty)\n")
 	}
 	for _, it := range inbox {
 		fmt.Fprintf(&s, "- %s %s [%s] %s\n", it.At.Local().Format("15:04"), it.Bead, it.Kind, it.Summary)
+		if it.File != "" {
+			fmt.Fprintf(&s, "  file: %s\n", it.File)
+		}
 	}
 
 	s.WriteString("\n## Threads (bead · state · agent)\n")
