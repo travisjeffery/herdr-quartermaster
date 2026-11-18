@@ -62,6 +62,11 @@ cut. `scripts/demo/record.sh` records it again.</sub>
 | **Workers** | One agent per bead, named after the bead, in the bead's worktree | Doing the work and keeping their bead current |
 | **Ticker** | A background loop (`quartermaster ticker`), started with the plugin | Watching threads, following PRs and runs, prompting workers, the inbox, the sidebar |
 
+An opt-in [headless pi coordinator](docs/pi-headless.md) handles explicitly
+enrolled native workers' post-merge follow-through independently of the editor,
+with fenced ownership, durable outcome reconciliation and a local report outbox.
+It does not change the default Herdr/TUI mode or migrate existing workers.
+
 The coordinator and the ticker never talk to each other directly. The ticker
 writes events to an **inbox** (files in `~/.local/state/quartermaster/inbox/`) and
 nudges the coordinator; the coordinator reads the inbox through

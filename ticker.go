@@ -452,7 +452,7 @@ func (t Ticker) once(st *TickerState) error {
 			// A needs_me thread waits on the user; typing into it would look like
 			// an answer and resume it. Its prompts wait until it is answered.
 			// A worker due a relaunch gets nothing else first (D8).
-			if len(snap.Pending) > 0 && th.Bead.Status != StatusNeedsMe && !relaunch[agentName(id)] && deliverable(snap, now, t.cfg.idle()) {
+			if len(snap.Pending) > 0 && !headlessOwned(id) && th.Bead.Status != StatusNeedsMe && !relaunch[agentName(id)] && deliverable(snap, now, t.cfg.idle()) {
 				text := strings.Join(snap.Pending, "\n\n")
 				if _, err := promptPiAgent(t.herdr, *th.Agent, text); err != nil {
 					t.log.Printf("prompt %s: %v", id, err)
@@ -904,12 +904,11 @@ func tickerStatus(cfg Config) {
 func inboxDir() string { return filepath.Join(stateDir(), "inbox") }
 
 func writeEvent(e Event) error {
-	b, err := json.Marshal(e)
-	if err != nil {
+	if err := os.MkdirAll(inboxDir(), 0o700); err != nil {
 		return err
 	}
 	name := fmt.Sprintf("%d-%s-%s.json", e.At.UnixNano(), agentName(e.Bead), e.Kind)
-	return writeAtomic(filepath.Join(inboxDir(), name), b)
+	return rpcSave(filepath.Join(inboxDir(), name), e)
 }
 
 type InboxItem struct {
@@ -960,8 +959,8 @@ func inboxDone(beads []string) (int, error) {
 	}
 	n := 0
 	for _, it := range items {
-		if len(want) > 0 && !want[it.Bead] {
-			continue
+		if (len(want) > 0 && !want[it.Bead]) || headlessOwned(it.Bead) {
+			continue // managed events require verified outcomes, not transport acknowledgment
 		}
 		if err := os.Rename(filepath.Join(inboxDir(), it.File), filepath.Join(done, it.File)); err == nil {
 			n++

@@ -1,0 +1,16 @@
+# Example only; opt-in installation and environment drop-ins are required.
+[Unit]
+Description=quartermaster: fenced headless post-merge coordinator
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/quartermaster headless run
+Restart=on-failure
+RestartSec=30s
+KillMode=mixed
+TimeoutStopSec=45s
+
+[Install]
+WantedBy=default.target
