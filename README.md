@@ -206,6 +206,15 @@ quartermaster notes it on the bead (`VERIFY: pass|fail [verifier] ✓/✗ <crite
 journal, not the note, since a note is one `bd note` away for the worker being
 checked; a pass in the last hour lets a retried close skip a second run.
 
+For a pi-only installation, explicitly select `[verifier] backend = "pi"`.
+This opt-in backend starts a fresh, non-persistent pi JSON-mode process with
+only `read`, `grep`, `find` and `ls`. Shell, generated-code tools, MCP, all
+extensions (including quartermaster's worker extension), skills, prompt
+and context discovery are disabled. It supports **filesystem evidence only**;
+criteria requiring remote APIs or commands fail as uncheckable, rather than
+silently enabling more tools. No fallback to Claude occurs. See the
+[pi verifier boundary, trials and activation steps](docs/pi-verifier.md).
+
 - **Pass:** the bead closes as usual.
 - **Fail:** nothing closes. The failing criteria and their evidence print for
   whoever ran close (the worker, or the coordinator, which passes them on) and
@@ -762,7 +771,9 @@ dispatches = 5            # coordinator dispatches, all beads
 [verifier]                # `quartermaster close`'s read-only check (see Acceptance criteria and the verifier)
 max_rounds = 2            # fails in a row before the bead goes to needs_me
 minutes = 15              # one run's time limit
-# command = ["claude", "-p", ...]   # prompt on stdin, VERDICT line on stdout; unset is a read-only headless Claude
+# backend = "pi"           # opt-in filesystem-only verifier; default remains "claude"
+# model = "provider/model" # pi only; omit to use pi's configured default
+# command = ["claude", "-p", ...]   # legacy override; cannot combine with backend = "pi"
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts
