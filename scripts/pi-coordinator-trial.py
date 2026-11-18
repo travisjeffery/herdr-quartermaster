@@ -27,8 +27,8 @@ source = Path.cwd()
 root = Path(tempfile.mkdtemp(prefix="qm-coord-"))
 root.chmod(0o700)
 print(f"Evidence: {root}", flush=True)
-for name in ["agent", "sessions", "cwd", "control"]:
-    (root / name).mkdir(mode=0o700)
+for name in ["agent", "sessions", "cwd", "state/pi/control"]:
+    (root / name).mkdir(mode=0o700, parents=True)
 hold = threading.Event()
 hold.set()
 requests = []
@@ -61,7 +61,7 @@ threading.Thread(target=http.serve_forever, daemon=True).start()
 env = {k: v for k, v in os.environ.items() if not k.startswith(("HERDR_", "PI_", "QUARTERMASTER_", "BEADS_"))}
 env.update(PI_CODING_AGENT_DIR=str(root / "agent"), PI_CODING_AGENT_SESSION_DIR=str(root / "sessions"),
            QM_TRIAL_DIR=str(root), TERM="xterm-256color", QUARTERMASTER_PI_BASH_HOOKS="")
-sock = root / "control" / "inbox.sock"
+sock = root / "state" / "pi" / "control" / "coordinator-inbox.sock"
 process = None
 master = None
 
@@ -256,6 +256,18 @@ try:
     assert not call(through=c+6, token="invalid")["ok"]
     assert not call("prompt")["ok"]
     print("PASS: crash/restart, stale socket, saved receipt, authentication and session pin", flush=True)
+
+    # Exercise the actual Go reconciler against the real authenticated pi
+    # endpoint and its durable receipt after archival. No live ticker or task
+    # database is used. The fixture test writes only this scratch state dir.
+    (root / "reconcile.json").write_text(json.dumps({"session": session, "through": str(c+5)}))
+    count = len(requests)
+    receipt_count = len(snapshot()["entries"])
+    subprocess.run(["go", "test", "-buildvcs=false", ".", "-run", "^TestPiCoordinatorPTYReconcile$", "-count=1"],
+                   cwd=source, env={**env, "QM_COORDINATOR_FIXTURE": str(root)}, check=True, timeout=120)
+    time.sleep(1.3)
+    assert len(requests) == count and len(snapshot()["entries"]) == receipt_count
+    print("PASS: Go reconciles newest/all archived events with real pi receipt; no replay or model turn", flush=True)
 
     # Session replacement must neither deliver old pending events into the new
     # session nor accept requests addressed to the old one.

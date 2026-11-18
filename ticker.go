@@ -112,7 +112,14 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 	}
 	agents, err := t.herdr.Agents()
 	if err != nil {
-		return nil, nil, err
+		// Bead truth is available even if worker transport is not. Return
+		// those observations for desktop alerts only; do not run ordinary
+		// transitions against missing agents or treat them as gone.
+		threads := make([]Thread, len(active))
+		for i, b := range active {
+			threads[i] = Thread{Bead: b}
+		}
+		return threads, nil, err
 	}
 	byName := map[string]Agent{}
 	for _, a := range agents {
@@ -380,6 +387,11 @@ func (t Ticker) once(st *TickerState) error {
 	now := time.Now()
 	threads, agents, err := t.gather(st, now)
 	if err != nil {
+		if threads != nil { // canonical Beads read succeeded; agents are unknown
+			if notifyErr := reconcileDesktop(threads, now, submitDesktop); notifyErr != nil {
+				t.log.Printf("desktop notifications: %v", notifyErr)
+			}
+		}
 		return err
 	}
 	// Only a pass that got its data counts: a ticker failing every pass shows
@@ -410,6 +422,7 @@ func (t Ticker) once(st *TickerState) error {
 		t.log.Printf("delivered queued brief to %s", name)
 	}
 	var rows []sidebarRow
+	var alertThreads []Thread
 	current := map[string]bool{}
 	for _, th := range threads {
 		id := th.Bead.ID
@@ -445,8 +458,11 @@ func (t Ticker) once(st *TickerState) error {
 				t.log.Printf("inbox: %v", err)
 			}
 		}
-		if out.Notify {
-			t.herdr.Notify(fmt.Sprintf("%s: %s", id, classify(th)), shortTitle(th.Bead.Title, 60))
+		alertThreads = append(alertThreads, th)
+		if out.Notify && desktopReason(th) == "" && classify(th) != GroupNeedsYou {
+			if err := t.herdr.Notify(fmt.Sprintf("%s: %s", id, classify(th)), shortTitle(th.Bead.Title, 60)); err != nil {
+				t.log.Printf("desktop notification submission failed: %v", err)
+			}
 		}
 		if th.Agent != nil {
 			// A needs_me thread waits on the user; typing into it would look like
@@ -466,6 +482,9 @@ func (t Ticker) once(st *TickerState) error {
 			rows = append(rows, sidebarRow{Name: id, Pane: th.Agent.PaneID, Tokens: tokens})
 		}
 		st.Threads[id] = snap
+	}
+	if err := reconcileDesktop(alertThreads, now, submitDesktop); err != nil {
+		t.log.Printf("desktop notifications: %v", err)
 	}
 	if coord, ok := agents[t.cfg.CoordinatorName]; ok {
 		inbox, _ := readInbox()

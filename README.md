@@ -1039,6 +1039,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster digest show\|install\|uninstall` | Page the last digest (the plugin's `digest` action); install or remove the hourly systemd timer. |
 | `quartermaster board` | The board popup (`prefix+j`): every open bead by state, acting on them, and the tidy view. See [The board](#the-board). |
 | `quartermaster ticker run\|start\|stop\|status`, `quartermaster tick` | The background loop, or one pass of it in the foreground. `status` shows the herdr socket it follows. |
+| `quartermaster ticker notifications` | Read-only [worker desktop delivery receipts](docs/desktop-alerts.md): detection, bounded safe retries, submitted/failed/unknown. Submission is not human readback or task completion. |
 | `quartermaster configure [--repo PATH]` | First-time setup: write the config, link `~/.local/bin/quartermaster` (and `qm`), install the agent view. Safe to run again. |
 | `quartermaster unconfigure` | Stop the ticker and remove the agent view and sidebar tokens. |
 | `quartermaster autonomy level` | The dial: global level, max, leases, and each active bead's effective level. Advisory: workers hold their own credentials. |

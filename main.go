@@ -60,7 +60,7 @@ Usage:
                                                        closes (at autonomy level 3+) or flags them like the ticker
   quartermaster board                                  every open bead by state: act on them, tidy up
                                                        finished work (runs as the plugin popup)
-  quartermaster ticker run|start|stop|status           the background loop: sidebar, PR follow-up, nudges
+  quartermaster ticker run|start|stop|status|notifications  background loop and desktop delivery receipts
   quartermaster tick                                   one ticker pass in the foreground
   quartermaster configure [--repo PATH]                first-time setup: config, ~/.local/bin link, agent view
   quartermaster unconfigure                            stop the ticker, remove the view and sidebar tokens
@@ -407,7 +407,7 @@ func run(args []string) error {
 		return h.OpenPane(pos[0])
 	case "ticker":
 		if len(pos) != 1 {
-			return fmt.Errorf("usage: quartermaster ticker run|start|stop|status")
+			return fmt.Errorf("usage: quartermaster ticker run|start|stop|status|notifications")
 		}
 		switch pos[0] {
 		case "run":
@@ -418,6 +418,8 @@ func run(args []string) error {
 			return tickerStop()
 		case "status":
 			tickerStatus(cfg)
+		case "notifications":
+			return desktopNotifications(os.Stdout)
 		default:
 			return fmt.Errorf("unknown ticker command %q", pos[0])
 		}
