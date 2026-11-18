@@ -232,7 +232,7 @@ func rpcAssistantText(raw []byte) string {
 // switching, arbitrary shell execution, or approval responses.
 func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 	if len(pos) < 2 {
-		return errors.New("usage: quartermaster rpc view|inspect|history|feed|status|output|events|receipt|tell|cancel|stop|stop-graceful|resume <bead> [cursor|request-id] [text]")
+		return errors.New("usage: quartermaster rpc view|inspect|history|feed|status|output|events|receipt|tell|steer|fork|fork-status|cancel|stop|stop-graceful|resume <bead> [arguments]")
 	}
 	op, id := pos[0], pos[1]
 	if !rpcIDRE.MatchString(id) {
@@ -276,6 +276,8 @@ func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 			fmt.Fprintln(out, msg)
 		}
 		return err
+	case "fork", "fork-status":
+		return rpcForkCmd(cfg, pos, by, out)
 	case "serve":
 		return rpcServe(cfg, id)
 	case "resume":
@@ -324,11 +326,17 @@ func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 			return err
 		}
 		return json.NewEncoder(out).Encode(r)
-	case "tell":
+	case "tell", "steer":
 		if len(pos) != 4 {
-			return errors.New("usage: quartermaster rpc tell <bead> <request-id> <text>")
+			return errors.New("usage: quartermaster rpc tell|steer <bead> <request-id> <text>")
 		}
-		r, err := rpcClient(id, rpcRequest{Op: "prompt", ID: pos[2], Text: pos[3]})
+		var r rpcReply
+		var err error
+		if op == "steer" {
+			r, err = rpcSteerCmd(cfg, id, pos[2], pos[3], by)
+		} else {
+			r, err = rpcClient(id, rpcRequest{Op: "prompt", ID: pos[2], Text: pos[3]})
+		}
 		if err != nil {
 			return err
 		}

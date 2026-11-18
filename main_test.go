@@ -14,6 +14,9 @@ import (
 func TestMain(m *testing.M) {
 	// Protocol fixtures are already isolated by their parent test. Avoid
 	// replacing their private supervisor state, or writing Go's PASS to RPC.
+	if os.Getenv("QM_FORK_SUPERVISOR") == "1" && os.Getenv("QM_RPC_CHILD") != "1" {
+		TestRPCForkSupervisorProcess(nil)
+	}
 	if os.Getenv("QM_RPC_SUPERVISOR") == "1" && os.Getenv("QM_RPC_CHILD") != "1" {
 		TestRPCSupervisorProcess(nil)
 	}

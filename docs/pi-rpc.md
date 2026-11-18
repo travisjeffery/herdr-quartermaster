@@ -475,6 +475,13 @@ python3 scripts/pi-handoff-trial.py --model <authorized-provider/model>
 python3 scripts/pi-handoff-trial.py --binary /absolute/quartermaster --model <authorized-provider/model>
 ```
 
+## Explicit steering and offline forks
+
+`rpc steer` is separate from queued `tell` follow-ups. `rpc fork` creates a
+new parked identity/session/worktree from an explicit checkpoint of a stopped
+native source; it never switches a live session. See [steering/fork controls,
+receipts, autonomy and recovery](pi-rpc-operations.md) before using either.
+
 ## Reconnection is not resume
 
 A detached supervisor process owns pi's stdin/stdout for the worker's lifetime.
@@ -618,6 +625,5 @@ session/receipt artifacts, and use Git's normal non-force `worktree remove`
 on the recorded path. Keep the reservation/history until a later cleanup tool
 can preserve the needed recovery evidence. No automatic deletion is shipped.
 
-Separately tracked follow-ons: steering/forks,
-retention/cleanup. The [headless coordinator](pi-headless.md) is a separate,
+Separately tracked follow-on: retention/cleanup. The [headless coordinator](pi-headless.md) is a separate,
 explicit post-merge opt-in. No remote fleet or live-default change is included here.
