@@ -278,7 +278,13 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 
 	notes := noteLines(b.Notes)
 	shown := 1
-	if b.Status == StatusNeedsMe {
+	state := r.state
+	if state == nil {
+		derived := deriveThreadState(Thread{Bead: r.bead, Agent: r.agent})
+		state = &derived
+	}
+	// The slow full-bead lookup supplies prose, not a second classification.
+	if state.Kind == ThreadWaiting {
 		shown = waitingNotes(notes)
 		section("Waiting on you")
 		if len(notes) == 0 {

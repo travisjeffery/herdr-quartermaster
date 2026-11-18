@@ -199,10 +199,10 @@ func TestBuildRowsShowsEveryOpenBeadBySection(t *testing.T) {
 		"needs you bk-ask",
 		"idle bk-idle",
 		"working bk-work",
-		"blocked bk-wait",
+		"blocked bk-dep bk-wait", // dependencies agree with the digest
 		"no agent bk-gone",
 		"next bk-nx1 bk-nx2", // P1 first
-		"backlog bk-dep bk-old",
+		"backlog bk-old",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("sections =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
