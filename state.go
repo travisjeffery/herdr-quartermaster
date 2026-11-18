@@ -206,6 +206,8 @@ type Snapshot struct {
 	// AutoMerge is the URL of the open PR last seen with auto-merge on, so the
 	// worker hears once when GitHub turns it off.
 	AutoMerge string `json:"auto_merge,omitempty"`
+	// UnsafeAutoKey deduplicates warnings for native auto on an ineligible head.
+	UnsafeAutoKey string `json:"unsafe_auto_key,omitempty"`
 	// PromptHash is the approval prompt last announced, so each prompt a
 	// blocked agent shows reaches the inbox once.
 	PromptHash string `json:"prompt_hash,omitempty"`
@@ -225,21 +227,22 @@ type Snapshot struct {
 type EventKind string
 
 const (
-	EventNeedsYou     EventKind = "needs_you"
-	EventFailing      EventKind = "checks_failing"
-	EventReview       EventKind = "new_review"
-	EventMerged       EventKind = "merged"
-	EventReady        EventKind = "ready_to_merge"
-	EventFinished     EventKind = "finished"
-	EventAgentGone    EventKind = "agent_gone"
-	EventResumed      EventKind = "resumed"
-	EventRunSucceeded EventKind = "run_succeeded"
-	EventRunFailed    EventKind = "run_failed"
-	EventLikelyStale  EventKind = "likely_stale"
-	EventAutoClosed   EventKind = "auto_closed"
-	EventAutoMergeOff EventKind = "auto_merge_off"
-	EventLeaseExpired EventKind = "lease_expired"
-	EventBreaker      EventKind = "breaker_tripped"
+	EventNeedsYou        EventKind = "needs_you"
+	EventFailing         EventKind = "checks_failing"
+	EventReview          EventKind = "new_review"
+	EventMerged          EventKind = "merged"
+	EventReady           EventKind = "ready_to_merge"
+	EventFinished        EventKind = "finished"
+	EventAgentGone       EventKind = "agent_gone"
+	EventResumed         EventKind = "resumed"
+	EventRunSucceeded    EventKind = "run_succeeded"
+	EventRunFailed       EventKind = "run_failed"
+	EventLikelyStale     EventKind = "likely_stale"
+	EventAutoClosed      EventKind = "auto_closed"
+	EventAutoMergeOff    EventKind = "auto_merge_off"
+	EventUnsafeAutoMerge EventKind = "unsafe_auto_merge"
+	EventLeaseExpired    EventKind = "lease_expired"
+	EventBreaker         EventKind = "breaker_tripped"
 )
 
 type Event struct {
@@ -308,6 +311,7 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 	case s.NeedsMe:
 		s.Asked = prev.Asked
 	}
+	s.UnsafeAutoKey = unsafeAutoKey(t)
 	s.Merged, s.MergedTracked = slices.Clone(prev.Merged), true
 	for _, pr := range mergedPRs(t) {
 		if !slices.Contains(s.Merged, pr.URL) {
@@ -333,6 +337,11 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 // first time the ticker sees a bead, when nothing counts as a change.
 func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 	var o Outcome
+	if k := unsafeAutoKey(t); k != "" && k != prev.UnsafeAutoKey {
+		o.Notify = true
+		o.Events = append(o.Events, Event{Bead: t.Bead.ID, Kind: EventUnsafeAutoMerge, Summary: fmt.Sprintf("PR #%d has unsafe native auto-merge enabled", t.PR.Number), At: now})
+		o.Prompts = append(o.Prompts, fmt.Sprintf(unsafeAutoPrompt+"%s: the current head is not authorized and eligible. Disable it with `gh pr merge %s --disable-auto`; do not re-enable it without revalidating the current-head merge policy. This warning grants no merge permission.", k, t.PR.URL))
+	}
 	if first {
 		return o
 	}
@@ -398,7 +407,7 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 			ev(EventReady, "PR #%d is ready to merge (%s)", t.PR.Number, approval(t.PR))
 			if t.PR.AutoMerge != nil {
 				o.Prompts = append(o.Prompts, fmt.Sprintf(
-					readyPrompt+"%d is ready to merge at %s: %s, no review thread is open, and its required checks passed. Auto-merge is on, so GitHub merges it; don't merge it yourself. Finish anything left before merge (the Linear issue, your report). The ticker tells you when it merges.",
+					readyPrompt+"%d is ready to merge at %s: %s, no review thread is open, and its required checks passed. Native auto-merge is on but is not bound to this evidence; disable it and revalidate task authorization and current-head policy before an exact-head merge. Finish anything left before merge (the Linear issue, your report). The ticker tells you when it merges.",
 					t.PR.Number, t.PR.HeadSHA, approval(t.PR)))
 			} else {
 				o.Prompts = append(o.Prompts, fmt.Sprintf(
@@ -412,7 +421,7 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 		if prev.AutoMerge != "" && prev.AutoMerge == t.PR.URL && t.PR.AutoMerge == nil && !t.PR.IsDraft && t.Bead.Status != StatusNeedsMe {
 			ev(EventAutoMergeOff, "PR #%d auto-merge was turned off", t.PR.Number)
 			o.Prompts = append(o.Prompts, fmt.Sprintf(
-				"[quartermaster: automated, not the user] PR #%d no longer has auto-merge on; GitHub turns it off when the base branch changes or someone without write access pushes. Unless you turned it off on purpose, turn it back on with `gh pr merge %s --auto --squash`.",
+				"[quartermaster: automated, not the user] PR #%d no longer has auto-merge on; GitHub turns it off when the base branch changes or someone without write access pushes. If you disabled it intentionally, leave it off. Do not re-enable it blindly. Revalidate task authorization, ownership, an independent current-head approval, all review threads and required checks. Only then submit `gh pr merge %s --auto --squash` through the executor (which performs an exact-head merge), or use a direct --match-head-commit merge without deferred auto-merge.",
 				t.PR.Number, t.PR.URL))
 		}
 	}
@@ -535,16 +544,36 @@ func freshPending(t Thread, pending []string) []string {
 				continue
 			}
 		}
+		if rest, ok := strings.CutPrefix(p, unsafeAutoPrompt); ok {
+			if k := unsafeAutoKey(t); k == "" || !strings.HasPrefix(rest, k+":") {
+				continue
+			}
+		}
 		keep = append(keep, p)
 	}
 	return keep
+}
+
+const unsafeAutoPrompt = "[" + toolName + ": automated, not the user] Native auto-merge on PR #"
+
+func unsafeAutoKey(t Thread) string {
+	if t.PR == nil || t.PR.State != "OPEN" || t.PR.AutoMerge == nil {
+		return ""
+	}
+	if t.Bead.Status == StatusInProgress && readyToMerge(t.PR, t.Checks) {
+		return ""
+	}
+	return fmt.Sprintf("%d@%s", t.PR.Number, t.PR.HeadSHA)
 }
 
 func approval(pr *PR) string {
 	if pr.ReviewDecision == "APPROVED" {
 		return "approved"
 	}
-	return "no review required"
+	if pr.Gate != nil && freshApproval(pr.Gate.Reviews, pr.Gate) {
+		return "current-head approved"
+	}
+	return "approval required by policy"
 }
 
 // deliverable reports whether the ticker may type into an agent now: it has

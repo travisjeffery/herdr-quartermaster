@@ -30,6 +30,9 @@ type PR struct {
 	// Gate is what readyToMerge needs beyond gh pr view, fetched only for PRs
 	// that are otherwise mergeable.
 	Gate *MergeGate `json:"gate,omitempty"`
+	// Policy is local task authorization, never GitHub data or cached consent.
+	Policy       *MergePolicy `json:"-"`
+	DetailsFresh bool         `json:"details_fresh,omitempty"` // last detail attempt succeeded; bounded by Gate.At in threadFor
 }
 
 // AutoMerge is a PR's pending auto-merge request.
@@ -41,8 +44,13 @@ type AutoMerge struct {
 // hides, since an approval stays APPROVED across later pushes unless the repo
 // dismisses stale reviews.
 type MergeGate struct {
-	Head string `json:"head"`
-	// OpenThreads counts unresolved review threads not outdated by a push.
+	Head          string   `json:"head"`
+	Viewer        string   `json:"viewer"`
+	Author        string   `json:"author"`
+	Reviews       []Review `json:"reviews"`
+	MoreReviews   bool     `json:"more_reviews,omitempty"`
+	ReviewProblem string   `json:"review_problem,omitempty"`
+	// OpenThreads counts ALL unresolved threads, including outdated ones.
 	OpenThreads int `json:"open_threads"`
 	// MoreThreads marks a PR with threads past the first page, which were not
 	// counted.
@@ -75,6 +83,8 @@ type Review struct {
 	} `json:"commit"`
 	// Bot is set from the REST API: gh pr view drops the [bot] suffix.
 	Bot bool `json:"bot,omitempty"`
+	// Fetched by Gates, not inferred from login or from absent protection.
+	CanPush bool `json:"authorCanPushToRepository"`
 }
 
 func (r Review) isBot() bool { return r.Bot || strings.HasSuffix(r.Author.Login, "[bot]") }
@@ -123,18 +133,16 @@ func summarizeChecks(checks []Check) Checks {
 	return s
 }
 
-// readyToMerge reports an open PR that only needs merging: approved or
-// needing no review, and GitHub's merge state says branch protection is met.
-// CLEAN and HAS_HOOKS mean every check passed; UNSTABLE means only checks
-// that aren't required failed, since a required one failing or pending makes
-// it BLOCKED. Pending checks still count against it, so a repo without
-// required checks doesn't look ready the moment its PR opens.
+// readyToMerge requires GitHub eligibility AND independently established
+// task authorization, ownership and current-head review evidence. Neither an
+// empty reviewDecision nor an unprotected repository conveys consent.
 func readyToMerge(pr *PR, c Checks) bool {
-	return mergeable(pr, c) && pr.Gate != nil && pr.Gate.Head == pr.HeadSHA && len(mergeBlockers(pr)) == 0
+	return mergeable(pr, c) && len(mergeBlockers(pr)) == 0
 }
 
-// mergeable is readyToMerge before the review gate: everything gh pr view
-// can tell.
+// mergeable reports only GitHub's requirements, not permission to act.
+// UNSTABLE allows optional failures; pending checks still block even when no
+// checks are required by protection.
 func mergeable(pr *PR, c Checks) bool {
 	if pr == nil || pr.State != "OPEN" || pr.IsDraft || c.Pending > 0 {
 		return false
@@ -149,30 +157,80 @@ func mergeable(pr *PR, c Checks) bool {
 	return false
 }
 
-// mergeBlockers is what keeps a mergeable PR from being ready: review threads
-// still open or uncounted, or no approval of the head within approvalMaxAge.
-// A repo that requires no review needs no approval.
+// mergeBlockers are policy prerequisites beyond GitHub's mergeability.
 func mergeBlockers(pr *PR) []string {
-	g := pr.Gate
-	if g == nil {
-		return nil
+	if pr == nil {
+		return []string{"no PR evidence"}
 	}
 	var out []string
+	if !pr.DetailsFresh {
+		out = append(out, "current PR details unavailable")
+	}
+	if pr.Policy == nil || !pr.Policy.Allowed {
+		why := "task merge authorization unavailable"
+		if pr.Policy != nil && pr.Policy.Reason != "" {
+			why = pr.Policy.Reason
+		}
+		out = append(out, why)
+	}
+	g := pr.Gate
+	if g == nil {
+		return append(out, "current-head review evidence unavailable")
+	}
+	if g.Head == "" || g.Head != pr.HeadSHA || g.At.IsZero() {
+		return append(out, "review evidence is not for the current head")
+	}
+	if g.Author == "" || g.Viewer == "" || !strings.EqualFold(g.Author, g.Viewer) {
+		out = append(out, "PR is not owned by the authenticated user")
+	}
 	if g.OpenThreads > 0 {
 		out = append(out, fmt.Sprintf("%d open %s", g.OpenThreads, plural(g.OpenThreads, "thread")))
 	}
 	if g.MoreThreads {
 		out = append(out, "over 100 threads")
 	}
-	if pr.ReviewDecision == "APPROVED" && !freshApproval(pr.Reviews, g) {
-		out = append(out, "stale approval")
+	if g.MoreReviews {
+		out = append(out, "incomplete review history")
+	}
+	if g.ReviewProblem != "" {
+		out = append(out, g.ReviewProblem)
+	}
+	if !freshApproval(g.Reviews, g) {
+		out = append(out, "missing or stale current-head approval")
+	}
+	for _, r := range latestOpinions(g.Reviews) {
+		if r.State == "CHANGES_REQUESTED" {
+			out = append(out, "changes requested by "+r.Author.Login)
+		}
+	}
+	return out
+}
+
+// A later dismissal or change request supersedes that reviewer's approval;
+// a comment does not. Never count a self-review, missing identity or date.
+func latestOpinions(reviews []Review) []Review {
+	latest := map[string]Review{}
+	for _, r := range reviews {
+		if r.State != "APPROVED" && r.State != "CHANGES_REQUESTED" && r.State != "DISMISSED" {
+			continue
+		}
+		key := strings.ToLower(r.Author.Login)
+		if old, ok := latest[key]; !ok || !r.SubmittedAt.Before(old.SubmittedAt) {
+			latest[key] = r
+		}
+	}
+	var out []Review
+	for _, key := range sortedKeys(latest) {
+		out = append(out, latest[key])
 	}
 	return out
 }
 
 func freshApproval(reviews []Review, g *MergeGate) bool {
-	for _, r := range reviews {
-		if r.State == "APPROVED" && r.Commit.OID == g.Head && g.At.Sub(r.SubmittedAt) <= approvalMaxAge {
+	for _, r := range latestOpinions(reviews) {
+		age := g.At.Sub(r.SubmittedAt)
+		if r.State == "APPROVED" && r.CanPush && r.Author.Login != "" && !strings.EqualFold(r.Author.Login, g.Author) &&
+			r.Commit.OID == g.Head && !r.SubmittedAt.IsZero() && age >= 0 && age <= approvalMaxAge {
 			return true
 		}
 	}
@@ -297,6 +355,18 @@ func (g GH) MarkBotReviews(pr *PR) error {
 // Gates fetches the merge gate of every PR in one GraphQL query, keyed by
 // URL. A PR missing from the result has no gate and so is not ready.
 func (g GH) Gates(prs []PR, now time.Time) (map[string]MergeGate, error) {
+	q, alias := gatesQuery(prs)
+	if len(alias) == 0 {
+		return nil, nil
+	}
+	out, err := g.graphql(q)
+	if err != nil {
+		return nil, err
+	}
+	return parseGates(out, alias, now)
+}
+
+func gatesQuery(prs []PR) (string, map[string]string) {
 	var q strings.Builder
 	alias := map[string]string{}
 	for i, pr := range prs {
@@ -307,16 +377,9 @@ func (g GH) Gates(prs []PR, now time.Time) (map[string]MergeGate, error) {
 		owner, name, _ := strings.Cut(m[1], "/")
 		a := fmt.Sprintf("p%d", i)
 		alias[a] = pr.URL
-		fmt.Fprintf(&q, `%s: repository(owner: %q, name: %q) { pullRequest(number: %s) { headRefOid reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved isOutdated } } } } `, a, owner, name, m[2])
+		fmt.Fprintf(&q, `%s: repository(owner: %q, name: %q) { pullRequest(number: %s) { headRefOid author { login } reviews(first: 100) { pageInfo { hasNextPage } nodes { author { login } authorCanPushToRepository state submittedAt commit { oid } } } reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } } } } `, a, owner, name, m[2])
 	}
-	if len(alias) == 0 {
-		return nil, nil
-	}
-	out, err := g.graphql("{ " + q.String() + "}")
-	if err != nil {
-		return nil, err
-	}
-	return parseGates(out, alias, now)
+	return "{ viewer { login } " + q.String() + "}", alias
 }
 
 // lookupBatch caps the PRs one Lookup query asks for.
@@ -376,38 +439,87 @@ func parseLookup(out []byte, alias map[string]string, prs map[string]PR) error {
 
 func parseGates(out []byte, alias map[string]string, now time.Time) (map[string]MergeGate, error) {
 	var resp struct {
-		Data map[string]*struct {
-			PullRequest *struct {
-				HeadRefOid    string `json:"headRefOid"`
-				ReviewThreads struct {
-					PageInfo struct {
-						HasNextPage bool `json:"hasNextPage"`
-					} `json:"pageInfo"`
-					Nodes []struct {
-						IsResolved bool `json:"isResolved"`
-						IsOutdated bool `json:"isOutdated"`
-					} `json:"nodes"`
-				} `json:"reviewThreads"`
-			} `json:"pullRequest"`
-		} `json:"data"`
+		Data   map[string]json.RawMessage `json:"data"`
+		Errors []struct {
+			Path []any `json:"path"`
+		} `json:"errors"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return nil, err
 	}
+	var viewer struct {
+		Login string `json:"login"`
+	}
+	if err := json.Unmarshal(resp.Data["viewer"], &viewer); err != nil || viewer.Login == "" {
+		return nil, fmt.Errorf("merge gate: missing authenticated viewer")
+	}
+	bad := map[string]bool{}
+	for _, e := range resp.Errors {
+		if len(e.Path) == 0 || e.Path[0] == "viewer" {
+			return nil, fmt.Errorf("merge gate: GraphQL errors")
+		}
+		if a, ok := e.Path[0].(string); ok {
+			bad[a] = true
+		}
+	}
+	type pageInfo struct {
+		HasNextPage *bool `json:"hasNextPage"`
+	}
 	gates := map[string]MergeGate{}
 	for a, url := range alias {
-		r := resp.Data[a]
-		if r == nil || r.PullRequest == nil {
+		if bad[a] || len(resp.Data[a]) == 0 {
 			continue
 		}
-		pr := r.PullRequest
-		gate := MergeGate{Head: pr.HeadRefOid, MoreThreads: pr.ReviewThreads.PageInfo.HasNextPage, At: now}
-		for _, t := range pr.ReviewThreads.Nodes {
-			if !t.IsResolved && !t.IsOutdated {
+		var r struct {
+			PullRequest *struct {
+				Head   string `json:"headRefOid"`
+				Author struct {
+					Login string `json:"login"`
+				} `json:"author"`
+				Reviews *struct {
+					PageInfo *pageInfo `json:"pageInfo"`
+					Nodes    *[]Review `json:"nodes"`
+				} `json:"reviews"`
+				Threads *struct {
+					PageInfo *pageInfo `json:"pageInfo"`
+					Nodes    *[]*struct {
+						Resolved *bool `json:"isResolved"`
+					} `json:"nodes"`
+				} `json:"reviewThreads"`
+			} `json:"pullRequest"`
+		}
+		if err := json.Unmarshal(resp.Data[a], &r); err != nil {
+			return nil, err
+		}
+		p := r.PullRequest
+		if p == nil || p.Head == "" || p.Author.Login == "" || p.Reviews == nil || p.Threads == nil ||
+			p.Reviews.PageInfo == nil || p.Reviews.PageInfo.HasNextPage == nil || p.Reviews.Nodes == nil ||
+			p.Threads.PageInfo == nil || p.Threads.PageInfo.HasNextPage == nil || p.Threads.Nodes == nil {
+			continue
+		}
+		gate := MergeGate{Head: p.Head, Author: p.Author.Login, Viewer: viewer.Login, Reviews: *p.Reviews.Nodes,
+			MoreReviews: *p.Reviews.PageInfo.HasNextPage, MoreThreads: *p.Threads.PageInfo.HasNextPage, At: now}
+		complete := true
+		for _, t := range *p.Threads.Nodes {
+			if t == nil || t.Resolved == nil {
+				complete = false
+				break
+			}
+			if !*t.Resolved {
 				gate.OpenThreads++
 			}
 		}
-		gates[url] = gate
+		for _, review := range gate.Reviews {
+			if review.Author.Login == "" {
+				gate.ReviewProblem = "review history contains an unavailable reviewer"
+			}
+			if review.State == "" {
+				complete = false
+			}
+		}
+		if complete {
+			gates[url] = gate
+		}
 	}
 	return gates, nil
 }

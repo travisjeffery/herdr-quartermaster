@@ -532,13 +532,16 @@ func readyPR() *PR {
 	pr.ReviewDecision, pr.MergeState, pr.HeadSHA = "APPROVED", "CLEAN", "aaa"
 	pr.Checks = []Check{{Name: "build", Status: "COMPLETED", Conclusion: "SUCCESS"}}
 	pr.Reviews = []Review{approvalOf("aaa", t0.Add(-time.Hour))}
-	pr.Gate = &MergeGate{Head: "aaa", At: t0}
+	pr.Gate = &MergeGate{Head: "aaa", At: t0, Author: "owner", Viewer: "owner", Reviews: pr.Reviews}
+	pr.Policy = &MergePolicy{Allowed: true}
+	pr.DetailsFresh = true
 	return pr
 }
 
 func approvalOf(sha string, at time.Time) Review {
-	r := Review{State: "APPROVED", SubmittedAt: at}
+	r := Review{State: "APPROVED", SubmittedAt: at, CanPush: true}
 	r.Commit.OID = sha
+	r.Author.Login = "reviewer"
 	return r
 }
 
@@ -572,10 +575,10 @@ func TestReadyToMerge(t *testing.T) {
 		{"approval of an older commit", func(pr *PR) { pr.Reviews[0].Commit.OID = "old" }, false},
 		{"approval older than 7 days", func(pr *PR) { pr.Reviews[0].SubmittedAt = t0.Add(-8 * 24 * time.Hour) }, false},
 		{"a fresh approval beside a stale one", func(pr *PR) {
-			pr.Reviews = append([]Review{approvalOf("old", t0.Add(-30*24*time.Hour))}, pr.Reviews...)
+			pr.Gate.Reviews = append([]Review{approvalOf("old", t0.Add(-30*24*time.Hour))}, pr.Reviews...)
 		}, true},
 		{"commented after the head is no approval", func(pr *PR) { pr.Reviews[0].State = "COMMENTED" }, false},
-		{"no review required needs no approval", func(pr *PR) { pr.ReviewDecision, pr.Reviews = "", nil }, true},
+		{"no review required is not approval", func(pr *PR) { pr.ReviewDecision, pr.Gate.Reviews = "", nil }, false},
 		{"no review required still needs threads resolved", func(pr *PR) {
 			pr.ReviewDecision, pr.Reviews, pr.Gate.OpenThreads = "", nil, 2
 		}, false},
@@ -610,12 +613,12 @@ func TestApprovedButBlocked(t *testing.T) {
 	pr := readyPR()
 	pr.Number = 14388
 	pr.Reviews = []Review{approvalOf("903ed41", time.Date(2026, 9, 23, 4, 50, 32, 0, time.UTC))}
-	pr.Gate = &MergeGate{Head: "aaa", OpenThreads: 3, At: time.Date(2026, 10, 1, 20, 0, 0, 0, time.UTC)}
+	pr.Gate = &MergeGate{Head: "aaa", OpenThreads: 3, At: time.Date(2026, 10, 1, 20, 0, 0, 0, time.UTC), Author: "owner", Viewer: "owner", Reviews: pr.Reviews}
 	th := thread(bead(StatusInProgress), agent("idle", 1), pr)
 	if g := classify(th); g == GroupReady {
 		t.Fatalf("classified %s", g)
 	}
-	if got, want := stateLine(th), "review · PR #14388 approved but blocked: 3 open threads, stale approval"; got != want {
+	if got, want := stateLine(th), "review · PR #14388 approved but blocked: 3 open threads, missing or stale current-head approval"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 	prev := Snapshot{Group: GroupReview, PRNumber: 14388, PRState: "OPEN", ReviewsSplit: true}
@@ -628,8 +631,8 @@ func TestApprovedButBlocked(t *testing.T) {
 }
 
 func TestParseGates(t *testing.T) {
-	out := []byte(`{"data":{
-		"p0":{"pullRequest":{"headRefOid":"8b47",
+	out := []byte(`{"data":{"viewer":{"login":"owner"},
+		"p0":{"pullRequest":{"headRefOid":"8b47","author":{"login":"owner"},"reviews":{"pageInfo":{"hasNextPage":false},"nodes":[]},
 			"reviewThreads":{"pageInfo":{"hasNextPage":true},"nodes":[{"isResolved":false,"isOutdated":false},{"isResolved":true,"isOutdated":false},{"isResolved":false,"isOutdated":true}]}}},
 		"p1":{"pullRequest":null}}}`)
 	alias := map[string]string{"p0": "https://github.com/o/r/pull/1", "p1": "https://github.com/o/r/pull/2", "p2": "https://github.com/o/r/pull/3"}
@@ -637,33 +640,31 @@ func TestParseGates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := MergeGate{Head: "8b47", OpenThreads: 1, MoreThreads: true, At: t0}
-	if len(gates) != 1 || gates["https://github.com/o/r/pull/1"] != want {
+	got := gates["https://github.com/o/r/pull/1"]
+	if len(gates) != 1 || got.Head != "8b47" || got.OpenThreads != 2 || !got.MoreThreads || !got.At.Equal(t0) || got.Author != "owner" || got.Viewer != "owner" {
 		t.Fatalf("got %+v", gates)
 	}
 }
 
-// An approval cached across a failed gate query still ages out.
-func TestApplyGatesAgesCachedApproval(t *testing.T) {
+// Failed queries never promote cached evidence, even at the same head.
+func TestApplyGatesDropsCachedApproval(t *testing.T) {
 	pr := *readyPR()
-	old := map[string]PR{"b": pr}
-	now := t0.Add(7 * 24 * time.Hour)
 	prs := map[string]PR{"b": pr}
-	applyGates(old, prs, nil, true, now)
-	if g := prs["b"].Gate; g == nil || !g.At.Equal(now) {
+	applyGates(prs, nil)
+	if g := prs["b"].Gate; g != nil {
 		t.Fatalf("gate = %+v", g)
 	}
 	if got := prs["b"]; readyToMerge(&got, summarizeChecks(got.Checks)) {
-		t.Fatal("a cached approval past 7 days is still ready")
+		t.Fatal("a failed refresh retained merge clearance")
 	}
 	pushed := pr
 	pushed.HeadSHA = "bbb"
 	prs = map[string]PR{"b": pushed}
-	if applyGates(old, prs, nil, true, now); prs["b"].Gate != nil {
+	if applyGates(prs, nil); prs["b"].Gate != nil {
 		t.Fatal("kept a gate from another head")
 	}
 	prs = map[string]PR{"b": pr}
-	if applyGates(old, prs, nil, false, now); prs["b"].Gate != nil {
+	if applyGates(prs, nil); prs["b"].Gate != nil {
 		t.Fatal("kept a gate the query no longer returns")
 	}
 }
@@ -692,6 +693,7 @@ func TestReadyToMergeOncePerHead(t *testing.T) {
 	pushed := readyPR()
 	pushed.HeadSHA, pushed.Gate.Head = "bbb", "bbb"
 	pushed.Reviews = []Review{approvalOf("bbb", t0)}
+	pushed.Gate.Reviews = pushed.Reviews
 	if o := transition(thread(bead(StatusInProgress), agent("idle", 1), pushed), prev, false, t0.Add(4*time.Minute)); len(o.Events) != 1 || o.Events[0].Kind != EventReady {
 		t.Fatalf("a new head ready to merge should announce again: %+v", o)
 	}

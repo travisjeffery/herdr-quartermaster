@@ -79,7 +79,7 @@ func TestReadyPromptWithAutoMerge(t *testing.T) {
 	pr.AutoMerge = &AutoMerge{Method: "SQUASH"}
 	th := thread(bead(StatusInProgress), agent("idle", 1), pr)
 	o := transition(th, Snapshot{Group: GroupReview, PRNumber: 7, PRState: "OPEN", ReviewsSplit: true}, false, t0)
-	if len(o.Prompts) != 1 || !strings.Contains(o.Prompts[0], "Auto-merge is on, so GitHub merges it; don't merge it yourself.") || strings.Contains(o.Prompts[0], "--match-head-commit") {
+	if len(o.Prompts) != 1 || !strings.Contains(o.Prompts[0], "Native auto-merge is on but is not bound to this evidence") || strings.Contains(o.Prompts[0], "--match-head-commit") {
 		t.Fatalf("got %+v", o.Prompts)
 	}
 	// It is still a ready prompt, dropped like one when the head moves.
@@ -90,6 +90,29 @@ func TestReadyPromptWithAutoMerge(t *testing.T) {
 	pushed.PR.HeadSHA = "bbb"
 	if got := freshPending(pushed, o.Prompts); len(got) != 0 {
 		t.Fatalf("kept a ready prompt for an old head: %+v", got)
+	}
+}
+
+func TestUnsafeNativeAutoMergeWarnsBeforeReadiness(t *testing.T) {
+	pr := readyPR()
+	pr.AutoMerge = &AutoMerge{Method: "SQUASH"}
+	pr.ReviewDecision, pr.Gate.Reviews = "", nil
+	th := thread(bead(StatusInProgress), agent("idle", 1), pr)
+	o := transition(th, Snapshot{}, true, t0)
+	if len(o.Events) != 1 || o.Events[0].Kind != EventUnsafeAutoMerge || !o.Notify || len(o.Prompts) != 1 || !strings.Contains(o.Prompts[0], "--disable-auto") {
+		t.Fatalf("missing first-pass warning: %+v", o)
+	}
+	prev := snapshot(th, Snapshot{}, t0)
+	if next := transition(th, prev, false, t0); len(next.Events) != 0 {
+		t.Fatalf("duplicate warning: %+v", next)
+	}
+	pr.HeadSHA = "new"
+	if next := transition(th, prev, false, t0); len(next.Events) != 1 || next.Events[0].Kind != EventUnsafeAutoMerge {
+		t.Fatalf("moved head not warned: %+v", next)
+	}
+	pr.AutoMerge = nil
+	if pending := freshPending(th, o.Prompts); len(pending) != 0 {
+		t.Fatalf("stale disarm prompt: %v", pending)
 	}
 }
 
