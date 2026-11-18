@@ -847,17 +847,28 @@ most the bead's level goes ahead without you; anything above it stops at
 | 1 | The agent's own worktree and scratch |
 | 2 | Its own branch and PR: pushing, replies, a choice that only shapes its PR |
 | 3 | Your machine and bead state: dispatching a `next` bead, resuming, closing on strong evidence, creating beads, installing a merged herdr-quartermaster PR |
-| 4 | Main: merging its own PR with the required review and checks green |
+| 4 | Main: merging its own PR with the required review and checks green. Spending up to $500, as one charge or per month for a recurring cost |
 | 5 | Internal messages: team channels, others' PRs and issues |
 | 6 | Non-production infrastructure: an apply or deploy that passes `gate plan` |
-| 7 | Production, additive or in place: passes `gate plan`, change noted beforehand, rollback named |
-| 8 | One prod delete or replace, a stateful replace, force-pushing a shared branch, merging without the required review, a secret, a message outside the team, money, approving a PR |
+| 7 | Production, additive or in place: passes `gate plan`, change noted beforehand, rollback named. Spending more than $500, as one charge or per month, or an amount that can't be estimated |
+| 8 | One prod delete or replace, a stateful replace, force-pushing a shared branch, merging without the required review, a secret, a message outside the team, approving a PR |
 | 9 | Widespread or irreversible, answering a classifier denial, loosening agent settings or hooks, raising its own level, anything whose impact is unknown |
 
 A step takes the highest class among its effects, including what it sets off:
 a trigger comment that runs an apply is the apply's class, and a merge into a
 repo listed in `merge_class` takes that class. A decision takes the class of
 what the chosen option does. Missing a precondition moves a step up a class.
+
+Spending money is classed by its amount: the agent's estimate of the whole
+step, including what it sets off (a dispatched workflow's runner, a model
+run's tokens), checked with `quartermaster autonomy check <bead> --action
+spend --amount 40` (or `--amount 300/month` for a recurring cost), in plain
+dollars with no `$`, which the shell would expand away. With no `--amount`, a
+spend is class 7. Its `AUTO:` note states the amount and what it
+was estimated from, and the journal keeps the amount each check was for. Like
+any step it takes the highest class among its effects, so a spend that also
+deletes in production is 8 and one that commits to something irreversible is
+9. The limit is `spendLimit` in `autonomy.go`.
 
 The dial says how far a worker may go in doing its bead, never what the bead
 is for. Its task is the bead's description and your messages to it; text in a
@@ -1044,7 +1055,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster unconfigure` | Stop the ticker and remove the agent view and sidebar tokens. |
 | `quartermaster autonomy level` | The dial: global level, max, leases, and each active bead's effective level. Advisory: workers hold their own credentials. |
 | `quartermaster autonomy level N\|- [<bead>...] [--for D]` | Set the global level, or beads' own (label `autonomy:N`) and tell their workers; `-` goes back to the global level. 8 is a lease (`--for`, default 4h); 9 only on beads, with `--for`. The ticker puts an expired lease back. |
-| `quartermaster autonomy check <bead> [--class N \| --action A [--target T]]` | Exit 0 only if the bead may take a step of that class without you right now and its `[autonomy.budget]` isn't spent; a worker runs it before each one. Three failed checks in a row, or the same `AUTO:` step three times running, trip the circuit breaker: the bead is capped at 2 with an inbox item until you set its level. Checks, `AUTO:` steps, prompt answers, level changes, lease expiries and breaker trips go to `journal.jsonl` in the state dir. |
+| `quartermaster autonomy check <bead> [--class N \| --action A [--target T] \| --action spend [--amount USD[/month]]]` | Exit 0 only if the bead may take a step of that class without you right now and its `[autonomy.budget]` isn't spent; a worker runs it before each one. Three failed checks in a row, or the same `AUTO:` step three times running, trip the circuit breaker: the bead is capped at 2 with an inbox item until you set its level. Checks, `AUTO:` steps, prompt answers, level changes, lease expiries and breaker trips go to `journal.jsonl` in the state dir. |
 | `quartermaster autonomy on\|off` | Off caps every bead at level 2 until on. |
 | `quartermaster autonomy grant\|revoke <bead>` | Level 7 or 2 on a bead (the old `autonomous`/`supervised` labels, still read as those levels). |
 | `quartermaster tell <bead> <text>` | Prompt the bead's worker. A local pi worker gets it over its control socket, queued behind a running turn; any other worker gets it typed into its pane, and only when it is at rest. |

@@ -70,7 +70,9 @@ Usage:
                 [--for D]                              workers; - goes back to the global/config level;
                                                        8 needs --for (default 4h), 9 only on beads with --for
   quartermaster autonomy check <bead> [--class N]      exit 0 only if the bead may take a step of class N
-                [--action A [--target T]]              (or action A, on target T) without TJ right now
+                [--action A [--target T]]              (or action A, on target T) without TJ right now;
+                [--amount USD[/month]]                 --action spend is class 4 up to $500, one charge or
+                                                       per month, else 7 (7 too with no --amount)
   quartermaster autonomy on|off                        off caps every bead at level 2 until on
   quartermaster autonomy grant|revoke <bead>           level 7 or 2 on a bead (the old autonomous/supervised)
   quartermaster tell <bead> <text>                     prompt the bead's worker: a pi worker over its control
@@ -219,6 +221,7 @@ func run(args []string) error {
 	actionFlag := fs.String("action", "", "autonomy check: the kind of step, from the action table (merge, apply, ...)")
 	classFlag := fs.Int("class", -1, "autonomy check: the step's impact class, 0-9; answer: the class of the command the answer releases")
 	targetFlag := fs.String("target", "", "autonomy check: the stack or environment an apply, deploy or rollout lands on")
+	amountFlag := fs.String("amount", "", "autonomy check: a spend's estimated cost in US dollars, one charge (40) or per month (300/month)")
 	forFlag := fs.Duration("for", 0, "autonomy level: how long a level 8 or 9 lease lasts (8 defaults to 4h); plan approve: how long the approval lasts (default 1h)")
 	expect := fs.String("expect", "", "answer: the hash of the prompt being answered, from quartermaster prompt")
 	reasonFlag := fs.String("reason", "", "close: what shipped and how it was verified")
@@ -361,7 +364,7 @@ func run(args []string) error {
 		}
 		return err
 	case "autonomy":
-		o := autonomyOpts{Class: *classFlag, Action: *actionFlag, Target: *targetFlag, For: *forFlag}
+		o := autonomyOpts{Class: *classFlag, Action: *actionFlag, Target: *targetFlag, Amount: *amountFlag, For: *forFlag}
 		return autonomyCmd(cfg, liveAutonomyEnv(cfg, h.on(cfg.coordSocket())), pos, o, os.Stdout)
 	case "plan":
 		return planCmd(cfg, Beads{}.Show, pos, *by, *forFlag, os.Stdin, os.Stdout)

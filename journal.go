@@ -39,6 +39,8 @@ type journalRecord struct {
 	// Class is an AUTO step's or a check's class, -1 when its note has none.
 	Class  int    `json:"class"`
 	Action string `json:"action,omitempty"`
+	// Amount is a spend check's --amount, as given.
+	Amount string `json:"amount,omitempty"`
 	Pass   bool   `json:"pass,omitempty"`
 	Text   string `json:"text,omitempty"`
 }
