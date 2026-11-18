@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -23,18 +29,21 @@ func (t Ticker) nudgePiCoordinator(st *TickerState, coord Agent, now time.Time) 
 	}
 	latest := st.LastNudge
 	for _, e := range events {
-		if e.At.After(latest) {
+		if e.At.After(latest) && !e.At.After(now) {
 			latest = e.At
 		}
-	}
-	if !latest.After(st.LastNudge) {
-		return
 	}
 	c, ok := piControlFor("coordinator-inbox")
 	if !ok {
 		return
 	} // events remain in the durable inbox, even across restart
-	res, err := c.call(piRequest{Op: "inbox", Session: coord.Session.Value, Through: fmt.Sprintf("%019d", latest.UnixNano())})
+	// Reconcile even when all events were archived before state.json was saved.
+	// A status request does not enqueue a message or start a model turn.
+	req := piRequest{Op: "inbox_status", Session: coord.Session.Value}
+	if latest.After(st.LastNudge) && !latest.After(now) {
+		req.Op, req.Through = "inbox", fmt.Sprintf("%019d", latest.UnixNano())
+	}
+	res, err := c.call(req)
 	if err != nil {
 		t.log.Printf("coordinator inbox retained: %v", err)
 		return
@@ -54,9 +63,75 @@ func (t Ticker) nudgePiCoordinator(st *TickerState, coord Agent, now time.Time) 
 		return
 	}
 	ack := time.Unix(0, ns)
-	if !ack.After(st.LastNudge) || ack.After(latest) {
+	if !ack.After(st.LastNudge) {
+		return
+	}
+	// The unread set is not an upper bound: it shrinks on archival. Instead
+	// require an exact durable event (unread OR done), a nonfuture watermark,
+	// and the receipt in the authenticated response's exact current session.
+	// Never trust a bare journal cursor, a maximum timestamp, or acceptance.
+	if ns <= 0 || fmt.Sprintf("%019d", ns) != res.Ack || ack.After(now) ||
+		!coordinatorEventExists(res.Ack, ack) || !coordinatorReceiptExists(coord.Session.Value, res.Ack) {
+		t.log.Printf("coordinator inbox: unverified acknowledgement retained")
 		return
 	}
 	st.LastNudge = ack
 	st.CoordReady = time.Time{}
+}
+
+func coordinatorEventExists(cursor string, at time.Time) bool {
+	for _, dir := range []string{inboxDir(), filepath.Join(inboxDir(), "done")} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasPrefix(entry.Name(), cursor+"-") || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			var e Event
+			if rpcLoad(filepath.Join(dir, entry.Name()), &e) == nil && e.At.Equal(at) &&
+				entry.Name() == fmt.Sprintf("%d-%s-%s.json", e.At.UnixNano(), agentName(e.Bead), e.Kind) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func coordinatorReceiptExists(session, cursor string) bool {
+	f, err := os.Open(session)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	// Snapshot the append-only file's length. Bound individual records and
+	// require a complete line; partial writes must not certify persistence.
+	scan := bufio.NewScanner(io.LimitReader(f, fi.Size()))
+	scan.Buffer(make([]byte, 4096), 16<<20)
+	scan.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			return i + 1, data[:i], nil
+		}
+		return 0, nil, nil
+	})
+	for scan.Scan() {
+		var e struct {
+			Type       string `json:"type"`
+			CustomType string `json:"customType"`
+			Details    struct {
+				Session string `json:"session"`
+				Through string `json:"through"`
+			} `json:"details"`
+		}
+		if json.Unmarshal(scan.Bytes(), &e) == nil && e.Type == "custom_message" &&
+			e.CustomType == "quartermaster.inbox" && e.Details.Session == session && e.Details.Through == cursor {
+			return true
+		}
+	}
+	return false
 }

@@ -20,6 +20,18 @@ mark, one in-flight mark and one acknowledged mark. Repeated ticks coalesce; a
 lost reply is safe to retry. The ticker advances `LastNudge` only on a
 transcript-backed delivery acknowledgement, not acceptance into memory or disk.
 
+The ticker checks the authenticated endpoint even when no unread events remain.
+A newer acknowledgement must be nonfuture, name an exact durable event in either
+`inbox/` or `inbox/done/`, and have a complete matching custom-message receipt in
+the **exact current session file** returned by the endpoint. Thus archiving the
+newest or all events cannot strand a valid receipt after a lost reply or ticker
+state save. An arbitrary cursor, a journal watermark alone, an unrelated event's
+maximum timestamp, or a receipt from another session is insufficient. Missing
+historical event/receipt evidence fails closed; retain archives on rollback and
+do not rewrite the live journal or `LastNudge` to manufacture convergence.
+Acknowledgement is monotonic and does not archive tasks or certify human
+readback. A newer valid same-session event can reconcile after a session switch.
+
 The extension polls at 250ms, including after the last notification arrived, so
 clearing a draft does not require another tick. It waits for:
 
@@ -110,6 +122,11 @@ cursor position, user-priority ordering, delayed human-input preflight, custom
 rather than human origin, active-boundary continuation, dialogs (including a built-in selector), compaction, canceled tree
 navigation, duplicate reconnect, crash/restart and session identity. It stops
 only its own fixture processes and retains private evidence.
+
+The Go reconciler is also exercised against the real fixture pi endpoint after
+archiving its newest/all inbox events, including a simulated lost ticker-state
+save. Separate [desktop alerts](desktop-alerts.md) have their own operational
+receipts and never depend on coordinator acknowledgement.
 
 The Node policy fixtures additionally test bounded coalescing, both intent/ack
 crash windows, transient journal errors, competing listeners and cross-session

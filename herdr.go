@@ -385,8 +385,10 @@ func (h Herdr) Focus(target string) error {
 	return err
 }
 
-func (h Herdr) Notify(title, body string) {
-	_, _ = h.call(callTimeout, "notification", "show", title, "--body", body)
+// Notify reports submission errors, not evidence that a human saw the alert.
+func (h Herdr) Notify(title, body string) error {
+	_, err := h.call(callTimeout, "notification", "show", title, "--body", body)
+	return err
 }
 
 // ReportState sets this tool's sidebar tokens on a pane. A TTL makes stale rows

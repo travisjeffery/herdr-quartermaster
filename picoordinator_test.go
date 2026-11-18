@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -117,7 +118,8 @@ func TestPiCoordinatorDurableAcceptanceAndRetry(t *testing.T) {
 	a := Agent{Name: cfg.CoordinatorName, Status: "working"}
 	a.Session.Agent = "pi"
 	a.Session.Kind = "path"
-	a.Session.Value = "/fixture/session.jsonl"
+	a.Session.Value = filepath.Join(short, "session.jsonl")
+	writeCoordinatorReceipt(t, a.Session.Value, fmt.Sprintf("%019d", now.UnixNano()))
 	st := &TickerState{}
 	for i := 0; i < 3; i++ {
 		ticker.nudgeCoordinator(st, map[string]Agent{a.Name: a}, now)

@@ -184,6 +184,8 @@ case "$1" in show) echo "$FAKE_BEAD" ;; esac
 		"gh": `echo "$*" >> "$LOG/gh.log"
 echo 0
 `,
+		"notify-send": `echo "$*" >> "$LOG/notify-send.log"
+`,
 	}
 	for name, body := range scripts {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
