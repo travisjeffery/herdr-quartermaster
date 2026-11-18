@@ -42,6 +42,13 @@ func TestRPCChildProcess(t *testing.T) {
 			_ = os.WriteFile(session, []byte("{\"type\":\"session\",\"id\":\"actual-pi-id\"}\n"), 0600)
 		}
 	}
+	sessionID := "actual-pi-id"
+	if data, err := os.ReadFile(session); err == nil {
+		var header struct{ ID string }
+		if json.Unmarshal(bytes.SplitN(data, []byte{'\n'}, 2)[0], &header) == nil && header.ID != "" {
+			sessionID = header.ID
+		}
+	}
 	var mu sync.Mutex
 	emit := func(v any) {
 		b, _ := json.Marshal(v)
@@ -63,12 +70,15 @@ func TestRPCChildProcess(t *testing.T) {
 		typ, _ := req["type"].(string)
 		id, _ := req["id"].(string)
 		msg, _ := req["message"].(string)
+		if os.Getenv("QM_RPC_TRACE") == "1" {
+			emit(map[string]any{"type": "entry_appended", "entry": req})
+		}
 		switch typ {
 		case "get_state":
 			if os.Getenv("QM_RPC_CRASH_STATE") == "1" {
 				os.Exit(17)
 			}
-			state := map[string]any{"sessionId": "actual-pi-id", "sessionFile": session, "isStreaming": false, "isCompacting": false, "pendingMessageCount": 0}
+			state := map[string]any{"sessionId": sessionID, "sessionFile": session, "isStreaming": false, "isCompacting": false, "pendingMessageCount": 0}
 			if override := os.Getenv("QM_RPC_STATE"); override != "" {
 				_ = json.Unmarshal([]byte(override), &state)
 			}
@@ -100,6 +110,26 @@ func TestRPCChildProcess(t *testing.T) {
 			if msg != "hold" {
 				emit(map[string]any{"type": "agent_settled", "aborted": false})
 			}
+		case "steer":
+			if msg == "silence" {
+				continue
+			}
+			if msg == "delay" {
+				go func() {
+					time.Sleep(120 * time.Millisecond)
+					response(id, "steer", map[string]any{"disposition": "queued"})
+				}()
+				continue
+			}
+			if msg == "reject" {
+				emit(map[string]any{"type": "response", "id": id, "command": typ, "success": false, "error": "fixture refusal"})
+				continue
+			}
+			disposition := "queued"
+			if msg == "handled" {
+				disposition = "handled"
+			}
+			response(id, typ, map[string]any{"disposition": disposition})
 		case "clear_queue":
 			response(id, typ, map[string]any{"steering": []string{}, "followUp": []string{}})
 		case "abort":

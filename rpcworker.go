@@ -94,6 +94,7 @@ type rpcWorker struct {
 	Args     []string     `json:"args"`
 	Adoption *rpcAdoption `json:"adoption,omitempty"`
 	Handoff  *rpcHandoff  `json:"handoff,omitempty"`
+	Fork     *rpcFork     `json:"fork,omitempty"`
 }
 type rpcStatus struct {
 	Bead        string    `json:"bead"`
@@ -113,12 +114,14 @@ type rpcStatus struct {
 	Provider    string    `json:"provider,omitempty"`
 	Model       string    `json:"model,omitempty"`
 
+	Steering              bool   `json:"steering,omitempty"`
 	CoordinatorFence      bool   `json:"coordinator_fence,omitempty"`
 	GracefulStop          bool   `json:"graceful_stop,omitempty"`
 	Generation            string `json:"generation,omitempty"`
 	GracefulStopRequested bool   `json:"graceful_stop_requested,omitempty"`
 }
 type rpcReceipt struct {
+	Operation     string    `json:"operation,omitempty"`
 	ID            string    `json:"id"`
 	Hash          string    `json:"hash"`
 	State         string    `json:"state"` // intent/accepted/rejected; intent remains ambiguous after death
@@ -203,6 +206,9 @@ type rpcSupervisor struct {
 	viewTools         map[string]string // bounded, metadata only; never a viewer queue
 	viewToolsOverflow bool
 	stopping          bool // monotonic admission barrier, independent of pi lifecycle events
+	steeringQueued    bool
+	steeringInFlight  bool
+	steeringQueueSeen bool
 }
 
 func (s *rpcSupervisor) saveLocked() error {
@@ -241,6 +247,14 @@ func (s *rpcSupervisor) event(raw []byte, rec rpcRecord) error {
 			s.phaseLocked("idle")
 		}
 		s.status.Seq++
+	case "queue_update":
+		var queue struct {
+			Steering *[]json.RawMessage `json:"steering"`
+		}
+		if json.Unmarshal(raw, &queue) == nil && queue.Steering != nil {
+			s.steeringQueued = len(*queue.Steering) > 0
+			s.steeringQueueSeen = true
+		}
 	case "response":
 		if rec.Command == "get_state" && rec.Success {
 			var st struct {
@@ -256,11 +270,14 @@ func (s *rpcSupervisor) event(raw []byte, rec rpcRecord) error {
 			}
 		}
 		// Persist late prompt responses even after the request/client timed out.
-		if rec.Command == "prompt" && rpcIDRE.MatchString(rec.ID) {
+		if (rec.Command == "prompt" || rec.Command == "steer") && rpcIDRE.MatchString(rec.ID) {
 			path := filepath.Join(rpcDir(s.worker.Bead), "requests", rec.ID+".json")
 			var receipt rpcReceipt
 			if err := rpcLoad(path, &receipt); err != nil {
 				return err
+			}
+			if receipt.operation() != rec.Command {
+				return errors.New("pi response does not match the recorded message operation")
 			}
 			receipt.Response = rec
 			receipt.State = "rejected"
@@ -271,6 +288,12 @@ func (s *rpcSupervisor) event(raw []byte, rec rpcRecord) error {
 				Disposition string `json:"disposition"`
 			}
 			_ = json.Unmarshal(rec.Data, &disposition)
+			if rec.Command == "steer" {
+				s.steeringInFlight = false
+				if rec.Success && disposition.Disposition == "queued" && !s.steeringQueueSeen {
+					s.steeringQueued = true // fail closed if queue events were absent
+				}
+			}
 			if (!rec.Success || disposition.Disposition == "handled") && receipt.Epoch == s.status.Seq && s.status.Error == "" {
 				s.phaseLocked(receipt.PreviousPhase)
 			}
@@ -295,9 +318,15 @@ func (s *rpcSupervisor) event(raw []byte, rec rpcRecord) error {
 			go s.blockDialog(rec)
 		}
 	}
+	// A last-moment steer must not hitch a ride on an unrelated later tell
+	// or ticker delivery. Only explicit queue cancellation clears this latch.
+	if !s.stopping && s.status.Phase == "idle" && (s.steeringQueued || s.steeringInFlight) && s.status.Error == "" {
+		s.status.Error = rpcStrandedSteering
+		s.phaseLocked("blocked")
+	}
 	// Persist on boundaries, not every token. events.jsonl remains continuously
 	// drained regardless of how slowly a client reads it.
-	if viewSave || rec.Type == "agent_start" || rec.Type == "agent_settled" || rec.Type == "response" || rec.Type == "extension_ui_request" {
+	if viewSave || rec.Type == "queue_update" || rec.Type == "agent_start" || rec.Type == "agent_settled" || rec.Type == "response" || rec.Type == "extension_ui_request" {
 		return s.saveLocked()
 	}
 	return nil
@@ -349,67 +378,15 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 			return fail(err)
 		}
 		return rpcReply{OK: true, Receipt: &r}
-	case "prompt":
-		if !rpcIDRE.MatchString(req.ID) || strings.TrimSpace(req.Text) == "" || len(req.Text) > 1<<20 {
-			return fail(errors.New("prompt requires id and 1..1MiB text"))
-		}
-		gate, err := headlessAdmission(s.worker.Bead, req.Owner)
-		if err != nil {
-			return fail(err)
-		}
-		if gate != nil {
-			defer gate.Close()
-		}
-		// Serialize submissions and cancellation; status remains independent.
-		s.promptMu.Lock()
-		defer s.promptMu.Unlock()
-		sum := sha256.Sum256([]byte(req.Text))
-		hash := hex.EncodeToString(sum[:])
-		path := filepath.Join(rpcDir(s.worker.Bead), "requests", req.ID+".json")
-		var old rpcReceipt
-		if err := rpcLoad(path, &old); err == nil {
-			if old.Hash != hash {
-				return fail(errors.New("request id reused with different text"))
-			}
-			return rpcReply{OK: true, Receipt: &old} // reconcile, NEVER replay
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fail(err)
-		}
-		s.mu.Lock()
-		if s.stopping || s.status.Error != "" || s.status.Phase == "blocked" || rpcParked(s.worker.Bead) {
-			s.mu.Unlock()
-			return fail(errors.New("worker blocked/stopping; inspect status and bead before continuing"))
-		}
-		receipt := rpcReceipt{ID: req.ID, Hash: hash, State: "intent", PreviousPhase: s.status.Phase, Epoch: s.status.Seq + 1}
-		if err := rpcSave(path, receipt); err != nil {
-			s.mu.Unlock()
-			return fail(err)
-		}
-		// Busy during acceptance too; a quick status client must not mistake
-		// the gap before agent_start for completion. handled/rejected restores
-		// the old phase only if no lifecycle event advanced the epoch.
-		s.status.Phase = "working"
-		s.status.Seq++
-		err = s.saveLocked()
-		s.mu.Unlock()
-		if err != nil {
-			return fail(err)
-		}
-		_, err = s.proc.call(req.ID, "prompt", map[string]any{"message": req.Text, "streamingBehavior": "followUp"}, rpcCommandTimeout)
-		if err != nil {
-			return fail(fmt.Errorf("%w; reconcile with quartermaster rpc receipt %s %s (never retry with a new id blindly)", err, s.worker.Bead, req.ID))
-		}
-		if err := rpcLoad(path, &receipt); err != nil {
-			return fail(err)
-		}
-		return rpcReply{OK: true, Receipt: &receipt}
+	case "prompt", "steer":
+		return s.submit(req)
 	case "activate":
 		s.promptMu.Lock()
 		defer s.promptMu.Unlock()
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if s.stopping || s.status.Error != "" || s.status.Phase != "idle" || (s.worker.Adoption == nil && s.worker.Handoff == nil) {
-			return fail(errors.New("only an idle, healthy adopted worker can leave migration parking"))
+		if s.stopping || s.status.Error != "" || s.status.Phase != "idle" || (s.worker.Adoption == nil && s.worker.Handoff == nil && s.worker.Fork == nil) {
+			return fail(errors.New("only an idle, healthy adopted, handed-off or forked worker can leave parking"))
 		}
 		b, err := (Beads{}).Show(s.worker.Bead)
 		if err != nil {
@@ -429,6 +406,7 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 		defer s.promptMu.Unlock()
 		s.mu.Lock()
 		stopping := s.stopping
+		uncertainSteer := s.steeringInFlight
 		s.mu.Unlock()
 		if stopping {
 			return fail(errors.New("worker stopping; cancellation cannot interrupt graceful shutdown"))
@@ -437,6 +415,29 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 			return fail(err)
 		}
 		if _, err := s.proc.call(rpcID(), "abort", nil, rpcCommandTimeout); err != nil {
+			return fail(err)
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if uncertainSteer || s.steeringInFlight {
+			// A timed-out asynchronous input handler can queue after clear_queue.
+			// Abort is not proof that this handler stopped. Reconcile its receipt,
+			// then explicitly cancel again; never admit later automatic work.
+			if s.status.Error == "" {
+				s.status.Error = rpcStrandedSteering
+			}
+			s.phaseLocked("blocked")
+			if err := s.saveLocked(); err != nil {
+				return fail(err)
+			}
+			return fail(errors.New("steering acceptance overlapped cancellation; reconcile receipt, then explicitly cancel again before continuing"))
+		}
+		s.steeringQueued = false
+		if s.status.Error == rpcStrandedSteering {
+			s.status.Error = ""
+			s.phaseLocked("idle")
+		}
+		if err := s.saveLocked(); err != nil {
 			return fail(err)
 		}
 		return rpcReply{OK: true}
@@ -505,9 +506,17 @@ func rpcServe(cfg Config, id string) error {
 			}
 		}
 	}
+	if w.Fork != nil && !w.Fork.Ready {
+		return errors.New("fork preparation incomplete; inspect fork-status, never replay")
+	}
 	prev, err := rpcPreviousStatus(id)
 	if err != nil {
 		return err
+	}
+	if w.Fork != nil {
+		if err := rpcForkValidate(w, prev); err != nil {
+			return err
+		}
 	}
 	if prev.GracefulStopRequested {
 		if prev.Phase != "stopped" {
@@ -543,7 +552,7 @@ func rpcServe(cfg Config, id string) error {
 		return err
 	}
 	defer stderr.Close()
-	s := &rpcSupervisor{worker: w, status: rpcStatus{CoordinatorFence: true, GracefulStop: true, Generation: rpcID(), Bead: id, Phase: "starting", PID: os.Getpid(), Seq: prev.Seq + 1, SessionID: prev.SessionID, SessionFile: prev.SessionFile}, log: log, stop: make(chan struct{})}
+	s := &rpcSupervisor{worker: w, status: rpcStatus{Steering: true, CoordinatorFence: true, GracefulStop: true, Generation: rpcID(), Bead: id, Phase: "starting", PID: os.Getpid(), Seq: prev.Seq + 1, SessionID: prev.SessionID, SessionFile: prev.SessionFile}, log: log, stop: make(chan struct{})}
 	s.status.RunStarted, s.status.RunEnded = prev.RunStarted, prev.RunEnded
 	s.status.Activity, s.status.ActivityAt = prev.Activity, prev.ActivityAt
 	s.status.Provider, s.status.Model = prev.Provider, prev.Model
@@ -575,7 +584,7 @@ func rpcServe(cfg Config, id string) error {
 	cmd := exec.Command("pi", args...)
 	cmd.Dir = w.Cwd
 	cmd.Env = rpcWorkerEnv(cfg, id)
-	if w.Adoption != nil || w.Handoff != nil {
+	if w.Adoption != nil || w.Handoff != nil || w.Fork != nil {
 		cmd.Env = append(cmd.Env, "QUARTERMASTER_RPC_PARK_FILE="+rpcParkPath(id))
 	}
 	if w.Handoff != nil {
