@@ -373,6 +373,30 @@ func (x *executor) runStep(ctx context.Context, digest string, p Plan, class, n 
 		if kind, why := x.recheck(p, digest, class); kind != "" {
 			return x.end(digest, p, class, kind, fmt.Sprintf("before step %d: %s", n, why))
 		}
+		if m, ok := r.(mergeRunner); ok {
+			m.policy = func(pr PR) MergePolicy {
+				b, err := x.show(p.Bead)
+				if err != nil {
+					return MergePolicy{Reason: "task unavailable: " + err.Error()}
+				}
+				// recheck above established live digest authorization. Recheck
+				// again at the mutation boundary, independently of GitHub.
+				kind, why := x.recheck(p, digest, class)
+				if kind != "" {
+					return MergePolicy{Reason: why}
+				}
+				events, err := readPlanEvents(digest)
+				if err != nil {
+					return MergePolicy{Reason: "approval evidence unavailable"}
+				}
+				approval, ok := liveApproval(events, x.now())
+				if !ok {
+					return MergePolicy{Reason: "no live approval"}
+				}
+				return mergePlanPolicy(x.cfg, b, pr, approval)
+			}
+			r = m
+		}
 		if err := r.pre(ctx, s); err != nil {
 			if errors.Is(err, errStale) || errors.Is(err, errUnmet) {
 				return x.end(digest, p, class, planFailed, fmt.Sprintf("step %d: %v", n, err))
