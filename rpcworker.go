@@ -113,7 +113,10 @@ type rpcStatus struct {
 	Provider    string    `json:"provider,omitempty"`
 	Model       string    `json:"model,omitempty"`
 
-	CoordinatorFence bool `json:"coordinator_fence,omitempty"`
+	CoordinatorFence      bool   `json:"coordinator_fence,omitempty"`
+	GracefulStop          bool   `json:"graceful_stop,omitempty"`
+	Generation            string `json:"generation,omitempty"`
+	GracefulStopRequested bool   `json:"graceful_stop_requested,omitempty"`
 }
 type rpcReceipt struct {
 	ID            string    `json:"id"`
@@ -124,10 +127,11 @@ type rpcReceipt struct {
 	Epoch         int64     `json:"epoch,omitempty"`
 }
 type rpcRequest struct {
-	Op    string `json:"op"`
-	ID    string `json:"id,omitempty"`
-	Text  string `json:"text,omitempty"`
-	Owner string `json:"owner,omitempty"` // headless epoch, checked at final admission
+	Op       string           `json:"op"`
+	ID       string           `json:"id,omitempty"`
+	Text     string           `json:"text,omitempty"`
+	Owner    string           `json:"owner,omitempty"` // headless epoch, checked at final admission
+	Expected *rpcStopIdentity `json:"expected,omitempty"`
 }
 type rpcReply struct {
 	OK      bool        `json:"ok"`
@@ -243,10 +247,10 @@ func (s *rpcSupervisor) event(raw []byte, rec rpcRecord) error {
 				SessionID   string `json:"sessionId"`
 				SessionFile string `json:"sessionFile"`
 			}
-			if err := json.Unmarshal(rec.Data, &st); err != nil {
-				return err
-			}
-			if st.SessionID != "" {
+			// Only establish the first identity here. Callers validate later
+			// responses without overwriting saved identity or turning a refused
+			// read-only lifecycle preflight into transport shutdown.
+			if json.Unmarshal(rec.Data, &st) == nil && st.SessionID != "" && s.status.SessionID == "" {
 				s.status.SessionID = st.SessionID
 				s.status.SessionFile = st.SessionFile
 			}
@@ -302,15 +306,22 @@ func (s *rpcSupervisor) blockDialog(rec rpcRecord) {
 	// Wait until startRPC has published the process pointer.
 	s.mu.Lock()
 	p := s.proc
-	s.mu.Unlock()
-	if p == nil {
+	if p == nil || s.stopping {
+		s.mu.Unlock()
 		return
-	} // startup dialog remains unanswered (fail closed)
+	} // startup/stopping dialog remains unanswered (fail closed)
 	_ = p.write(map[string]any{"type": "extension_ui_response", "id": rec.ID, "cancelled": true})
+	s.mu.Unlock()
 	// Unblock the UI first, then drain every already-admitted prompt before
 	// clearing/aborting. New prompts see the latched error and cannot enter.
 	s.promptMu.Lock()
 	defer s.promptMu.Unlock()
+	s.mu.Lock()
+	stopping := s.stopping
+	s.mu.Unlock()
+	if stopping {
+		return
+	}
 	_, _ = p.call("block-"+rpcID(), "clear_queue", nil, rpcCommandTimeout)
 	_, _ = p.call("block-"+rpcID(), "abort", nil, rpcCommandTimeout)
 	bd := Beads{actor: "quartermaster"}
@@ -323,8 +334,9 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 	case "status":
 		s.mu.Lock()
 		st := s.status
+		stopping := s.stopping
 		s.mu.Unlock()
-		if rpcParked(s.worker.Bead) {
+		if rpcParked(s.worker.Bead) && !stopping {
 			st.Phase = "parked"
 		}
 		return rpcReply{OK: true, Status: &st}
@@ -415,6 +427,12 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 		// would otherwise let pi continue it after the abort.
 		s.promptMu.Lock()
 		defer s.promptMu.Unlock()
+		s.mu.Lock()
+		stopping := s.stopping
+		s.mu.Unlock()
+		if stopping {
+			return fail(errors.New("worker stopping; cancellation cannot interrupt graceful shutdown"))
+		}
 		if _, err := s.proc.call(rpcID(), "clear_queue", nil, rpcCommandTimeout); err != nil {
 			return fail(err)
 		}
@@ -422,6 +440,8 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 			return fail(err)
 		}
 		return rpcReply{OK: true}
+	case "stop-graceful":
+		return s.stopGraceful(req)
 	case "stop":
 		s.mu.Lock()
 		s.stopping = true
@@ -489,6 +509,14 @@ func rpcServe(cfg Config, id string) error {
 	if err != nil {
 		return err
 	}
+	if prev.GracefulStopRequested {
+		if prev.Phase != "stopped" {
+			return errors.New("graceful stop has no confirmed terminal checkpoint; preserve reservation and inspect")
+		}
+		if err := rpcSettledReceipts(id); err != nil {
+			return fmt.Errorf("resume refused: %w", err)
+		}
+	}
 	if w.Handoff != nil && prev.SessionFile == "" {
 		prev.SessionFile, err = handoffSeed(w)
 		if err != nil {
@@ -515,7 +543,7 @@ func rpcServe(cfg Config, id string) error {
 		return err
 	}
 	defer stderr.Close()
-	s := &rpcSupervisor{worker: w, status: rpcStatus{CoordinatorFence: true, Bead: id, Phase: "starting", PID: os.Getpid(), Seq: prev.Seq + 1, SessionID: prev.SessionID, SessionFile: prev.SessionFile}, log: log, stop: make(chan struct{})}
+	s := &rpcSupervisor{worker: w, status: rpcStatus{CoordinatorFence: true, GracefulStop: true, Generation: rpcID(), Bead: id, Phase: "starting", PID: os.Getpid(), Seq: prev.Seq + 1, SessionID: prev.SessionID, SessionFile: prev.SessionFile}, log: log, stop: make(chan struct{})}
 	s.status.RunStarted, s.status.RunEnded = prev.RunStarted, prev.RunEnded
 	s.status.Activity, s.status.ActivityAt = prev.Activity, prev.ActivityAt
 	s.status.Provider, s.status.Model = prev.Provider, prev.Model
@@ -576,8 +604,19 @@ func rpcServe(cfg Config, id string) error {
 	}
 	defer func() { p.stop(); <-p.exited; <-p.drained }()
 	// Ready only after pi identifies the real session. Never invent a path.
-	if _, err = p.call(rpcID(), "get_state", nil, 30*time.Second); err != nil {
+	initial, err := p.call(rpcID(), "get_state", nil, 30*time.Second)
+	if err != nil {
 		return err
+	}
+	var identity struct {
+		SessionID   string `json:"sessionId"`
+		SessionFile string `json:"sessionFile"`
+	}
+	if err := json.Unmarshal(initial.Data, &identity); err != nil {
+		return err
+	}
+	if identity.SessionID == "" || identity.SessionFile == "" || (prev.SessionFile != "" && (identity.SessionID != prev.SessionID || identity.SessionFile != prev.SessionFile)) {
+		return errors.New("pi did not confirm the exact persistent session identity")
 	}
 	// The explicitly loaded guard must be alive before any managed prompt.
 	// Transport-only fixtures omit this flag; dispatch always supplies it.
@@ -600,6 +639,10 @@ func rpcServe(cfg Config, id string) error {
 	if s.status.SessionID == "" || s.status.SessionFile == "" {
 		s.mu.Unlock()
 		return errors.New("pi did not identify its persistent session")
+	}
+	if prev.SessionFile != "" && (s.status.SessionID != prev.SessionID || s.status.SessionFile != prev.SessionFile) {
+		s.mu.Unlock()
+		return errors.New("resumed pi returned a different session identity")
 	}
 	if w.Adoption != nil && (s.status.SessionID != w.Adoption.SessionID || s.status.SessionFile != w.Adoption.SessionFile) {
 		s.mu.Unlock()

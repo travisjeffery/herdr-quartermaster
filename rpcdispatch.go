@@ -179,7 +179,10 @@ func rpcResume(cfg Config, id, by string) (string, error) {
 	if !rpcExists(id) {
 		return "", errors.New("no native RPC worker reservation")
 	}
-	if r, err := rpcClient(id, rpcRequest{Op: "status"}); err == nil {
+	if r, err := rpcClient(id, rpcRequest{Op: "status"}); err == nil && r.Status != nil {
+		if r.Status.Phase == "stopping" {
+			return "", errors.New("worker still owns its session while stopping; inspect, do not restart or replay")
+		}
 		return fmt.Sprintf("reconnected to %s (%s); no prompt sent", id, r.Status.Phase), nil
 	}
 	b, err := (Beads{}).Show(id)
@@ -229,7 +232,7 @@ func rpcAssistantText(raw []byte) string {
 // switching, arbitrary shell execution, or approval responses.
 func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 	if len(pos) < 2 {
-		return errors.New("usage: quartermaster rpc view|inspect|history|feed|status|output|events|receipt|tell|cancel|stop|resume <bead> [cursor|request-id] [text]")
+		return errors.New("usage: quartermaster rpc view|inspect|history|feed|status|output|events|receipt|tell|cancel|stop|stop-graceful|resume <bead> [cursor|request-id] [text]")
 	}
 	op, id := pos[0], pos[1]
 	if !rpcIDRE.MatchString(id) {
@@ -336,7 +339,10 @@ func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 			return errors.New("request unresolved or rejected; inspect receipt/events, not replayed")
 		}
 		return nil
-	case "activate", "cancel", "stop":
+	case "activate", "cancel", "stop", "stop-graceful":
+		if len(pos) != 2 {
+			return errors.New("usage: rpc activate|cancel|stop|stop-graceful <bead>")
+		}
 		b, err := (Beads{}).Show(id)
 		if err != nil {
 			return err
@@ -345,7 +351,15 @@ func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 		if err != nil {
 			return err
 		} // local process control is class 3
-		r, err := rpcClient(id, rpcRequest{Op: op})
+		var r rpcReply
+		if op == "stop-graceful" {
+			if auto != "" {
+				_ = (Beads{}).Note(id, auto+" pi-rpc stop-graceful attempt; timeout/disconnection is not proof of refusal or exit, inspect status")
+			}
+			r, err = rpcGracefulStop(id, 5*time.Second)
+		} else {
+			r, err = rpcClient(id, rpcRequest{Op: op})
+		}
 		if err != nil {
 			return err
 		}

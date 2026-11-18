@@ -68,7 +68,11 @@ func TestRPCChildProcess(t *testing.T) {
 			if os.Getenv("QM_RPC_CRASH_STATE") == "1" {
 				os.Exit(17)
 			}
-			response(id, typ, map[string]any{"sessionId": "actual-pi-id", "sessionFile": session})
+			state := map[string]any{"sessionId": "actual-pi-id", "sessionFile": session, "isStreaming": false, "isCompacting": false, "pendingMessageCount": 0}
+			if override := os.Getenv("QM_RPC_STATE"); override != "" {
+				_ = json.Unmarshal([]byte(override), &state)
+			}
+			response(id, typ, state)
 		case "prompt":
 			fmt.Fprintln(os.Stderr, "diagnostic, NOT protocol")
 			if msg == "crash" {
@@ -103,6 +107,18 @@ func TestRPCChildProcess(t *testing.T) {
 			response(id, typ, nil)
 		case "extension_ui_response":
 			emit(map[string]any{"type": "entry_appended", "entry": req})
+		}
+	}
+	if release := os.Getenv("QM_RPC_EOF_RELEASE"); release != "" {
+		if os.Getenv("QM_RPC_EOF_CLOSE_STDOUT") == "1" {
+			_ = os.Stdout.Close()
+		}
+		until := time.Now().Add(30 * time.Second) // fixture safety net only
+		for time.Now().Before(until) {
+			if _, err := os.Stat(release); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 	if os.Getenv("QM_RPC_HOLD_EOF") == "1" {

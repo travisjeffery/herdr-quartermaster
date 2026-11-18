@@ -27,7 +27,8 @@ Usage:
   quartermaster rpc status|output|events <bead>        inspect a native worker (no Herdr needed)
   quartermaster rpc tell <bead> <request-id> <text>     idempotent submission/reconciliation; never replays intent
   quartermaster rpc receipt <bead> <request-id>        reconcile a possibly delivered prompt, even after exit
-  quartermaster rpc cancel|stop|resume <bead>          clear queued work and abort; stop; restore saved session
+  quartermaster rpc cancel|stop|resume <bead>          abort queued work; stop (legacy may kill); restore session
+  quartermaster rpc stop-graceful <bead>              guarded idle-only EOF shutdown; bounded wait, never kill
   quartermaster rpc prepare <bead> <exact-pane>        reserve an idle local pi TUI worker for migration
   quartermaster rpc adopt <bead>                      verify old owner exited; start same session parked
   quartermaster rpc handoff-prepare <bead> <pane> <json> checkpoint non-pi worker and durable fresh-session context

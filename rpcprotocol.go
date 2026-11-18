@@ -146,8 +146,8 @@ func startRPC(cmd *exec.Cmd, lease *os.File, stderr io.Writer, observe func([]by
 		})
 		outR.Close()
 		p.finish(fmt.Errorf("pi stdout closed: %w", err))
-		// Bad framing or EOF with a process still running must not leave an
-		// unobserved worker doing work. Close stdin, then bounded shutdown.
+		// Fail the transport and request orderly shutdown. The supervisor and
+		// inherited lease remain until the child exits; never escalate to kill.
 		p.stop()
 	}()
 	go func() {
@@ -246,16 +246,8 @@ func (p *rpcProcess) call(id, typ string, fields map[string]any, timeout time.Du
 	}
 }
 func (p *rpcProcess) stop() {
-	p.stopOnce.Do(func() {
-		p.stdin.Close()
-		go func() {
-			timer := time.NewTimer(5 * time.Second)
-			defer timer.Stop()
-			select {
-			case <-p.exited:
-			case <-timer.C:
-				_ = p.cmd.Process.Kill()
-			}
-		}()
-	})
+	// EOF is the only shutdown request, including error and signal cleanup.
+	// A stuck child must keep its supervisor/lease, not lose ownership after
+	// a deadline. Bounded waiting belongs to the client, not a kill timer.
+	p.stopOnce.Do(func() { _ = p.stdin.Close() })
 }
