@@ -42,14 +42,16 @@ func (g Group) String() string { return groupNames[g] }
 
 // Thread is one bead with whatever is working on it and delivering it.
 type Thread struct {
-	Bead       Bead
-	Agent      *Agent
-	PR         *PR
-	Checks     Checks
-	Reviews    int // human reviews by someone other than the user
-	BotReviews []string
-	Runs       []Run
-	Linear     string
+	Bead  Bead
+	Agent *Agent
+	// AgentUnknown means a partial discovery could not observe this worker.
+	AgentUnknown bool
+	PR           *PR
+	Checks       Checks
+	Reviews      int // human reviews by someone other than the user
+	BotReviews   []string
+	Runs         []Run
+	Linear       string
 	// Merged is every merged PR of the bead's, the pick or not, so a merge
 	// behind another open PR is still announced.
 	Merged []PR
@@ -185,6 +187,7 @@ type Snapshot struct {
 	ReadySince  time.Time `json:"ready_since"`
 	PRNumber    int       `json:"pr_number"`
 	PRState     string    `json:"pr_state"`
+	InboxPRKey  string    `json:"inbox_pr_key,omitempty"`
 	Failing     []string  `json:"failing"`
 	Reviews     int       `json:"reviews"`
 	BotReviews  int       `json:"bot_reviews"`
@@ -243,10 +246,11 @@ const (
 )
 
 type Event struct {
-	Bead    string    `json:"bead"`
-	Kind    EventKind `json:"kind"`
-	Summary string    `json:"summary"`
-	At      time.Time `json:"at"`
+	Bead    string          `json:"bead"`
+	Kind    EventKind       `json:"kind"`
+	Summary string          `json:"summary"`
+	At      time.Time       `json:"at"`
+	Clears  *InboxCondition `json:"clears,omitempty"`
 }
 
 // Outcome is what one thread's transition asks the ticker to do.
@@ -303,7 +307,7 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 	// The question counts as asked once the thread has sat in needs you, and
 	// stays asked while the bead is needs_me, through any wake.
 	switch {
-	case s.Group == GroupNeedsYou:
+	case s.Group == GroupNeedsYou && t.Prompt == nil && (t.Agent == nil || t.Agent.Status != "blocked"):
 		s.Asked = asked(t.Bead)
 	case s.NeedsMe:
 		s.Asked = prev.Asked
@@ -314,8 +318,14 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 			s.Merged = append(s.Merged, pr.URL)
 		}
 	}
+	if t.Bead.Status == StatusNeedsMe {
+		// A human decision supersedes an earlier ready notice. After the
+		// answer the same head needs a fresh announcement.
+		s.ReadyKey = ""
+	}
 	if t.PR != nil {
 		s.PRNumber, s.PRState = t.PR.Number, t.PR.State
+		s.InboxPRKey = inboxPRKey(t)
 		// A PR is ready to announce only once nobody is waiting on TJ: a
 		// worker at needs_me leaves auto-merge off for the decision it asked for,
 		// and the announcement follows the answer.
@@ -339,7 +349,7 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 	id := t.Bead.ID
 	g := classify(t)
 	ev := func(k EventKind, format string, a ...any) {
-		o.Events = append(o.Events, Event{Bead: id, Kind: k, Summary: fmt.Sprintf(format, a...), At: now})
+		o.Events = append(o.Events, Event{Bead: id, Kind: k, Summary: fmt.Sprintf(format, a...), At: now, Clears: eventCondition(t, k)})
 	}
 	// Only a needs_me that was already settled, with the agent at rest, counts:
 	// the turn that asked the question is itself still working.
@@ -349,7 +359,9 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 	}
 	// A blocked agent can move from one prompt to the next between ticks.
 	newPrompt := t.Prompt != nil && t.Prompt.Hash != prev.PromptHash
-	if g == GroupNeedsYou && (prev.Group != GroupNeedsYou || newPrompt) {
+	promptResolved := prev.AgentStatus == "blocked" && (t.Agent == nil || t.Agent.Status != "blocked")
+	newQuestion := t.Bead.Status == StatusNeedsMe && (promptResolved || (prev.Asked != "" && prev.Asked != asked(t.Bead)))
+	if g == GroupNeedsYou && (prev.Group != GroupNeedsYou || newPrompt || newQuestion) {
 		o.Notify = true
 		switch {
 		case t.Prompt != nil:
@@ -371,7 +383,7 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 		}
 	}
 	if t.PR != nil && t.PR.State == "OPEN" {
-		if len(t.Checks.Failing) > 0 && !slices.Equal(t.Checks.Failing, prev.Failing) {
+		if len(t.Checks.Failing) > 0 && (!slices.Equal(t.Checks.Failing, prev.Failing) || (prev.InboxPRKey != "" && prev.InboxPRKey != inboxPRKey(t))) {
 			ev(EventFailing, "PR #%d checks failing: %s", t.PR.Number, strings.Join(t.Checks.Failing, ", "))
 			o.Prompts = append(o.Prompts, fmt.Sprintf(
 				"[quartermaster: automated, not the user] PR #%d has failing checks: %s. Investigate with `gh pr checks %d`, fix them on this branch, and push.",

@@ -110,7 +110,7 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 	if err != nil {
 		return nil, nil, err
 	}
-	agents, err := t.herdr.Agents()
+	agents, agentsComplete, err := t.herdr.observedAgents()
 	if err != nil {
 		// Bead truth is available even if worker transport is not. Return
 		// those observations for desktop alerts only; do not run ordinary
@@ -134,7 +134,9 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 	}
 	threads := make([]Thread, 0, len(active))
 	for _, b := range active {
-		threads = append(threads, threadFor(t.cfg, *st, b, byName))
+		th := threadFor(t.cfg, *st, b, byName)
+		th.AgentUnknown = !agentsComplete && th.Agent == nil
+		threads = append(threads, th)
 	}
 	return threads, byName, nil
 }
@@ -418,8 +420,23 @@ func (t Ticker) once(st *TickerState) error {
 		}
 	}
 	relaunch := t.launchMismatch(threads)
-	for _, name := range deliverOutbox(t.cfg, t.herdr, agents, needsMe, relaunch) {
-		t.log.Printf("delivered queued brief to %s", name)
+	// Remove departed workers' notices before delivery, not just at the end
+	// of this pass when leftActive clears their sidebar rows.
+	outboxReady := true
+	for id := range st.Threads {
+		if _, active := needsMe[agentName(id)]; !active {
+			if err := clearQueuedOutbox(agentName(id)); err != nil {
+				t.log.Printf("outbox %s: %v", id, err)
+				outboxReady = false
+			}
+		}
+	}
+	// Failed cleanup holds delivery, but must not halt inbox reconciliation
+	// or the other ticker work. leftActive keeps failed snapshots for retry.
+	if outboxReady {
+		for _, name := range deliverOutbox(t.cfg, t.herdr, agents, needsMe, relaunch) {
+			t.log.Printf("delivered queued brief to %s", name)
+		}
 	}
 	var rows []sidebarRow
 	var alertThreads []Thread
@@ -450,6 +467,11 @@ func (t Ticker) once(st *TickerState) error {
 			}
 		}
 		snap := snapshot(th, prev, now)
+		if out.Resume {
+			// transition saw needs_me and withheld the ready event. A
+			// successful resume must not baseline it away before next pass.
+			snap.ReadyKey = ""
+		}
 		t.journalAuto(th, prev, seen, &snap, now)
 		snap.Pending = append(snap.Pending, out.Prompts...)
 		t.relaunch(th, &snap, relaunch[agentName(id)], now)
@@ -482,6 +504,9 @@ func (t Ticker) once(st *TickerState) error {
 			rows = append(rows, sidebarRow{Name: id, Pane: th.Agent.PaneID, Tokens: tokens})
 		}
 		st.Threads[id] = snap
+	}
+	if err := reconcileInbox(alertThreads, t.beads.Show); err != nil {
+		t.log.Printf("inbox reconciliation: %v", err)
 	}
 	if err := reconcileDesktop(alertThreads, now, submitDesktop); err != nil {
 		t.log.Printf("desktop notifications: %v", err)
@@ -622,6 +647,10 @@ func (t Ticker) resume(id string) error {
 // leftActive handles a bead that is no longer in_progress/needs_me/blocked:
 // usually closed by its thread after the PR merged.
 func (t Ticker) leftActive(st *TickerState, id string, prev Snapshot, agents map[string]Agent, now time.Time) {
+	if err := clearQueuedOutbox(agentName(id)); err != nil {
+		t.log.Printf("outbox %s: %v", id, err)
+		return // keep the snapshot so the next pass retries cleanup
+	}
 	b, err := t.beads.Show(id)
 	if err != nil {
 		t.log.Printf("show %s: %v", id, err)
@@ -923,6 +952,9 @@ func tickerStatus(cfg Config) {
 func inboxDir() string { return filepath.Join(stateDir(), "inbox") }
 
 func writeEvent(e Event) error {
+	if e.Clears == nil {
+		e.Clears = defaultInboxCondition(e)
+	}
 	if err := os.MkdirAll(inboxDir(), 0o700); err != nil {
 		return err
 	}
@@ -962,7 +994,8 @@ func readInbox() ([]InboxItem, error) {
 	return items, nil
 }
 
-// inboxDone marks items handled: all of them, or those for the given beads.
+// inboxDone retains the bulk CLI: all items, or matching bead IDs/filenames.
+// Interactive views use inboxDoneFiles instead, with the files they displayed.
 func inboxDone(beads []string) (int, error) {
 	items, err := readInbox()
 	if err != nil {
@@ -972,20 +1005,13 @@ func inboxDone(beads []string) (int, error) {
 	for _, b := range beads {
 		want[b] = true
 	}
-	done := filepath.Join(inboxDir(), "done")
-	if err := os.MkdirAll(done, 0o755); err != nil {
-		return 0, err
-	}
-	n := 0
+	var files []string
 	for _, it := range items {
-		if (len(want) > 0 && !want[it.Bead]) || headlessOwned(it.Bead) {
-			continue // managed events require verified outcomes, not transport acknowledgment
-		}
-		if err := os.Rename(filepath.Join(inboxDir(), it.File), filepath.Join(done, it.File)); err == nil {
-			n++
+		if len(want) == 0 || want[it.Bead] || want[it.File] {
+			files = append(files, it.File)
 		}
 	}
-	return n, nil
+	return inboxDoneFiles(files)
 }
 
 func (t Ticker) fixNames(st *TickerState) {
