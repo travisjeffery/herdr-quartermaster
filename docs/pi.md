@@ -20,7 +20,7 @@ steps only you can do. Checked against pi 1.5.2 and herdr 0.9.5.
 | needs_me wake check | Read from the session file: a prompt after the worker settled resumes the bead, pi waking itself doesn't (below). |
 | Finished turns | The id of the session's last turn-ending assistant entry is kept in the ticker's snapshot; a new id is a finished turn even if no pass saw the agent working, and an `error` or `aborted` turn is reported as `stopped on error: <message>`. |
 | Guards | quartermaster's pi extension, loaded into every pi it starts (below). |
-| Close verifier | Unchanged: `claude -p`, whatever the worker's kind. |
+| Close verifier | Default remains `claude -p`. Opt in separately to the [filesystem-only pi verifier](pi-verifier.md) with `[verifier] backend = "pi"`. |
 
 ## Native RPC alternative
 
@@ -190,7 +190,7 @@ MCP.
 
 ## What still assumes Claude Code
 
-- **The close verifier** runs `claude -p`, on purpose.
+- **The default close verifier** still runs `claude -p`; the [pi backend](pi-verifier.md) is a separate opt-in, independent of the worker kind.
 - **Approval prompts.** `quartermaster prompt` and `answer` parse Claude Code
   and Codex screens, and read a pi worker's ask-gates from its control
   socket. A pi extension dialog shows the thread as blocked with no hash to
