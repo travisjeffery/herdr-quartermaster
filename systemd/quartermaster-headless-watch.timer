@@ -1,0 +1,10 @@
+[Unit]
+Description=quartermaster: independently watch coordinator follow-through
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

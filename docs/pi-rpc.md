@@ -209,7 +209,8 @@ load normally; the quartermaster guard is always loaded explicitly.
 Live native workers join `quartermaster context`, ticker messaging and the
 normal `prompt`/`answer` ask-gate flow. Their `rpc:<bead>` handle is not a pane.
 `rpc status`, `output`, `events`, `tell`, `receipt`, `cancel`, `stop` and `resume`
-work with no Herdr installed. The coordinator UI still requires Herdr. If Herdr
+work with no Herdr installed. The existing coordinator UI still requires Herdr; the separate opt-in
+[headless post-merge coordinator](pi-headless.md) does not. If Herdr
 listing fails but native workers exist, the combined context contains the
 native workers only: use native status as the authoritative transport view,
 not absence from that combined list as proof a TUI worker died.
@@ -503,5 +504,5 @@ on the recorded path. Keep the reservation/history until a later cleanup tool
 can preserve the needed recovery evidence. No automatic deletion is shipped.
 
 Separately tracked follow-ons: steering/forks,
-retention/cleanup, and a headless coordinator. No remote fleet, new UI, or
-live-default change is included here.
+retention/cleanup. The [headless coordinator](pi-headless.md) is a separate,
+explicit post-merge opt-in. No remote fleet or live-default change is included here.

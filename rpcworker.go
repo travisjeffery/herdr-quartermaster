@@ -112,6 +112,8 @@ type rpcStatus struct {
 	Current     string    `json:"current,omitempty"`
 	Provider    string    `json:"provider,omitempty"`
 	Model       string    `json:"model,omitempty"`
+
+	CoordinatorFence bool `json:"coordinator_fence,omitempty"`
 }
 type rpcReceipt struct {
 	ID            string    `json:"id"`
@@ -122,9 +124,10 @@ type rpcReceipt struct {
 	Epoch         int64     `json:"epoch,omitempty"`
 }
 type rpcRequest struct {
-	Op   string `json:"op"`
-	ID   string `json:"id,omitempty"`
-	Text string `json:"text,omitempty"`
+	Op    string `json:"op"`
+	ID    string `json:"id,omitempty"`
+	Text  string `json:"text,omitempty"`
+	Owner string `json:"owner,omitempty"` // headless epoch, checked at final admission
 }
 type rpcReply struct {
 	OK      bool        `json:"ok"`
@@ -338,6 +341,13 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 		if !rpcIDRE.MatchString(req.ID) || strings.TrimSpace(req.Text) == "" || len(req.Text) > 1<<20 {
 			return fail(errors.New("prompt requires id and 1..1MiB text"))
 		}
+		gate, err := headlessAdmission(s.worker.Bead, req.Owner)
+		if err != nil {
+			return fail(err)
+		}
+		if gate != nil {
+			defer gate.Close()
+		}
 		// Serialize submissions and cancellation; status remains independent.
 		s.promptMu.Lock()
 		defer s.promptMu.Unlock()
@@ -368,7 +378,7 @@ func (s *rpcSupervisor) handle(req rpcRequest) rpcReply {
 		// the old phase only if no lifecycle event advanced the epoch.
 		s.status.Phase = "working"
 		s.status.Seq++
-		err := s.saveLocked()
+		err = s.saveLocked()
 		s.mu.Unlock()
 		if err != nil {
 			return fail(err)
@@ -505,7 +515,7 @@ func rpcServe(cfg Config, id string) error {
 		return err
 	}
 	defer stderr.Close()
-	s := &rpcSupervisor{worker: w, status: rpcStatus{Bead: id, Phase: "starting", PID: os.Getpid(), Seq: prev.Seq + 1, SessionID: prev.SessionID, SessionFile: prev.SessionFile}, log: log, stop: make(chan struct{})}
+	s := &rpcSupervisor{worker: w, status: rpcStatus{CoordinatorFence: true, Bead: id, Phase: "starting", PID: os.Getpid(), Seq: prev.Seq + 1, SessionID: prev.SessionID, SessionFile: prev.SessionFile}, log: log, stop: make(chan struct{})}
 	s.status.RunStarted, s.status.RunEnded = prev.RunStarted, prev.RunEnded
 	s.status.Activity, s.status.ActivityAt = prev.Activity, prev.ActivityAt
 	s.status.Provider, s.status.Model = prev.Provider, prev.Model

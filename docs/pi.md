@@ -27,7 +27,9 @@ steps only you can do. Checked against pi 1.5.2 and herdr 0.9.5.
 For local headless workers, use `dispatch <bead> --backend pi-rpc --agent pi`.
 This is an additional opt-in transport, with a persistent supervisor, rather
 than a migration of these TUI sessions. See [native RPC workers](pi-rpc.md) for
-the isolated trial, approvals, lifecycle, limitations and rollback.
+the isolated trial, approvals, lifecycle, limitations and rollback. A separate
+[headless coordinator](pi-headless.md) can consume explicitly enrolled post-merge
+follow-through without waking or replacing the interactive TUI.
 
 ## TUI durable sessions, and why the file rather than RPC
 

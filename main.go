@@ -36,6 +36,8 @@ Usage:
   quartermaster host list                              the worker hosts: machine, slots, labels, repos
   quartermaster focus [<bead>] [--agent K]             focus the bead's worker, else dispatch it
                                                        (no bead: read it from the clipboard)
+  quartermaster headless enroll|run|pause|takeover|resume|status|watch|reports|ack
+                                                       opt-in fenced native coordinator (docs/pi-headless.md)
   quartermaster context                                the coordinator's per-turn digest
   quartermaster report [--since 24h|7d|YYYY-MM-DD]     Markdown of what shipped, merged, is in flight, needs you
   quartermaster digest [--deliver T,...] [--always]    every open bead by state, what changed since the last run;
@@ -241,6 +243,8 @@ func run(args []string) error {
 			return err
 		}
 		fmt.Println(msg)
+	case "headless":
+		return headlessCmd(cfg, pos, *by, os.Stdout)
 	case "rpc":
 		return rpcCmd(cfg, pos, *by, os.Stdout)
 	case "host":

@@ -16,6 +16,8 @@ import (
 )
 
 type Config struct {
+	Headless HeadlessConfig `toml:"headless"`
+
 	Repo             string `toml:"repo"`
 	BeadsDir         string `toml:"beads_dir"`
 	BranchPrefix     string `toml:"branch_prefix"`

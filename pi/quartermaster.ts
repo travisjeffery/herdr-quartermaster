@@ -245,6 +245,9 @@ export default function (pi) {
         return { ok: true, idle: ctxNow ? ctxNow.isIdle() : true,
           handoff_hash: hasHandoff(ctxNow) ? createHash("sha256").update(handoffContext).digest("hex") : "" };
       case "prompt": {
+        // Native prompts must enter through the supervisor receipt/fencing path.
+        // The guard socket is only for ping/ask/answer on native workers.
+        if (nativeRPC(ctxNow)) return { ok: false, error: "native prompts require supervisor admission" };
         if (migrationParked()) return { ok: false, error: parkedReason };
         if (typeof req.text !== "string" || req.text.trim() === "") return { ok: false, error: "no text" };
         const busy = ctxNow ? !ctxNow.isIdle() : false;

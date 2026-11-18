@@ -1,0 +1,8 @@
+# Independent of ticker and consumer; never restarts either or any worker.
+[Unit]
+Description=quartermaster: headless coordinator health and local report delivery
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/quartermaster headless watch
+TimeoutStartSec=30s
