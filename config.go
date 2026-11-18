@@ -18,7 +18,8 @@ import (
 )
 
 type Config struct {
-	Headless HeadlessConfig `toml:"headless"`
+	Headless     HeadlessConfig     `toml:"headless"`
+	RPCRetention RPCRetentionConfig `toml:"rpc_retention"`
 
 	Repo             string `toml:"repo"`
 	BeadsDir         string `toml:"beads_dir"`

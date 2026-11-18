@@ -137,7 +137,8 @@ an explicit error rather than unbounded allocation. The screen retains at most
 replay from disk. There is at most one read in flight per screen and a one-item
 result channel. Viewers have no producer-side subscription queue: slow,
 disconnected or absent screens cannot block the worker's stdout drain. Durable
-logs still grow on disk; retention is a separate feature.
+logs grow while workers run; [explicit offline retention](pi-rpc-maintenance.md)
+is disabled by default and reports durable replay gaps.
 
 Usage is summed **only from saved records**, including assistant/tool usage,
 compaction, branch-summary and standalone usage entries. Streaming/duplicate
@@ -598,7 +599,8 @@ honor backpressure; write errors stop the transport because a partial record
 cannot safely be followed by another command. Malformed/oversized stdout,
 partial EOF, disk-write failures and child exit stop the worker, never trigger
 a fallback launch. Clients never participate in the stdout drain. Event and
-session logs currently grow on disk; `output` is a legacy raw snapshot of
+session logs grow on disk; [explicit offline event retention](pi-rpc-maintenance.md)
+never expires saved sessions or receipts. `output` is a legacy raw snapshot of
 completed assistant text. Use `view`/`history`/`feed` for the bounded, normalized
 read-only viewer described above. Monitor disk usage and keep trials
 bounded. Socket paths must fit the platform's Unix socket path limit; use a
@@ -619,11 +621,10 @@ and remove `worker_backend = "pi-rpc"` if you set it. Use
 TUI fallback. Stopping does not release the bead or delete history/worktrees.
 Do not delete a lease or reservation to force a second writer.
 
-`resolve` refuses native reservations and `sweep` skips their worktrees for now. For deliberate cleanup after
-the bead is closed, first stop and verify both PIDs exited, review/preserve
-session/receipt artifacts, and use Git's normal non-force `worktree remove`
-on the recorded path. Keep the reservation/history until a later cleanup tool
-can preserve the needed recovery evidence. No automatic deletion is shipped.
+`resolve` refuses native reservations and `sweep` skips their worktrees. Use
+[explicit offline maintenance](pi-rpc-maintenance.md) to preview event retention
+or guarded cleanup of one closed, stopped native-dispatch worker. It preserves
+sessions, receipts, branches and the reservation; no automatic deletion ships.
 
-Separately tracked follow-on: retention/cleanup. The [headless coordinator](pi-headless.md) is a separate,
+The [headless coordinator](pi-headless.md) is a separate,
 explicit post-merge opt-in. No remote fleet or live-default change is included here.

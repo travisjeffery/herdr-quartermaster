@@ -37,6 +37,8 @@ Usage:
   quartermaster rpc receipt <bead> <request-id>        reconcile a possibly delivered message, even after exit
   quartermaster rpc cancel|stop|resume <bead>          abort queued work; stop (legacy may kill); restore session
   quartermaster rpc stop-graceful <bead>              guarded idle-only EOF shutdown; bounded wait, never kill
+  quartermaster rpc retain <bead> [--max-bytes N] [--yes] preview/apply offline event-log retention
+  quartermaster rpc cleanup <bead> [--yes]            preview/remove a closed, stopped, clean merged native worktree
   quartermaster rpc prepare <bead> <exact-pane>        reserve an idle local pi TUI worker for migration
   quartermaster rpc adopt <bead>                      verify old owner exited; start same session parked
   quartermaster rpc handoff-prepare <bead> <pane> <json> checkpoint non-pi worker and durable fresh-session context
@@ -296,7 +298,8 @@ func run(args []string) error {
 	force := fs.Bool("force", false, "resolve even if the bead is open, its agent is working or its worktree is dirty; dispatch to a host lacking a needed label")
 	hostFlag := fs.String("host", "", "dispatch: the worker host to run on")
 	sinceFlag := fs.String("since", "24h", "report window: Nh, Nd or YYYY-MM-DD")
-	yes := fs.Bool("yes", false, "sweep: remove the clean candidates; verify: act on the verdicts")
+	yes := fs.Bool("yes", false, "sweep/rpc maintenance: apply safe cleanup; verify: act on the verdicts")
+	maxBytes := fs.Int64("max-bytes", 0, "rpc retain: event log budget in bytes; 0 uses [rpc_retention] event_bytes")
 	days := fs.Int("days", 7, "stale: untouched for at least this many days")
 	release := fs.Bool("release", false, "stale: set each stale claim back to open")
 	deliver := fs.String("deliver", defaultDeliver(), "digest: where to send it: desktop, slack, stdout, none (comma-separated)")
@@ -343,6 +346,12 @@ func run(args []string) error {
 	case "headless":
 		return headlessCmd(cfg, pos, *by, os.Stdout)
 	case "rpc":
+		if len(pos) > 0 && (pos[0] == "retain" || pos[0] == "cleanup") {
+			if *force {
+				return errors.New("RPC maintenance has no force override")
+			}
+			return rpcMaintenanceCmd(cfg, pos, *by, *yes, *maxBytes, os.Stdout)
+		}
 		return rpcCmd(cfg, pos, *by, os.Stdout)
 	case "host":
 		if len(pos) != 1 || pos[0] != "list" {
