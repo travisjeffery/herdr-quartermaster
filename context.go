@@ -203,9 +203,11 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   class by where its output lands: 0 read-only, 1 a worktree, 2 a worker's own
   branch and PR, 3 TJ's machine and bead state (dispatching a `+"`next`"+` bead,
   resuming, releasing a stale claim, closing a verified-done bead), 4 main
-  (merging an approved, green PR), 5 internal messages, 6 non-prod infra and
-  dispatching a bead TJ didn't select, 7 production additive or in place, 8 a
-  scoped prod deletion, secrets, outside messages, money or approving a PR, 9
+  (merging an approved, green PR) and spending up to `+spendLimitText+`,
+  5 internal messages, 6 non-prod infra and dispatching a bead TJ didn't
+  select, 7 production additive or in place and spending more, or an amount
+  no one can estimate (`+"`--action spend --amount <USD>[/month]`"+`), 8 a
+  scoped prod deletion, secrets, outside messages or approving a PR, 9
   widespread or irreversible, a classifier denial, loosening agent settings, or
   anything you can't place. Before acting for TJ, find the class of what you'd
   authorize and run `+"`quartermaster autonomy check <bead> --action A [--target T]`"+` or
