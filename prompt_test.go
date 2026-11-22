@@ -102,9 +102,90 @@ func TestParsePromptTrust(t *testing.T) {
 	}
 }
 
+// muse-bash-2.txt is a herdr visible read of a staged muse worker at an
+// approval prompt (escalated bash, 39-column pane, so the title and the
+// second option are cut at the pane edge and the command wraps).
+func TestParsePromptMuseBash(t *testing.T) {
+	p, ok := parsePrompt(screen(t, "muse-bash-2.txt"))
+	if !ok {
+		t.Fatal("no prompt found")
+	}
+	if !p.Numbered || len(p.Options) != 2 || !p.Options[0].Selected {
+		t.Fatalf("options = %+v", p.Options)
+	}
+	if want := []string{"Yes, proceed (y)", "No, and tell Muse Code what to do"}; !slices.Equal(labels(p), want) {
+		t.Errorf("options = %q", labels(p))
+	}
+	if len(p.Lines) == 0 || !strings.HasPrefix(p.Lines[0], "Would you like to run the following") {
+		t.Errorf("lines = %q", p.Lines)
+	}
+	if !slices.Contains(p.Lines, "$ mkdir -p out2 && touch") || !slices.Contains(p.Lines, "out2/hello.txt") {
+		t.Errorf("command missing from %q", p.Lines)
+	}
+	for _, l := range p.Lines {
+		if strings.Contains(l, "Calling tools") || strings.Contains(l, "last event") || strings.Contains(l, "approval defaults") {
+			t.Errorf("screen furniture in lines: %q", l)
+		}
+	}
+	if p.Countdown != "" || len(p.Hash) != 8 {
+		t.Errorf("countdown %q hash %q", p.Countdown, p.Hash)
+	}
+}
+
+func TestParsePromptMuseBashWide(t *testing.T) {
+	p, ok := parsePrompt(screen(t, "muse-bash-wide.txt"))
+	if !ok {
+		t.Fatal("no prompt found")
+	}
+	want := []string{"Yes, proceed (y)", "No, and tell Muse Code what to do differently (esc)"}
+	if !p.Numbered || !slices.Equal(labels(p), want) || !p.Options[0].Selected {
+		t.Fatalf("options = %+v", p.Options)
+	}
+	if want := []string{"Would you like to run the following command?", "$ mkdir -p out2 && touch out2/world.txt"}; !slices.Equal(p.Lines, want) {
+		t.Errorf("lines = %q", p.Lines)
+	}
+	// Digit keys answer a muse prompt (staged: 2 denied, 1 approved and ran).
+	for choice, want := range map[string][]string{"1": {"1"}, "no": {"2"}, "yes": {"1"}} {
+		o, err := p.choose(choice)
+		if err != nil {
+			t.Errorf("choose(%q): %v", choice, err)
+			continue
+		}
+		if got := p.keys(o); !slices.Equal(got, want) {
+			t.Errorf("choose(%q) keys = %q, want %q", choice, got, want)
+		}
+	}
+}
+
+func TestPromptHashIgnoresMuseSpinnerAndCursor(t *testing.T) {
+	raw := screen(t, "muse-bash-2.txt")
+	// The spinner's elapsed time and the "last event" line above the box
+	// change on every read, and the cursor moves, without the prompt
+	// changing.
+	moved := strings.Replace(raw, "⟩ 1. Yes", "  1. Yes", 1)
+	moved = strings.Replace(moved, "  2. No", "⟩ 2. No", 1)
+	moved = strings.ReplaceAll(moved, "3m 26s", "9m 59s")
+	moved = strings.ReplaceAll(moved, "3m 11s", "9m 44s")
+	a, okA := parsePrompt(raw)
+	b, okB := parsePrompt(moved)
+	if !okA || !okB {
+		t.Fatalf("parsed %v / %v", okA, okB)
+	}
+	if a.Hash != b.Hash || !b.Options[1].Selected {
+		t.Errorf("hash %s vs %s, selected %+v", a.Hash, b.Hash, b.Options)
+	}
+	other, _ := parsePrompt(strings.Replace(raw, "touch\n    out2/hello.txt", "touch\n    out2/other.txt", 1))
+	if other.Hash == a.Hash {
+		t.Error("a different command hashed the same")
+	}
+}
+
 func TestParsePromptNone(t *testing.T) {
 	if p, ok := parsePrompt(screen(t, "claude-idle.txt")); ok {
 		t.Errorf("idle screen parsed as %+v", p)
+	}
+	if p, ok := parsePrompt(screen(t, "muse-idle.txt")); ok {
+		t.Errorf("muse idle screen parsed as %+v", p)
 	}
 	working := "● Here is the plan:\n  1. Read the code\n  2. Fix it\n\n────────────────────────────────\n❯ \n────────────────────────────────\n  ⏸ manual mode on · esc to interrupt · ← for agents\n"
 	if p, ok := parsePrompt(working); ok {
@@ -194,6 +275,36 @@ func TestAnswerPrompt(t *testing.T) {
 	want := "PROMPT ANSWERED: 1 Yes to Bash command: Create out2 directory and touch hello.txt [" + p.Hash + "] by TJ"
 	if !slices.Equal(f.notes, []string{want}) {
 		t.Errorf("notes = %q", f.notes)
+	}
+}
+
+func TestAnswerPromptMuse(t *testing.T) {
+	bash := screen(t, "muse-bash-wide.txt")
+	p, ok := parsePrompt(bash)
+	if !ok {
+		t.Fatal("no prompt found")
+	}
+	f := &fakePane{screens: []string{bash, screen(t, "muse-idle.txt")}}
+	msg, err := answerPrompt(f.env(), "backend-ab12", "1", p.Hash, "TJ", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.sent) != 1 || !slices.Equal(f.sent[0], []string{"1"}) {
+		t.Errorf("sent %q", f.sent)
+	}
+	if !strings.Contains(msg, "1 Yes, proceed (y)") {
+		t.Errorf("msg = %q", msg)
+	}
+	if len(f.notes) != 1 || !strings.HasPrefix(f.notes[0], "PROMPT ANSWERED: 1 Yes, proceed (y) to ") || !strings.Contains(f.notes[0], "["+p.Hash+"] by TJ") {
+		t.Errorf("notes = %q", f.notes)
+	}
+	// The usual refusal: a hash read from an earlier (different) prompt.
+	stale := &fakePane{screens: []string{screen(t, "muse-bash-2.txt")}}
+	if _, err := answerPrompt(stale.env(), "backend-ab12", "1", p.Hash, "TJ", -1); err == nil || !strings.Contains(err.Error(), "the prompt changed") {
+		t.Fatalf("stale hash: err = %v", err)
+	}
+	if len(stale.sent) != 0 || len(stale.notes) != 0 {
+		t.Errorf("stale hash sent %q, noted %q", stale.sent, stale.notes)
 	}
 }
 
