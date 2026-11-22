@@ -440,6 +440,15 @@ const answerWait = 5 * time.Second
 // Anyone but TJ answers only within the bead's autonomy level, by the class
 // of what the answer releases, and the note starts AUTO:.
 func answerPrompt(env promptEnv, id, choice, expect, by string, class int) (string, error) {
+	return answerPromptVia(env, id, choice, expect, by, class, "")
+}
+
+// answerPromptVia is answerPrompt with via naming how TJ's answer arrived
+// (a phone tap, tap.go), appended to the PROMPT ANSWERED note so the audit
+// trail carries the transport and its identity evidence. Every guard — the
+// expected hash, the wait for the prompt to clear, the note, the journal —
+// is this one path; a tap is only another way of reaching it.
+func answerPromptVia(env promptEnv, id, choice, expect, by string, class int, via string) (string, error) {
 	if expect == "" {
 		return "", fmt.Errorf("--expect <hash> is required: read the prompt with `quartermaster prompt %s` first", id)
 	}
@@ -496,6 +505,9 @@ func answerPrompt(env promptEnv, id, choice, expect, by string, class int) (stri
 	}
 	msg := fmt.Sprintf("answered %s: %d %s to %s", a.Name, o.Number, o.Label, p.Summary())
 	note := fmt.Sprintf("PROMPT ANSWERED: %d %s to %s [%s] by %s", o.Number, shortTitle(o.Label, 60), p.Summary(), p.Hash, by)
+	if via != "" {
+		note += " via " + via
+	}
 	if auto != "" {
 		note = auto + " " + note
 	}

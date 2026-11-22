@@ -86,6 +86,41 @@ type Config struct {
 	// Verifier checks in-scope beads before `quartermaster close` closes
 	// them; see accept.go.
 	Verifier VerifierConfig `toml:"verifier"`
+
+	// Tap serves signed one-time approval links on the tailnet, so TJ can
+	// answer a worker's approval prompt from a phone; see tap.go and
+	// docs/approval-taps.md. Off unless [tap] enabled is set.
+	Tap TapConfig `toml:"tap"`
+}
+
+// TapConfig is [tap]: the approval-tap endpoint the ticker runs. Devices are
+// the Tailscale node names (the part before the tailnet domain) allowed to
+// tap; a tap from anywhere else, this machine included, is refused. The
+// listener binds this machine's Tailscale IPv4 only.
+type TapConfig struct {
+	Enabled bool     `toml:"enabled"`
+	Port    int      `toml:"port"` // 0 takes defaultTapPort
+	Devices []string `toml:"devices"`
+}
+
+func (c TapConfig) port() int {
+	if c.Port == 0 {
+		return defaultTapPort
+	}
+	return c.Port
+}
+
+// validateTap fails closed: an enabled tap endpoint with no device allowlist
+// would take a tap from any tailnet node holding a link.
+func (c Config) validateTap() error {
+	t := c.Tap
+	if t.Port < 0 || t.Port > 65535 {
+		return fmt.Errorf("[tap] port %d is out of range", t.Port)
+	}
+	if t.Enabled && len(t.Devices) == 0 {
+		return errors.New("[tap] enabled needs devices: the Tailscale node names allowed to tap (see `tailscale status`)")
+	}
+	return nil
 }
 
 type AgentConfig struct {
@@ -399,6 +434,9 @@ func loadConfig() (Config, error) {
 		return cfg, err
 	}
 	if err := cfg.validateAgents(); err != nil {
+		return cfg, err
+	}
+	if err := cfg.validateTap(); err != nil {
 		return cfg, err
 	}
 	if cfg.Repo == "" {
