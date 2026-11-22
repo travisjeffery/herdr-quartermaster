@@ -1,0 +1,50 @@
+
+  Muse Code 1.4.25
+
+  Skills: 158 loaded · 1 warning · 32 details hidden (ctrl+o to expand)
+
+❯ Use the bash tool with sandbox_permissions set to require_escalated to run exactly: mkdir -p out2 && touch out2/hello.txt — do nothing else.
+
+  2 optional MCP servers unavailable (ctrl+o to expand)
+
+◆ Ran mkdir -p out2 && touch out2/hello.txt — denied
+  └ approval aborted
+    The user rejected this action. Don't retry it unless they ask.
+
+◆ Command was rejected at approval and did not run.
+
+◆ Worked for 1m 07s · 5:26 PM · 22/Nov
+
+❯ Use the bash tool with sandbox_permissions set to require_escalated to run exactly: mkdir -p out2 && touch out2/world.txt — do nothing else.
+
+◇ Calling tools (32s · esc to interrupt)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Would you like to run the following command?
+
+  $ mkdir -p out2 && touch out2/world.txt
+
+⟩ 1. Yes, proceed (y)
+  2. No, and tell Muse Code what to do differently (esc)
+Change approval defaults in /permissions
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  muse-wonder-full-1.0 · low · /tmp/muse-prompt-wide.X754L6 · Launch overrides
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
