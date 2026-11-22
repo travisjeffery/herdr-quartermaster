@@ -454,6 +454,11 @@ func (t Ticker) once(st *TickerState) error {
 		snap.Pending = append(snap.Pending, out.Prompts...)
 		t.relaunch(th, &snap, relaunch[agentName(id)], now)
 		for _, e := range out.Events {
+			// A parsable approval prompt's event carries its tap links, so
+			// what the coordinator relays to TJ is tappable as it stands.
+			if e.Kind == EventNeedsYou && th.Prompt != nil {
+				e.Summary += t.tapEventSuffix(th)
+			}
 			if err := writeEvent(e); err != nil {
 				t.log.Printf("inbox: %v", err)
 			}
@@ -817,6 +822,15 @@ func tickerRun(cfg Config) error {
 	logger := log.New(f, "", log.LstdFlags)
 	logger.Printf("ticker %s started, every %s, on %s", version, cfg.tick(), cfg.coordSocket())
 	t := newTicker(cfg, logger)
+	if cfg.Tap.Enabled {
+		// The tap endpoint rides the ticker: no new daemon. A bind failure
+		// (no tailnet, port taken) leaves the ticker running and taps off.
+		if ln, err := startTapServer(cfg.Tap, livePromptEnv(cfg, t.herdr), logger.Printf); err != nil {
+			logger.Printf("tap: %v (approval taps unavailable)", err)
+		} else {
+			defer ln.Close()
+		}
+	}
 	done := make(chan struct{})
 	defer close(done)
 	go t.side.run(done)

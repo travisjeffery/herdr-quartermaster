@@ -84,6 +84,12 @@ Usage:
                 [--by WHO] [--class N]                 if it is still the one with HASH; waits for it to clear
                                                        and notes the answer on the bead; N is the class of
                                                        the command it releases
+  quartermaster tap links <bead>                       signed one-time links, one per option, that answer the
+                                                       bead's prompt as TJ when tapped from an allowed phone
+                                                       (needs [tap] enabled; the ticker serves them, and adds
+                                                       them to the prompt's inbox event)
+  quartermaster tap serve                              run the tap endpoint in the foreground (the ticker
+                                                       runs it too when [tap] is on)
   quartermaster gate plan <file|-> [--expect op=N,...] print a pulumi preview --json or tofu show -json
                 [--target T]                           plan's class on target T (6/7 by [autonomy] prod, 8
                                                        delete/replace in prod or stateful, 9 widespread or
@@ -400,6 +406,8 @@ func run(args []string) error {
 			fmt.Println(msg)
 		}
 		return err
+	case "tap":
+		return tapCmd(cfg, livePromptEnv(cfg, h.on(cfg.coordSocket())), pos)
 	case "board":
 		return runBoard(cfg)
 	case "action":
