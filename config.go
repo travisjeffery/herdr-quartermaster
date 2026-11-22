@@ -166,8 +166,12 @@ type AgentConfig struct {
 // sandbox scrubs the environment (BEADS_DIR) and blocks gh's credentials, so
 // a sandboxed Muse worker can't use bd or open a PR. Its :auto-review profile
 // keeps the approval judge but lets the judge, not a human, decide, so an
-// unattended worker doesn't wait on a prompt nobody is watching.
+// unattended worker doesn't wait on a prompt nobody is watching. agy's Auto
+// mode is the same idea (a review judge for commands that would leave its
+// sandbox); it is agy's own default, pinned here so a saved /config mode
+// such as plan doesn't silently turn a worker into a planner.
 var defaultAgentArgs = map[string][]string{
+	"agy":  {"--mode", "auto"},
 	"muse": {"--disable-sandbox", "--permission-profile", ":auto-review"},
 	// pi: --approve trusts the worktree's own .pi resources, since a fresh
 	// worktree has no saved trust decision to skip the prompt with. The

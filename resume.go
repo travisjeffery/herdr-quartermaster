@@ -16,6 +16,7 @@ var resumeArgs = map[string][]string{
 	"codex":  {"resume", "--last"},
 	"muse":   {"resume", "--last"},
 	"pi":     nil,
+	"agy":    {"--continue"},
 }
 
 type worktreeLister func(repo string) ([]Worktree, error)

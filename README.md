@@ -343,8 +343,9 @@ lifecycle action.
   human ones. Both go to the worker; only a human review notifies you.
 - **Resume.** Herdr restarts don't relaunch agents. `quartermaster resume` restarts
   each claimed bead's agent in its worktree with `claude --continue`,
-  `codex resume --last`, `muse resume --last` or `pi --session-id <bead>` (the
-  bead's own pi session, by id), as whichever agent claimed it. `quartermaster context`
+  `codex resume --last`, `muse resume --last`, `pi --session-id <bead>` (the
+  bead's own pi session, by id) or `agy --continue`, as whichever agent
+  claimed it. `quartermaster context`
   lists resumable threads, stale claims (in progress, no agent, worktree or
   PR, untouched 7 days) and other claims separately.
 - **Several repos.** Beads labelled `repo:<name>` work in that repo from
@@ -357,9 +358,9 @@ lifecycle action.
   missing the key.
 - **Choosing the agent.** `worker_agent = "auto"` picks Codex only when both
   agents' usage readings are under 6 hours old and Codex has more left;
-  otherwise Claude. It never picks Muse or pi, which record no usage reading
-  to compare; ask for them with `--agent muse|pi` or `worker_agent = "muse"`
-  or `"pi"`.
+  otherwise Claude. It never picks Muse, pi or agy, which record no usage
+  reading to compare; ask for them with `--agent muse|pi|agy` or
+  `worker_agent = "muse"`, `"pi"` or `"agy"`.
 - **Sweep** lists linked worktrees whose PR merged, whose bead is closed, or
   that git reports prunable. `--yes` removes only the ones that are clean,
   fully pushed, have no agent in them and whose bead isn't still active. It
@@ -553,8 +554,8 @@ Moving work forward, on the selected bead:
   answered from the board; `↵` focuses a TUI worker. Native RPC views have no
   approval controls: use the existing `prompt`/`answer` flow separately.
 - `↵` views native RPC history; for other rows it focuses the bead's agent,
-  or starts one. `c`/`x`/`m` start Claude, Codex or Muse; `R` resumes an exited
-  agent in its worktree.
+  or starts one. `c`/`x`/`m`/`i`/`t` start Claude, Codex, Muse, pi or agy;
+  `R` resumes an exited agent in its worktree.
 - `+` creates a child task; `C` closes the bead with a reason.
 - `y` copies the id, `p` a pending `RUN:` command, `o` opens the PR, `l` the
   Linear issue (set `linear_workspace` unless the bead's notes link it), `b`
@@ -605,7 +606,8 @@ Once it's installed (see below), the first ten minutes:
 
 Herdr 0.9.1+, [`bd`](https://github.com/steveyegge/beads) with a custom
 `needs_me` status (`bd config set status.custom needs_me`), `gh` logged in, and
-any of Claude Code, Codex, Muse Code and pi. Linux or macOS, on amd64 or arm64. Go
+any of Claude Code, Codex, Muse Code, pi and the Antigravity CLI (`agy`).
+Linux or macOS, on amd64 or arm64. Go
 is only needed to build from source.
 
 ### Muse Code workers
@@ -674,6 +676,21 @@ between usable. Older catalogs have `claude-opus-5-5` but not
 ] } } }
 ```
 
+### Antigravity (agy) workers
+
+Google's [Antigravity](https://antigravity.google/) CLI is opt-in (details,
+sign-in and caveats in [docs/agy.md](docs/agy.md)): `--agent agy`,
+`worker_agent = "agy"` or `coordinator_agent = "agy"`. Herdr starts and
+tracks it itself (`--kind agy`); the brief is prompted into its interactive
+pane session, never its stdin print mode, which waits on a prompt nobody
+types. Sign in first (`agy`, then `agy models` should list models):
+quartermaster never touches Antigravity's own auth state. Without an
+`[agents.agy]` table, agy runs `--mode auto` (its review-judge mode, pinned
+so a saved `/config` mode doesn't turn workers into planners); pick a
+Gemini model with `--model` in `[agents.agy] args`, using a name
+`agy models` lists. Resume continues the worktree's last conversation
+(`agy --continue`), and `t` in the board starts agy.
+
 ## Install
 
 ```sh
@@ -724,8 +741,9 @@ type = "plugin_action"
 command = "quartermaster.coordinator"
 ```
 
-`quartermaster.focus-clipboard` (Claude), `quartermaster.focus-clipboard-codex` and
-`quartermaster.focus-clipboard-muse` and `quartermaster.focus-clipboard-pi` focus or start the bead whose id is on the clipboard, if you want keys for those too.
+`quartermaster.focus-clipboard` (Claude), `quartermaster.focus-clipboard-codex`,
+`quartermaster.focus-clipboard-muse`, `quartermaster.focus-clipboard-pi` and
+`quartermaster.focus-clipboard-agy` focus or start the bead whose id is on the clipboard, if you want keys for those too.
 
 ### Upgrading from flatcircle, kelpie or shepherd
 
@@ -759,7 +777,7 @@ too, so unlink the old plugin, link or install this one, and rename
 ```toml
 repo = "~/src/myproject"
 branch_prefix = "tj/"     # worker branches are <prefix><bead>-<slug>
-worker_agent = "claude"   # "codex", "muse", "pi", or "auto": Claude or Codex, whichever has more quota left
+worker_agent = "claude"   # "codex", "muse", "pi", "agy", or "auto": Claude or Codex, whichever has more quota left
 coordinator_agent = "claude"
 tick_seconds = 15         # how often the ticker checks threads
 gh_seconds = 60           # how often it checks PRs
@@ -779,6 +797,9 @@ coordinator_rules = ["Ask before touching the staging cluster."]  # extra bullet
 
 [agents.muse]             # per-kind args for the agent's own CLI, on dispatch, resume and the coordinator
 args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
+
+[agents.agy]              # Antigravity: Auto mode (the default) on a Gemini model (`agy models` lists names)
+args = ["--mode", "auto", "--model", "gemini-4-neon-high"]
 
 [agents.pi]               # pi's defaults: the virtual auto models (Claude per turn, OpenAI on low quota)
 args = ["--approve", "--model", "quartermaster/worker-auto"]
@@ -830,8 +851,10 @@ and replace that kind's defaults. Muse defaults to the args above:
 `gh`'s credentials, so a sandboxed worker can't use `bd` or open a PR; and the
 `:auto-review` permission profile, which keeps Muse's approval judge but lets
 it decide instead of waiting on a human nobody is watching. Set `args = []`
-for Muse's own defaults. pi defaults to its models above. Other kinds start
-with no extra args.
+for Muse's own defaults. pi defaults to its models above. agy defaults to
+`--mode auto`, its review-judge mode, pinned so a mode saved in agy's
+`/config` doesn't silently apply to workers. Other kinds start with no extra
+args.
 
 `[agents.<kind>] coordinator_args` replace `args` when that kind runs the
 coordinator, and only then: to run the coordinator on a different model from
@@ -842,8 +865,9 @@ the workers, say. Unset, the coordinator starts with `args` like a worker
 `[agents.<kind>] bypass_args` follow `args` only when a worker starts on this
 machine under a 9 lease; the coordinator never gets them. They default to
 `--dangerously-skip-permissions` for Claude and
-`--dangerously-bypass-approvals-and-sandbox` for Codex; Muse has none, and
-`bypass_args = []` keeps a kind off bypass. A launch mode is fixed when the
+`--dangerously-bypass-approvals-and-sandbox` for Codex; Muse, pi and agy have
+none (agy's own switch, `--dangerously-skip-permissions`, is there if you
+name it), and `bypass_args = []` keeps a kind off bypass. A launch mode is fixed when the
 agent starts, so when a worker's level crosses 9 (set, lowered, lease expired
 or autonomy turned off) the ticker waits for it to go idle, asks it to
 `/exit`, and resumes it with the right args, keeping the conversation. A worker
@@ -1131,6 +1155,6 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster bd-proxy --host NAME [--bd PATH]` | The forced command behind a worker host's Beads key in `authorized_keys`: runs the host's `bd` request (an allowlisted subcommand, `BEADS_DIR` pinned, one line per request in `bd-proxy.log` in the state dir). The host side is [`scripts/bd-shim`](scripts/bd-shim). See [worker hosts §5](docs/design/worker-hosts.md#5-beads-one-database-for-every-host). |
 | `quartermaster version` | Print the version. |
 
-`K` is `claude`, `codex`, `muse`, `pi` or `auto`.
+`K` is `claude`, `codex`, `muse`, `pi`, `agy` or `auto`.
 
 `qm` is a short alias for `quartermaster`: `qm context` is `quartermaster context`.

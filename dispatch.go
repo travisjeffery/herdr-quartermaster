@@ -13,7 +13,7 @@ import (
 
 // kinds are the agents quartermaster starts, by their Herdr kind, which is
 // also the executable and the actor a worker claims its bead as.
-var kinds = []string{"claude", "codex", "muse", "pi"}
+var kinds = []string{"claude", "codex", "muse", "pi", "agy"}
 
 var validKinds = func() map[string]bool {
 	m := map[string]bool{}
@@ -23,7 +23,7 @@ var validKinds = func() map[string]bool {
 	return m
 }()
 
-// kindList names the kinds for messages: "claude, codex, muse or pi".
+// kindList names the kinds for messages: "claude, codex, muse, pi or agy".
 func kindList(extra ...string) string {
 	all := append(slices.Clone(kinds), extra...)
 	return strings.Join(all[:len(all)-1], ", ") + " or " + all[len(all)-1]

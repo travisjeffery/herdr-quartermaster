@@ -336,7 +336,7 @@ func helpLines(gc bool) []string {
 		"",
 		"  ↵         view native RPC history; otherwise focus/start (confirms start)",
 		"  V         read-only native history (including parked/stopped workers)",
-		"  c x m i   start claude, codex, muse or pi (confirms)",
+		"  c x m i t start claude, codex, muse, pi or agy (confirms)",
 		"  R         resume an exited agent in its worktree (confirms)",
 		"  a         add a note                        A   answer an idle worker (confirms)",
 		"  n         toggle the next label             S   set status",

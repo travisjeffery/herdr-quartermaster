@@ -42,7 +42,7 @@ type PromptOption struct {
 var (
 	optionRe    = regexp.MustCompile(`^(\s*)([❯›>⟩]\s*)?(\d+)\.\s+(.*)$`)
 	cursorRe    = regexp.MustCompile(`^(\s*)[❯›>⟩]\s+(.*)$`)
-	footerRe    = regexp.MustCompile(`(?i)\b(esc|enter) to\b|press enter|enter to confirm`)
+	footerRe    = regexp.MustCompile(`(?i)\b(esc|enter) to\b|press enter|\benter (?:to )?confirm\b`)
 	countdownRe = regexp.MustCompile(`will automatically deny this request in (.+?), to avoid`)
 )
 
