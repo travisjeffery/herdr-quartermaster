@@ -313,6 +313,11 @@ type promptEnv struct {
 	read  func(host, pane string) (string, error)
 	keys  func(host, pane string, keys ...string) error
 	note  func(id, text string) error
+	// setStatus returns an answered needs_me bead to in_progress (tapquestion.go).
+	setStatus func(id, status string) error
+	// tell delivers text to a worker at rest, over its control socket when
+	// it has one: how a tap answer reaches the worker it unblocks.
+	tell  func(host string, a *Agent, text string) error
 	sleep func(time.Duration)
 	// level is the bead's effective autonomy level and the cap that lowered it.
 	level func(id string) (int, string)
@@ -334,7 +339,12 @@ func livePromptEnv(cfg Config, h Herdr) promptEnv {
 		keys: func(host, pane string, keys ...string) error {
 			return cfg.herdrOn(h, host).SendKeys(pane, keys...)
 		},
-		note:  bd.Note,
+		note:      bd.Note,
+		setStatus: bd.SetStatus,
+		tell: func(host string, a *Agent, text string) error {
+			_, err := promptPiAgent(cfg.herdrOn(h, host), *a, text)
+			return err
+		},
 		sleep: time.Sleep,
 		piAsk: piAskOf,
 		piAnswer: func(a *Agent, id string, choice int, by string) error {

@@ -455,9 +455,12 @@ func (t Ticker) once(st *TickerState) error {
 		t.relaunch(th, &snap, relaunch[agentName(id)], now)
 		for _, e := range out.Events {
 			// A parsable approval prompt's event carries its tap links, so
-			// what the coordinator relays to TJ is tappable as it stands.
+			// what the coordinator relays to TJ is tappable as it stands;
+			// a needs_me OPTIONS question's event carries its own.
 			if e.Kind == EventNeedsYou && th.Prompt != nil {
 				e.Summary += t.tapEventSuffix(th)
+			} else if e.Kind == EventNeedsYou {
+				e.Summary += t.tapQuestionEventSuffix(th)
 			}
 			if err := writeEvent(e); err != nil {
 				t.log.Printf("inbox: %v", err)
