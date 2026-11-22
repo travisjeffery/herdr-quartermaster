@@ -24,17 +24,19 @@ import (
 	"time"
 )
 
-// Approval taps: TJ answers a worker's approval prompt from his phone by
-// tapping a signed, one-time link. The link is bound to one bead, one prompt
-// instance (its --expect hash) and one option; the handler runs on this
-// machine's Tailscale address only, checks the tapping device with
-// `tailscale whois` against [tap] devices, and answers through
-// answerPromptVia, so every guard of `quartermaster answer` — the hash
-// re-read, the wait for the prompt to clear, the PROMPT ANSWERED note and
-// the journal — applies unchanged. A tap is TJ's answer (`--by TJ`); the
-// note records the device as the identity evidence. See
-// docs/approval-taps.md. Off unless [tap] enabled; only prompts parsePrompt
-// recognizes (or a pi worker's ask) can be tapped.
+// Approval taps: TJ answers a worker's approval prompt — or its needs_me
+// question, when the worker wrote it with enumerated options
+// (tapquestion.go) — from his phone by tapping a signed, one-time link. The
+// link is bound to one bead, one prompt or question instance (its --expect
+// hash) and one option; the handler runs on this machine's Tailscale
+// address only, checks the tapping device with `tailscale whois` against
+// [tap] devices, and answers through answerPromptVia or answerNeedsMeVia,
+// so every guard of the guarded paths — the hash re-read, the wait for the
+// prompt to clear, the audit note and the journal — applies unchanged. A
+// tap is TJ's answer (`--by TJ`); the note records the device as the
+// identity evidence. See docs/approval-taps.md. Off unless [tap] enabled;
+// only prompts parsePrompt recognizes (or a pi worker's ask) and questions
+// in the OPTIONS convention can be tapped.
 
 const defaultTapPort = 8642
 
@@ -80,9 +82,16 @@ func tapSecret() ([]byte, error) {
 	return b, f.Close()
 }
 
-// tapClaims is what a link carries, signed: one prompt instance of one bead,
-// one option, an expiry and a nonce spent on first use.
+// What a tap answers: a worker's approval prompt, or its needs_me question.
+const (
+	tapKindPrompt   = "p"
+	tapKindQuestion = "q"
+)
+
+// tapClaims is what a link carries, signed: one prompt or question instance
+// of one bead, one option, an expiry and a nonce spent on first use.
 type tapClaims struct {
+	Kind   string // tapKindPrompt or tapKindQuestion
 	Bead   string
 	Hash   string
 	Choice string // the option's number, as answerPrompt takes it
@@ -91,7 +100,7 @@ type tapClaims struct {
 }
 
 func (c tapClaims) payload() string {
-	return strings.Join([]string{c.Bead, c.Hash, c.Choice, strconv.FormatInt(c.Exp.Unix(), 10), c.Nonce}, "|")
+	return strings.Join([]string{c.Kind, c.Bead, c.Hash, c.Choice, strconv.FormatInt(c.Exp.Unix(), 10), c.Nonce}, "|")
 }
 
 func tapSign(secret []byte, payload string) string {
@@ -101,6 +110,13 @@ func tapSign(secret []byte, payload string) string {
 }
 
 func mintTapToken(secret []byte, bead, hash, choice string, now time.Time) (string, tapClaims, error) {
+	return mintTapTokenKind(secret, tapKindPrompt, bead, hash, choice, now)
+}
+
+func mintTapTokenKind(secret []byte, kind, bead, hash, choice string, now time.Time) (string, tapClaims, error) {
+	if kind != tapKindPrompt && kind != tapKindQuestion {
+		return "", tapClaims{}, fmt.Errorf("tap link kind %q is not usable", kind)
+	}
 	for _, f := range []string{bead, hash, choice} {
 		if f == "" || strings.Contains(f, "|") {
 			return "", tapClaims{}, fmt.Errorf("tap link field %q is not usable", f)
@@ -110,7 +126,7 @@ func mintTapToken(secret []byte, bead, hash, choice string, now time.Time) (stri
 	if _, err := rand.Read(n[:]); err != nil {
 		return "", tapClaims{}, err
 	}
-	c := tapClaims{Bead: bead, Hash: hash, Choice: choice, Exp: now.Add(tapTTL), Nonce: hex.EncodeToString(n[:])}
+	c := tapClaims{Kind: kind, Bead: bead, Hash: hash, Choice: choice, Exp: now.Add(tapTTL), Nonce: hex.EncodeToString(n[:])}
 	p := c.payload()
 	return base64.RawURLEncoding.EncodeToString([]byte(p)) + "." + tapSign(secret, p), c, nil
 }
@@ -130,14 +146,18 @@ func parseTapToken(secret []byte, token string, now time.Time) (tapClaims, error
 		return tapClaims{}, errors.New("this tap link's signature does not check out")
 	}
 	f := strings.Split(string(p), "|")
-	if len(f) != 5 || f[0] == "" || f[1] == "" || f[2] == "" || f[4] == "" {
+	// Links minted before question taps carry no kind: five fields, a prompt.
+	if len(f) == 5 {
+		f = append([]string{tapKindPrompt}, f...)
+	}
+	if len(f) != 6 || (f[0] != tapKindPrompt && f[0] != tapKindQuestion) || f[1] == "" || f[2] == "" || f[3] == "" || f[5] == "" {
 		return tapClaims{}, errors.New("not a tap link")
 	}
-	exp, err := strconv.ParseInt(f[3], 10, 64)
+	exp, err := strconv.ParseInt(f[4], 10, 64)
 	if err != nil {
 		return tapClaims{}, errors.New("not a tap link")
 	}
-	c := tapClaims{Bead: f[0], Hash: f[1], Choice: f[2], Exp: time.Unix(exp, 0), Nonce: f[4]}
+	c := tapClaims{Kind: f[0], Bead: f[1], Hash: f[2], Choice: f[3], Exp: time.Unix(exp, 0), Nonce: f[5]}
 	if now.After(c.Exp) {
 		return c, errTapExpired
 	}
@@ -331,7 +351,11 @@ func (s *tapServer) handleTap(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		s.confirm(w, claims, ident)
+		if claims.Kind == tapKindQuestion {
+			s.confirmQuestion(w, claims, ident)
+		} else {
+			s.confirm(w, claims, ident)
+		}
 	case http.MethodPost:
 		s.answer(w, claims, ident)
 	default:
@@ -368,10 +392,44 @@ func (s *tapServer) confirm(w http.ResponseWriter, c tapClaims, ident tapIdentit
 	}
 }
 
-// answer spends the nonce, then hands over to the same guarded path as
-// `quartermaster answer ... --by TJ`: it re-reads the prompt, refuses a
-// changed one, waits for it to clear, and notes the answer on the bead with
-// the tapping device as the identity evidence.
+// confirmQuestion shows the bead's question as it stands now, re-read from
+// its notes, with a button that answers it. Like a prompt's confirm page, a
+// GET spends nothing, and a stale link — the bead answered, the question
+// changed, the worker working again — is refused here first.
+func (s *tapServer) confirmQuestion(w http.ResponseWriter, c tapClaims, ident tapIdentity) {
+	b, q, err := beadQuestion(s.env, c.Bead)
+	if err != nil {
+		s.refuse(w, http.StatusConflict, c.Bead, err.Error())
+		return
+	}
+	if q.Hash != c.Hash {
+		s.refuse(w, http.StatusConflict, c.Bead, fmt.Sprintf("the question changed: the bead now asks [%s] %s, not [%s]", q.Hash, q.Summary(), c.Hash))
+		return
+	}
+	if _, a := questionWorker(s.env, b); a != nil && a.Status == "working" {
+		s.refuse(w, http.StatusConflict, c.Bead, errWorkerWorking.Error())
+		return
+	}
+	o, err := q.choose(c.Choice)
+	if err != nil {
+		s.refuse(w, http.StatusConflict, c.Bead, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	data := struct {
+		Bead, Summary, Text, Option, Device string
+		Number                              int
+	}{c.Bead, q.Summary(), q.String(), o.Label, ident.Device, o.Number}
+	if err := tapConfirmTmpl.Execute(w, data); err != nil {
+		s.logf("tap: confirm page: %v", err)
+	}
+}
+
+// answer spends the nonce, then hands over to the same guarded paths as
+// `quartermaster answer ... --by TJ` for a prompt and a coordinator's
+// relayed answer for a question: each re-reads its target, refuses a
+// changed one, and notes the answer on the bead with the tapping device as
+// the identity evidence.
 func (s *tapServer) answer(w http.ResponseWriter, c tapClaims, ident tapIdentity) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -385,10 +443,19 @@ func (s *tapServer) answer(w http.ResponseWriter, c tapClaims, ident tapIdentity
 		return
 	}
 	via := "tap (device " + ident.Device + ")"
-	msg, err := answerPromptVia(s.env, c.Bead, c.Choice, c.Hash, "TJ", -1, via)
-	if err != nil {
-		s.refuse(w, http.StatusConflict, c.Bead, "the tap was recorded but the prompt was not answered: "+err.Error())
-		return
+	var msg string
+	if c.Kind == tapKindQuestion {
+		msg, err = answerNeedsMeVia(s.env, c.Bead, c.Choice, c.Hash, via)
+		if err != nil {
+			s.refuse(w, http.StatusConflict, c.Bead, "the tap was recorded but the question was not answered: "+err.Error())
+			return
+		}
+	} else {
+		msg, err = answerPromptVia(s.env, c.Bead, c.Choice, c.Hash, "TJ", -1, via)
+		if err != nil {
+			s.refuse(w, http.StatusConflict, c.Bead, "the tap was recorded but the prompt was not answered: "+err.Error())
+			return
+		}
 	}
 	s.logf("tap: %s", msg)
 	tapPage(w, http.StatusOK, "Answered", msg+".")
@@ -436,9 +503,17 @@ type tapLink struct {
 }
 
 func mintTapLinks(secret []byte, base, bead string, p ApprovalPrompt, now time.Time) ([]tapLink, error) {
+	return mintTapLinksFor(secret, base, tapKindPrompt, bead, p.Hash, p.Options, now)
+}
+
+func mintQuestionTapLinks(secret []byte, base, bead string, q NeedsMeQuestion, now time.Time) ([]tapLink, error) {
+	return mintTapLinksFor(secret, base, tapKindQuestion, bead, q.Hash, q.Options, now)
+}
+
+func mintTapLinksFor(secret []byte, base, kind, bead, hash string, opts []PromptOption, now time.Time) ([]tapLink, error) {
 	var links []tapLink
-	for _, o := range p.Options {
-		tok, c, err := mintTapToken(secret, bead, p.Hash, strconv.Itoa(o.Number), now)
+	for _, o := range opts {
+		tok, c, err := mintTapTokenKind(secret, kind, bead, hash, strconv.Itoa(o.Number), now)
 		if err != nil {
 			return nil, err
 		}
@@ -448,10 +523,11 @@ func mintTapLinks(secret []byte, base, bead string, p ApprovalPrompt, now time.T
 }
 
 // tapLinksText is `quartermaster tap links <bead>`: one signed link per
-// option of the prompt the worker is showing now, for the coordinator to
-// relay verbatim or TJ to open himself. It mints nothing when taps are off,
-// when no parsable prompt is showing, or when this machine has no tailnet
-// address for the links to point at.
+// option of the prompt the worker is showing now — or, when it shows none,
+// of the OPTIONS question its needs_me bead ends with — for the coordinator
+// to relay verbatim or TJ to open himself. It mints nothing when taps are
+// off, when neither is waiting, or when this machine has no tailnet address
+// for the links to point at.
 func tapLinksText(cfg Config, env promptEnv, id string, now time.Time) (string, error) {
 	if !cfg.Tap.Enabled {
 		return "", errors.New("approval taps are off: set [tap] enabled with devices in config.toml (docs/approval-taps.md)")
@@ -459,9 +535,15 @@ func tapLinksText(cfg Config, env promptEnv, id string, now time.Time) (string, 
 	if err := cfg.validateTap(); err != nil {
 		return "", err
 	}
-	p, _, a, err := workerPrompt(env, id)
-	if err != nil {
-		return "", err
+	p, _, a, perr := workerPrompt(env, id)
+	if perr != nil {
+		// No prompt waiting: a needs_me bead's OPTIONS question is the
+		// other thing a tap can answer. Without one the prompt error is
+		// the answer, exactly as before questions could be tapped.
+		if _, _, qerr := beadQuestion(env, id); qerr != nil {
+			return "", perr
+		}
+		return questionLinksText(cfg, env, id, now)
 	}
 	secret, err := tapSecret()
 	if err != nil {
@@ -477,6 +559,33 @@ func tapLinksText(cfg Config, env promptEnv, id string, now time.Time) (string, 
 	}
 	var s strings.Builder
 	fmt.Fprintf(&s, "%s (%s) is at a prompt [%s]\n%s", a.Name, a.Status, p.Hash, p.String())
+	fmt.Fprintf(&s, "tap to answer as TJ (one use each, expires %s):\n", links[0].Exp.Format("15:04"))
+	for _, l := range links {
+		fmt.Fprintf(&s, "%d %s — %s\n", l.Option.Number, l.Option.Label, l.URL)
+	}
+	return s.String(), nil
+}
+
+// questionLinksText is tapLinksText for a bead's needs_me question.
+func questionLinksText(cfg Config, env promptEnv, id string, now time.Time) (string, error) {
+	_, q, err := beadQuestion(env, id)
+	if err != nil {
+		return "", err
+	}
+	secret, err := tapSecret()
+	if err != nil {
+		return "", err
+	}
+	base, err := tapBaseURL(cfg.Tap)
+	if err != nil {
+		return "", err
+	}
+	links, err := mintQuestionTapLinks(secret, base, id, q, now)
+	if err != nil {
+		return "", err
+	}
+	var s strings.Builder
+	fmt.Fprintf(&s, "%s is marked needs_me [%s]\n%s", id, q.Hash, q.String())
 	fmt.Fprintf(&s, "tap to answer as TJ (one use each, expires %s):\n", links[0].Exp.Format("15:04"))
 	for _, l := range links {
 		fmt.Fprintf(&s, "%d %s — %s\n", l.Option.Number, l.Option.Label, l.URL)
@@ -516,6 +625,41 @@ func (t Ticker) tapEventSuffix(th Thread) string {
 	// shows them again before anything is answered.
 	actual := shortTitle(strings.Join(th.Prompt.Lines, " / "), 300)
 	return "; prompt: " + actual + "; tap to answer as TJ (one use each, expires " + links[0].Exp.Format("15:04") + "): " + strings.Join(parts, " · ")
+}
+
+// tapQuestionEventSuffix is tapEventSuffix for a needs_me thread's OPTIONS
+// question: the question and one link per option ride its needs_you inbox
+// event, so what the coordinator relays is tappable as it stands. "" for a
+// free-text question, which then travels exactly as it always has.
+func (t Ticker) tapQuestionEventSuffix(th Thread) string {
+	if !t.cfg.Tap.Enabled {
+		return ""
+	}
+	q, ok := liveQuestion(th)
+	if !ok {
+		return ""
+	}
+	secret, err := tapSecret()
+	if err != nil {
+		t.log.Printf("tap: %v", err)
+		return ""
+	}
+	base, err := tapBaseURL(t.cfg.Tap)
+	if err != nil {
+		t.log.Printf("tap: %v", err)
+		return ""
+	}
+	links, err := mintQuestionTapLinks(secret, base, th.Bead.ID, q, time.Now())
+	if err != nil {
+		t.log.Printf("tap: %v", err)
+		return ""
+	}
+	parts := make([]string, 0, len(links))
+	for _, l := range links {
+		parts = append(parts, fmt.Sprintf("%d %s %s", l.Option.Number, shortTitle(l.Option.Label, 50), l.URL))
+	}
+	question := shortTitle(strings.Join(q.Lines, " / "), 300)
+	return "; question: " + question + "; tap to answer as TJ (one use each, expires " + links[0].Exp.Format("15:04") + "): " + strings.Join(parts, " · ")
 }
 
 // startTapServer binds the tap endpoint to the tailnet address and serves in

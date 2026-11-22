@@ -3,7 +3,9 @@
 A worker stopped at an approval prompt used to mean typing an answer into the
 coordinator session ("bead: 1"), which meant being at a keyboard with that
 session open. Approval taps make the same decision one tap per option on a
-phone, with the guards of `quartermaster answer` unchanged.
+phone, with the guards of `quartermaster answer` unchanged. The same links
+also answer a worker's `needs_me` question when it is written with
+enumerated options (see "needs_me questions" below).
 
 ## How it works
 
@@ -46,10 +48,10 @@ A tap changes something only when all of these hold, checked in this order —
 a failure at any step spends nothing and is journalled (`TAP REFUSED: …` in
 `journal.jsonl`):
 
-1. **Signature.** The link is `bead | prompt hash | option | expiry | nonce`,
-   HMAC-signed with a key quartermaster generated into the state dir
-   (`tap/secret`, mode 0600). Deleting that file revokes every link. Links
-   live 15 minutes.
+1. **Signature.** The link is `kind | bead | prompt-or-question hash |
+   option | expiry | nonce`, HMAC-signed with a key quartermaster generated
+   into the state dir (`tap/secret`, mode 0600). Deleting that file revokes
+   every link. Links live 15 minutes.
 2. **Tailnet source.** The request arrived from a Tailscale address
    (100.64.0.0/10 or the tailnet IPv6 range). The listener binds the tailnet
    address, so LAN requests cannot even connect; this check also keeps a
@@ -65,7 +67,9 @@ a failure at any step spends nothing and is journalled (`TAP REFUSED: …` in
 5. **Same prompt.** The answer path re-reads the worker's screen and refuses
    when the prompt's hash differs from the link's, exactly as `--expect`
    does. A tap for a prompt that changed, cleared, or was answered another
-   way changes nothing.
+   way changes nothing. A question tap re-reads the bead instead: it must
+   still be `needs_me`, still end in the same question hash, and its worker
+   must not already be working again.
 
 A tap answers as TJ (`--by TJ` semantics): it is not gated by the bead's
 autonomy level or the class of the command it releases, because it *is* TJ
@@ -104,14 +108,67 @@ inbox item as before, with no links. Covering muse needs a captured muse
 prompt screen as a parser fixture; once `parsePrompt` returns the prompt,
 taps cover it for free, since they key off the parsed prompt and its hash.
 
-`needs_me` questions are not covered either. They are free text in a bead's
-notes, with no machine-readable options to mint one link each from. Covering
-them needs an options convention in the question note; the token, device
-check, and endpoint here would carry it unchanged.
+`needs_me` questions are covered when the worker writes them with
+enumerated options, in the convention below. Free-text questions keep
+travelling exactly as they always have.
 
 Prompts on remote worker hosts work the same as local ones: the answer path
 reads and keys the worker wherever it runs, and only the endpoint's machine
 needs the tailnet address.
+
+## needs_me questions
+
+A worker that needs a decision with enumerable options writes its question
+as one note (workers are briefed on this form):
+
+```
+QUESTION: Ship to all regions or one first? Recommendation: 2 — one region
+first, because the new alerts are unproven.
+OPTIONS:
+1. All regions at once
+2. One region first, then the rest
+CLASS: 7 — production rollout
+```
+
+The `CLASS:` line is the one a `needs_me` question already carries, and may
+sit among the question lines instead of after the options; a `CRITICAL:`
+line immediately before `QUESTION:` stays part of the question. The ticker
+parses only the **last** such block, and only while nothing but an optional
+`CLASS:` line follows it — any later note is the thread moving on, and the
+block is history. `RUN:` beads never get question taps. When the block is
+live, the bead's needs-you inbox item carries the question and one signed
+link per option, like a prompt's; `quartermaster tap links <bead>` mints
+the same links when no approval prompt is showing. The coordinator's
+context shows the question and its options.
+
+A question tap goes through the same endpoint and the same five checks; the
+link's hash is taken over the question's lines, its options and its class,
+and binds it to that question instance. The confirm page shows the question
+re-read from the bead. Pressing the button does what the coordinator does
+when TJ answers in the coordinator session, in this order:
+
+1. Notes the answer on the bead —
+   `NEEDS_ME ANSWERED: 2 One region first… to Ship to all regions… [hash] by TJ via tap (device iphone181)` —
+   and journals it.
+2. Returns the bead to `in_progress`.
+3. Prompts the worker with the answer (over its control socket when it has
+   one), so the tap, not a later coordinator message, unblocks it.
+
+The stale guards are the needs_me analogues of a changed prompt: the tap is
+refused when the bead has left `needs_me`, when the question's hash has
+changed (the worker edited or re-asked it), or when the worker is already
+working again — it may have its answer another way, and that is the state
+in which the ticker resumes it on its own. A worker at rest is prompted; a
+worker blocked at an approval prompt, or one that is no longer running, is
+never typed into — the answer stands on the bead, a follow-up note says it
+was not prompted, and the result page says so too.
+
+As with prompts, a tap is TJ deciding, so it is not gated by the bead's
+autonomy class; the `CLASS:` line is shown on the confirm page (as part of
+the question) so the decision is made with the class of what each option
+authorizes in view. That includes `CRITICAL:` questions: they are reserved
+for TJ, and a tap *is* TJ. The coordinator's own rules for answering
+`needs_me` questions are unchanged.
 
 ## Rollback and failure modes
 

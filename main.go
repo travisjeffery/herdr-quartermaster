@@ -85,9 +85,10 @@ Usage:
                                                        and notes the answer on the bead; N is the class of
                                                        the command it releases
   quartermaster tap links <bead>                       signed one-time links, one per option, that answer the
-                                                       bead's prompt as TJ when tapped from an allowed phone
-                                                       (needs [tap] enabled; the ticker serves them, and adds
-                                                       them to the prompt's inbox event)
+                                                       bead's prompt (or its needs_me OPTIONS question) as
+                                                       TJ when tapped from an allowed phone (needs [tap]
+                                                       enabled; the ticker serves them, and adds them to
+                                                       the prompt's or question's inbox event)
   quartermaster tap serve                              run the tap endpoint in the foreground (the ticker
                                                        runs it too when [tap] is on)
   quartermaster gate plan <file|-> [--expect op=N,...] print a pulumi preview --json or tofu show -json

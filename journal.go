@@ -30,9 +30,11 @@ const (
 	journalCheck   = "check"
 	// journalVerify is a verifier verdict on closing a bead (accept.go).
 	journalVerify = "verify"
-	// journalTap is a refused approval tap (tap.go): answered taps are
-	// journalPrompt, like every prompt answer.
+	// journalTap is a refused approval tap (tap.go): answered prompt taps
+	// are journalPrompt, like every prompt answer.
 	journalTap = "tap"
+	// journalNeedsMe is an answered needs_me question tap (tapquestion.go).
+	journalNeedsMe = "needs_me"
 )
 
 type journalRecord struct {
