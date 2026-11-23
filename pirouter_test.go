@@ -71,7 +71,7 @@ func TestWriteQuotaSnapshot(t *testing.T) {
 	if err := json.Unmarshal(b, &snap); err != nil {
 		t.Fatal(err)
 	}
-	if snap.Claude != nil || snap.OpenAI != nil {
+	if snap.Antigravity != nil || snap.Claude != nil || snap.OpenAI != nil {
 		t.Errorf("no local readings should snapshot as null: %s", b)
 	}
 	// Same readings a minute later: no rewrite (mtime stands).
@@ -81,6 +81,33 @@ func TestWriteQuotaSnapshot(t *testing.T) {
 	}
 	if fi2, _ := os.Stat(piQuotaSnapshotPath()); !fi2.ModTime().Equal(fi1.ModTime()) {
 		t.Error("unchanged snapshot was rewritten")
+	}
+	// Writing an Antigravity observation updates quota.json with fresh antigravity headroom.
+	obsDir := filepath.Join(home, ".local", "state", "herdr", "plugins", "herdr-agent-quota")
+	if err := os.MkdirAll(obsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	obsData, err := os.ReadFile("testdata/agy-statusline.observation.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(obsDir, "agy-statusline.observation.json"), obsData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	obsNow := time.Unix(1795474900, 0)
+	if err := writeQuotaSnapshot(obsNow); err != nil {
+		t.Fatal(err)
+	}
+	b, err = os.ReadFile(piQuotaSnapshotPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap2 quotaSnapshot
+	if err := json.Unmarshal(b, &snap2); err != nil {
+		t.Fatal(err)
+	}
+	if snap2.Antigravity == nil || !snap2.Antigravity.Fresh || snap2.Antigravity.HeadroomPct == nil || *snap2.Antigravity.HeadroomPct < 94.07 || *snap2.Antigravity.HeadroomPct > 94.09 {
+		t.Errorf("antigravity snapshot = %+v, want fresh ~94.08%%", snap2.Antigravity)
 	}
 }
 
@@ -96,12 +123,14 @@ func TestWritePiRouterConfig(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
-	want := piRouterConfig{
-		WorkerModel: piWorkerModel, CoordinatorModel: piCoordinatorModel, FallbackModel: piFallbackModel,
-		ThresholdPct: 20, RecoverPct: 30, QuotaMaxAgeSecs: int64(quotaMaxAge.Seconds()),
-	}
-	if got != want {
-		t.Errorf("router config = %+v, want %+v", got, want)
+	wantWorker := []string{piAntigravityModel, piWorkerModel, piFallbackModel}
+	wantCoord := []string{piAntigravityModel, piCoordinatorModel, piFallbackModel}
+	if strings.Join(got.WorkerModels, ",") != strings.Join(wantWorker, ",") ||
+		strings.Join(got.CoordinatorModels, ",") != strings.Join(wantCoord, ",") ||
+		got.WorkerModel != piAntigravityModel || got.CoordinatorModel != piAntigravityModel ||
+		got.FallbackModel != piFallbackModel || got.ThresholdPct != 20 || got.RecoverPct != 30 ||
+		got.QuotaMaxAgeSecs != int64(quotaMaxAge.Seconds()) {
+		t.Errorf("router config = %+v", got)
 	}
 	lo, hi := 15.0, 45.0
 	cfg.Agents = map[string]AgentConfig{"pi": {RouterThreshold: &lo, RouterRecover: &hi, RouterFallbackModel: "openai/gpt-6.2-astra"}}
@@ -109,8 +138,23 @@ func TestWritePiRouterConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ = os.ReadFile(path)
-	if err := json.Unmarshal(b, &got); err != nil || got.ThresholdPct != 15 || got.RecoverPct != 45 || got.FallbackModel != "openai/gpt-6.2-astra" {
-		t.Errorf("configured router config = %+v, %v", got, err)
+	if err := json.Unmarshal(b, &got); err != nil || got.ThresholdPct != 15 || got.RecoverPct != 45 || got.FallbackModel != "openai/gpt-6.2-astra" ||
+		strings.Join(got.WorkerModels, ",") != strings.Join([]string{piAntigravityModel, piWorkerModel, "openai/gpt-6.2-astra"}, ",") {
+		t.Errorf("configured fallback router config = %+v, %v", got, err)
+	}
+	// Explicit ordered chains override defaults.
+	cfg.Agents = map[string]AgentConfig{"pi": {
+		RouterWorkerModels:      []string{"antigravity/gemini-4-neon-xhigh", "anthropic/claude-opus-5-5"},
+		RouterCoordinatorModels: []string{"anthropic/claude-fable-5-2", "openai-codex/gpt-6.2-astra"},
+	}}
+	if _, err := cfg.writePiRouterConfig(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(path)
+	if err := json.Unmarshal(b, &got); err != nil ||
+		strings.Join(got.WorkerModels, ",") != "antigravity/gemini-4-neon-xhigh,anthropic/claude-opus-5-5" ||
+		strings.Join(got.CoordinatorModels, ",") != "anthropic/claude-fable-5-2,openai-codex/gpt-6.2-astra" {
+		t.Errorf("explicit chain router config = %+v, %v", got, err)
 	}
 }
 
@@ -120,16 +164,28 @@ func TestValidatePiRouter(t *testing.T) {
 		t.Fatal(err)
 	}
 	lo, hi, over := 10.0, 25.0, 101.0
-	cfg.Agents = map[string]AgentConfig{"pi": {RouterThreshold: &lo, RouterRecover: &hi}}
+	cfg.Agents = map[string]AgentConfig{"pi": {
+		RouterWorkerModels:      []string{piAntigravityModel, piWorkerModel},
+		RouterCoordinatorModels: []string{piAntigravityModel, piCoordinatorModel},
+		RouterThreshold:         &lo,
+		RouterRecover:           &hi,
+	}}
 	if err := cfg.validateAgents(); err != nil {
 		t.Fatal(err)
 	}
 	for name, bad := range map[string]map[string]AgentConfig{
-		"recover below threshold": {"pi": {RouterThreshold: &hi, RouterRecover: &lo}},
-		"percent over 100":        {"pi": {RouterThreshold: &over}},
-		"model without provider":  {"pi": {RouterWorkerModel: "opus"}},
-		"virtual as physical":     {"pi": {RouterFallbackModel: piWorkerVirtualModel}},
-		"router on another kind":  {"claude": {RouterThreshold: &lo}},
+		"recover below threshold":       {"pi": {RouterThreshold: &hi, RouterRecover: &lo}},
+		"percent over 100":              {"pi": {RouterThreshold: &over}},
+		"model without provider":        {"pi": {RouterWorkerModel: "opus"}},
+		"virtual as physical":           {"pi": {RouterFallbackModel: piWorkerVirtualModel}},
+		"router on another kind":        {"claude": {RouterThreshold: &lo}},
+		"empty worker chain":            {"pi": {RouterWorkerModels: []string{}}},
+		"empty coordinator chain":       {"pi": {RouterCoordinatorModels: []string{}}},
+		"chain entry without provider":  {"pi": {RouterWorkerModels: []string{"bad"}}},
+		"virtual model in chain":        {"pi": {RouterCoordinatorModels: []string{piCoordinatorVirtualModel}}},
+		"both worker chain and single":  {"pi": {RouterWorkerModels: []string{piAntigravityModel}, RouterWorkerModel: piWorkerModel}},
+		"both coord chain and single":   {"pi": {RouterCoordinatorModels: []string{piAntigravityModel}, RouterCoordinatorModel: piCoordinatorModel}},
+		"chain on another kind":         {"claude": {RouterWorkerModels: []string{piAntigravityModel}}},
 	} {
 		cfg.Agents = bad
 		if err := cfg.validateAgents(); err == nil {

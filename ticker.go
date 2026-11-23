@@ -883,11 +883,18 @@ func tickerRun(cfg Config) error {
 		if err := t.once(&st); err != nil {
 			logger.Printf("tick: %v", err)
 		}
-		// Keep the pi quota router's snapshot fresh for sessions already
-		// running; a launch writes it too. A failed write only leaves the
-		// router on older readings, which age out to Claude on their own.
+		// Keep the pi quota router's extensions, config and snapshot fresh for
+		// sessions already running and new launches; a launch writes them too.
+		// A failed write only leaves the router on older readings, which age
+		// out on their own.
 		if now := time.Now(); now.Sub(lastQuota) >= time.Minute {
 			lastQuota = now
+			if _, err := piExtensionFile(); err != nil {
+				logger.Printf("pi extension: %v", err)
+			}
+			if _, err := cfg.writePiRouterConfig(); err != nil {
+				logger.Printf("pi router config: %v", err)
+			}
 			if err := writeQuotaSnapshot(now); err != nil {
 				logger.Printf("quota snapshot: %v", err)
 			}

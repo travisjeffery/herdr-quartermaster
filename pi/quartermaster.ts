@@ -41,9 +41,10 @@
 //      this: prompts come through the pane and guards block.
 //   7. Registers the virtual models quartermaster/worker-auto and
 //      quartermaster/coordinator-auto (pi/router.ts), which route each turn
-//      to the role's Claude model, switching physical model to the OpenAI
-//      fallback while quartermaster's quota snapshot (quota.json beside
-//      the --quartermaster-router file) shows low Claude headroom.
+//      through the role's ordered physical model chain (Antigravity Neon
+//      XHigh first, then Claude, then OpenAI), failing over on per-provider
+//      low quota (quota.json beside the --quartermaster-router file), rate
+//      limits, provider unavailability, or expired/invalid auth tokens.
 //
 // @ts-nocheck
 
@@ -172,11 +173,12 @@ export default function (pi) {
   });
 
   // The virtual auto models (pi/router.ts): one selectable model per role
-  // that starts each turn on the role's Claude model and switches physical
-  // model to the OpenAI fallback when quartermaster's quota snapshot says
-  // Claude headroom is low. Route reads both JSON files per request, so a
-  // ticker refresh applies at the next turn boundary; a missing or bad file
-  // routes on defaults with no quota (Claude), never an error.
+  // that starts each turn on the highest-priority healthy physical model in
+  // the role's ordered chain (default: Antigravity Neon XHigh -> Claude ->
+  // OpenAI), failing over on per-provider low quota, rate limits, provider
+  // unavailability, or expired auth tokens. Route reads both JSON files per
+  // request, so a ticker refresh applies at the next turn boundary; a missing
+  // or bad file routes on defaults with no quota, never an error.
   if (typeof pi.registerVirtualModel === "function") {
     const readOr = (p: string): string => {
       try {
@@ -188,7 +190,9 @@ export default function (pi) {
     const refOf = (m: any): string | null =>
       m && typeof m.provider === "string" && typeof m.id === "string" ? m.provider + "/" + m.id : null;
     const findUsable = (ctx: any, ref: string): any => {
-      const [provider, id] = [ref.slice(0, ref.indexOf("/")), ref.slice(ref.indexOf("/") + 1)];
+      const slash = ref.indexOf("/");
+      if (slash <= 0 || slash === ref.length - 1) return null;
+      const [provider, id] = [ref.slice(0, slash), ref.slice(slash + 1)];
       const model = ctx.modelRegistry.find(provider, id);
       if (!model) return null;
       const avail = typeof ctx.modelRegistry.getAvailable === "function" ? ctx.modelRegistry.getAvailable() : null;
@@ -196,8 +200,8 @@ export default function (pi) {
       return model;
     };
     for (const [role, id, name] of [
-      ["worker", "worker-auto", "Worker auto (Claude, OpenAI on low quota)"],
-      ["coordinator", "coordinator-auto", "Coordinator auto (Claude, OpenAI on low quota)"],
+      ["worker", "worker-auto", "Worker auto (Antigravity, Claude, OpenAI failover)"],
+      ["coordinator", "coordinator-auto", "Coordinator auto (Antigravity, Claude, OpenAI failover)"],
     ] as const) {
       pi.registerVirtualModel({
         provider: "quartermaster",
@@ -207,7 +211,7 @@ export default function (pi) {
         // The smaller physical window, shown only before the first
         // response; compaction re-checks the routed model's own limits.
         contextWindow: 272_000,
-        maxTokens: 128_000,
+        maxTokens: 65_536,
         route(request: any, ctx: any) {
           const routerPath = pi.getFlag("quartermaster-router");
           const config = parseRouterConfig(typeof routerPath === "string" && routerPath ? readOr(routerPath) : "");
@@ -215,11 +219,18 @@ export default function (pi) {
             typeof routerPath === "string" && routerPath ? path.join(path.dirname(routerPath), "quota.json") : "";
           const nowMs = Date.now();
           const quota = parseQuotaSnapshot(quotaPath ? readOr(quotaPath) : "", nowMs, config.quota_max_age_seconds * 1000);
+          const chain = role === "coordinator" ? config.coordinator_models : config.worker_models;
+          const usableMap = new Map<string, any>();
+          for (const ref of chain) {
+            const m = findUsable(ctx, ref);
+            if (m) usableMap.set(ref, m);
+          }
           const decision = decideRoute({
             role,
             config,
             quota,
             nowMs,
+            usable: [...usableMap.keys()],
             reason: request.reason,
             previous: refOf(request.previous?.model),
             failed: refOf(request.failed?.model),
@@ -228,26 +239,30 @@ export default function (pi) {
               : "",
             state: request.state ?? null,
           });
-          // Keep the exact model object of a sticky route; else look the
-          // choice up, falling back to the role's other physical model
-          // when the choice is unusable, so route() errors only when no
-          // physical model can serve at all.
+          // Keep the exact model object of a sticky route; else use the
+          // resolved usable physical model from the chain, falling back to
+          // the first usable model so route() errors only when no physical
+          // model can serve at all.
           let model = null;
           const sticky = request.failed?.model ?? request.previous?.model;
           if (sticky && refOf(sticky) === decision.model) model = sticky;
-          if (!model) model = findUsable(ctx, decision.model);
+          if (!model) model = usableMap.get(decision.model) || findUsable(ctx, decision.model);
           if (!model) {
-            const claudeModel = role === "coordinator" ? config.coordinator_model : config.worker_model;
-            const other = decision.model === claudeModel ? config.fallback_model : claudeModel;
-            model = findUsable(ctx, other);
+            for (const m of usableMap.values()) {
+              model = m;
+              break;
+            }
           }
           if (!model && sticky) model = sticky;
           if (!model) {
             throw new Error(
-              "quartermaster router: neither " + decision.model + " nor its counterpart is usable in pi (check `pi --list-models` and `pi auth check`)",
+              "quartermaster router: none of " +
+                chain.join(", ") +
+                " is usable in pi (check `pi --list-models` and `pi auth check`)",
             );
           }
-          return { model, thinkingLevel: request.thinkingLevel || "xhigh", state: decision.state };
+          const thinkingLevel = model.reasoning ? request.thinkingLevel || "xhigh" : "off";
+          return { model, thinkingLevel, state: decision.state };
         },
       });
     }
