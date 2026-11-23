@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -56,6 +57,12 @@ func TestBriefDial(t *testing.T) {
 		"quartermaster gate plan plan.json",
 		"--match-head-commit",
 		"AUTO: [worker L<level> C<class>] <what> — <evidence>",
+		"4 main: merging your own PR with the required review and checks green; spending up to $500 (one charge, or per month for a recurring cost)",
+		"7 production, additive or in place",
+		"spending more than $500 (one charge, or per month for a recurring cost), or an amount you can't estimate",
+		"quartermaster autonomy check backend-ab12 --action spend --amount <USD>",
+		"Leave `--amount` off when you can't estimate or bound it; that is class 7",
+		"Give plain dollars with no `$`, which the shell expands away",
 		"For class 6 and up write that note before the step",
 		"always carries your recommendation and its class, `CLASS: <n> — <step>`",
 		"`CRITICAL: <what>` when the step is class 8 or 9",
@@ -65,6 +72,9 @@ func TestBriefDial(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("brief missing %q", want)
 		}
+	}
+	if _, eight, _ := strings.Cut(s, " · 8 "); strings.Contains(strings.Split(eight, " · 9 ")[0], "spend") {
+		t.Error("brief still puts spending at class 8")
 	}
 }
 
@@ -319,23 +329,120 @@ func TestActionClass(t *testing.T) {
 		{app, "delete", "", 8},
 		{app, "secret", "", 8},
 		{app, "message-external", "", 8},
-		{app, "spend", "", 8},
+		{app, "spend", "", 7}, // no --amount: not estimated, so the higher class
 		{app, "approve", "", 8},
 		{app, "classifier", "", 9},
 		{app, "loosen-settings", "", 9},
 	}
 	for _, c := range cases {
-		got, err := cfg.actionClass(c.b, c.action, c.target)
+		got, err := cfg.actionClass(c.b, c.action, c.target, "")
 		if err != nil || got != c.want {
 			t.Errorf("%s %q on %v: %d, %v; want %d", c.action, c.target, c.b.Labels, got, err, c.want)
 		}
 	}
-	if _, err := cfg.actionClass(app, "install", ""); !errors.Is(err, errNotAutonomous) {
+	if got, err := cfg.actionClass(app, "spend", "", "40/month"); err != nil || got != 4 {
+		t.Errorf("spend 40/month: %d, %v; want 4", got, err)
+	}
+	if _, err := cfg.actionClass(app, "install", "", ""); !errors.Is(err, errNotAutonomous) {
 		t.Errorf("install outside %s: %v", selfRepo, err)
 	}
 	cfg.Autonomy.Prod = nil
 	if got := cfg.Autonomy.targetClass("dev-east"); got != 7 {
 		t.Errorf("no prod patterns: dev-east is %d, want 7", got)
+	}
+}
+
+func TestSpendClass(t *testing.T) {
+	cases := []struct {
+		amount string
+		want   int
+	}{
+		{"", 7}, // can't be estimated or bounded
+		{"0", 4},
+		{"0.50", 4},
+		{"40", 4},
+		{"$12.50", 4},
+		{"500", 4},
+		{"$500.00", 4},
+		{"500.01", 7},
+		{"501", 7},
+		{"500/month", 4},
+		{"$300/mo", 4},
+		{" 501/Month ", 7},
+		{"100000", 7},
+	}
+	for _, c := range cases {
+		if got, err := spendClass(c.amount); err != nil || got != c.want {
+			t.Errorf("%q: %d, %v; want %d", c.amount, got, err, c.want)
+		}
+	}
+	// A leading 0 is what an unquoted $500 or $2000 leaves after the shell.
+	for _, bad := range []string{"~$40", "-5", "40 dollars", "40/year", "1e3", "1.234", "$", "/month", "500/month/month", "00", "01", "000", "050/month"} {
+		if _, err := spendClass(bad); err == nil || !strings.Contains(err.Error(), "--amount") {
+			t.Errorf("%q: %v, want an --amount error", bad, err)
+		}
+	}
+}
+
+// TestSpendCheck runs the dial's check for spends at the levels around the
+// limit: up to $500 (one charge or per month) is class 4, more or not
+// estimated is 7.
+func TestSpendCheck(t *testing.T) {
+	cfg := defaultConfig()
+	f := &fakeAutonomy{bead: Bead{ID: "b-1", Status: StatusInProgress}}
+	spend := func(level int, amount string) error {
+		// A fresh state dir each time, so failed checks don't trip the breaker.
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		f.bead.Labels = []string{levelLabel + strconv.Itoa(level)}
+		var out strings.Builder
+		return autonomyCmd(cfg, f.env(), []string{"check", "b-1"}, autonomyOpts{Class: -1, Action: "spend", Amount: amount}, &out)
+	}
+	cases := []struct {
+		level  int
+		amount string
+		pass   bool
+	}{
+		{4, "500", true},
+		{4, "$500", true},
+		{3, "1", false},
+		{6, "501", false},
+		{7, "501", true},
+		{6, "500.01", false},
+		{4, "500/month", true},
+		{6, "501/month", false},
+		{7, "$501/month", true},
+		{6, "", false},
+		{7, "", true},
+	}
+	for _, c := range cases {
+		err := spend(c.level, c.amount)
+		if c.pass && err != nil {
+			t.Errorf("spend %q at level %d: %v", c.amount, c.level, err)
+		}
+		if !c.pass && !errors.Is(err, errNotAutonomous) {
+			t.Errorf("spend %q at level %d: %v, want not autonomous", c.amount, c.level, err)
+		}
+	}
+	if err := spend(6, ""); err == nil || !strings.Contains(err.Error(), "spending an amount not estimated (class 7)") {
+		t.Errorf("no amount at level 6: %v", err)
+	}
+	// The journal keeps the amount the check was for.
+	if err := spend(4, "40/month"); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := readJournal(time.Time{})
+	if err != nil || len(recs) != 1 || recs[0].Action != "spend" || recs[0].Amount != "40/month" || recs[0].Class != 4 || !recs[0].Pass {
+		t.Errorf("journal: %+v, %v", recs, err)
+	}
+	if !strings.Contains(usage, fmt.Sprintf("class 4 up to $%d", spendLimit)) {
+		t.Errorf("usage doesn't state the spend limit $%d", spendLimit)
+	}
+	// Usage errors, not a stop for TJ.
+	var out strings.Builder
+	for _, o := range []autonomyOpts{{Class: -1, Action: "spend", Amount: "~$40"}, {Class: -1, Action: "merge", Amount: "40"}, {Class: 4, Amount: "40"}} {
+		if err := autonomyCmd(cfg, f.env(), []string{"check", "b-1"}, o, &out); err == nil || errors.Is(err, errNotAutonomous) {
+			t.Errorf("%+v: %v, want a usage error", o, err)
+		}
 	}
 }
 

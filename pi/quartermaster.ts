@@ -39,10 +39,16 @@
 //      600 in a 700 directory; a request must carry the token. Without the
 //      flag, or if the socket can't be opened, the worker behaves as without
 //      this: prompts come through the pane and guards block.
+//   7. Registers the virtual models quartermaster/worker-auto and
+//      quartermaster/coordinator-auto (pi/router.ts), which route each turn
+//      to the role's Claude model, switching physical model to the OpenAI
+//      fallback while quartermaster's quota snapshot (quota.json beside
+//      the --quartermaster-router file) shows low Claude headroom.
 //
 // @ts-nocheck
 
 import { installCoordinatorInbox } from "./coordinator.ts";
+import { decideRoute, parseQuotaSnapshot, parseRouterConfig } from "./router.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -159,6 +165,93 @@ export default function (pi) {
     type: "string",
     default: "",
   });
+  pi.registerFlag("quartermaster-router", {
+    description: "router.json for the quartermaster virtual models (set by quartermaster)",
+    type: "string",
+    default: "",
+  });
+
+  // The virtual auto models (pi/router.ts): one selectable model per role
+  // that starts each turn on the role's Claude model and switches physical
+  // model to the OpenAI fallback when quartermaster's quota snapshot says
+  // Claude headroom is low. Route reads both JSON files per request, so a
+  // ticker refresh applies at the next turn boundary; a missing or bad file
+  // routes on defaults with no quota (Claude), never an error.
+  if (typeof pi.registerVirtualModel === "function") {
+    const readOr = (p: string): string => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch {
+        return "";
+      }
+    };
+    const refOf = (m: any): string | null =>
+      m && typeof m.provider === "string" && typeof m.id === "string" ? m.provider + "/" + m.id : null;
+    const findUsable = (ctx: any, ref: string): any => {
+      const [provider, id] = [ref.slice(0, ref.indexOf("/")), ref.slice(ref.indexOf("/") + 1)];
+      const model = ctx.modelRegistry.find(provider, id);
+      if (!model) return null;
+      const avail = typeof ctx.modelRegistry.getAvailable === "function" ? ctx.modelRegistry.getAvailable() : null;
+      if (Array.isArray(avail) && !avail.some((m: any) => refOf(m) === ref)) return null;
+      return model;
+    };
+    for (const [role, id, name] of [
+      ["worker", "worker-auto", "Worker auto (Claude, OpenAI on low quota)"],
+      ["coordinator", "coordinator-auto", "Coordinator auto (Claude, OpenAI on low quota)"],
+    ] as const) {
+      pi.registerVirtualModel({
+        provider: "quartermaster",
+        id,
+        name,
+        thinkingLevels: ["off", "low", "medium", "high", "xhigh"],
+        // The smaller physical window, shown only before the first
+        // response; compaction re-checks the routed model's own limits.
+        contextWindow: 272_000,
+        maxTokens: 128_000,
+        route(request: any, ctx: any) {
+          const routerPath = pi.getFlag("quartermaster-router");
+          const config = parseRouterConfig(typeof routerPath === "string" && routerPath ? readOr(routerPath) : "");
+          const quotaPath =
+            typeof routerPath === "string" && routerPath ? path.join(path.dirname(routerPath), "quota.json") : "";
+          const nowMs = Date.now();
+          const quota = parseQuotaSnapshot(quotaPath ? readOr(quotaPath) : "", nowMs, config.quota_max_age_seconds * 1000);
+          const decision = decideRoute({
+            role,
+            config,
+            quota,
+            nowMs,
+            reason: request.reason,
+            previous: refOf(request.previous?.model),
+            failed: refOf(request.failed?.model),
+            failedError: request.failed?.message
+              ? String(request.failed.message.errorMessage || "") + " " + String(request.failed.message.stopReason || "")
+              : "",
+            state: request.state ?? null,
+          });
+          // Keep the exact model object of a sticky route; else look the
+          // choice up, falling back to the role's other physical model
+          // when the choice is unusable, so route() errors only when no
+          // physical model can serve at all.
+          let model = null;
+          const sticky = request.failed?.model ?? request.previous?.model;
+          if (sticky && refOf(sticky) === decision.model) model = sticky;
+          if (!model) model = findUsable(ctx, decision.model);
+          if (!model) {
+            const claudeModel = role === "coordinator" ? config.coordinator_model : config.worker_model;
+            const other = decision.model === claudeModel ? config.fallback_model : claudeModel;
+            model = findUsable(ctx, other);
+          }
+          if (!model && sticky) model = sticky;
+          if (!model) {
+            throw new Error(
+              "quartermaster router: neither " + decision.model + " nor its counterpart is usable in pi (check `pi --list-models` and `pi auth check`)",
+            );
+          }
+          return { model, thinkingLevel: request.thinkingLevel || "xhigh", state: decision.state };
+        },
+      });
+    }
+  }
 
   // Texts of prompts quartermaster sent over the socket that pi hasn't yet
   // passed to the input event, so it can be recorded as their source.

@@ -79,11 +79,11 @@ class up if none is given.
 | 1 | The agent's own worktree and scratch | Edits, local builds and tests, `git add`/`commit` in its own worktree, `rm` inside its worktree or a `mktemp -d` directory, `bd note` on its own bead |
 | 2 | Its own branch and PR (unmerged, reviewed before it lands) | `git push` to its own branch, opening or updating its PR, replying on its PR's threads, `/plan`-style trigger comments (unless the trigger itself applies: then the class of the apply), retargeting a stacked PR, moving its own Linear issue's status. A choice that only shapes its own PR (a design option, naming, test approach) |
 | 3 | TJ's machine and the shared bead state | Dispatching a bead TJ selected (`next`), resuming a thread, closing a `likely_stale` bead on strong evidence, releasing a stale claim, `resolve` of a merged worktree without `--force`, installing a merged herdr-quartermaster PR (pull, build, ticker restart). Creating beads for discovered work |
-| 4 | The shared repo's main branch | Merging its own PR, or enabling auto-merge, **with the required review and checks green**; resolving review threads on its own PR after a fix or a reply |
+| 4 | The shared repo's main branch | Merging its own PR, or enabling auto-merge, **with the required review and checks green**; resolving review threads on its own PR after a fix or a reply. **Spending up to $500, as one charge or per month for a recurring cost (D7, revised 2026-11-18)** |
 | 5 | Internal messages | Posting to the team's internal channels (review requests, status), commenting on Linear issues or PRs other than its own |
 | 6 | Non-production infrastructure | An apply to a dev or staging stack that passes `gate plan`; a deploy or rollout step to a non-prod environment; dispatching a bead TJ didn't select (Muse: choosing the queue spends TJ's attention) |
-| 7 | Production, additive or in place | A prod apply that passes `gate plan` with no delete or replace, matches the change noted beforehand, and names its rollback; a prod deploy; the next step of a prod rollout once the previous one verified |
-| 8 | Scoped deletion, and outside our systems | One delete or replace in a prod stack, or a stateful replace anywhere; deleting a non-prod database, bucket or volume; force-pushing to a shared branch; merging without the required review; **reading or writing a secret; a message to someone outside the team; spending money; approving a PR (D7)** |
+| 7 | Production, additive or in place | A prod apply that passes `gate plan` with no delete or replace, matches the change noted beforehand, and names its rollback; a prod deploy; the next step of a prod rollout once the previous one verified. **Spending more than $500, as one charge or per month, or an amount that can't be estimated or bounded (D7, revised 2026-11-18)** |
+| 8 | Scoped deletion, and outside our systems | One delete or replace in a prod stack, or a stateful replace anywhere; deleting a non-prod database, bucket or volume; force-pushing to a shared branch; merging without the required review; **reading or writing a secret; a message to someone outside the team; approving a PR (D7)** |
 | 9 | Widespread, irreversible, or control of the dial itself | Deletes across stacks or past the `widespread` threshold; deleting prod data; object lock or KMS key deletion; **answering a classifier denial and loosening agent settings or hooks (D7)**; raising its own level; disabling gates, checks or the journal; **any action whose impact is unknown** |
 
 How an action is placed:
@@ -293,6 +293,7 @@ quartermaster autonomy level N <bead>... [--for D] # set beads' own level; 8 and
 quartermaster autonomy level - <bead>...           # back to the global level
 quartermaster autonomy check <bead> --class N [--what "..."]
 quartermaster autonomy check <bead> --action A [--target T]
+quartermaster autonomy check <bead> --action spend [--amount USD[/month]]
 quartermaster autonomy on|off
 ```
 
@@ -300,8 +301,8 @@ quartermaster autonomy on|off
   level and its budget isn't spent. `--action` looks the class up: `push` 2,
   `dispatch`/`resume`/`close`/`resolve`/`install` 3, `merge` 4 (or the repo's
   `merge_class`), `post` 5, `apply`/`deploy`/`rollout` 6 or 7 by `--target`,
-  `delete`, `secret`, `message-external`, `spend` and `approve` 8,
-  `classifier` and `loosen-settings` 9. `--class N` covers the rest, from
+  `spend` 4 or 7 by `--amount` (7 without one), `delete`, `secret`,
+  `message-external` and `approve` 8, `classifier` and `loosen-settings` 9. `--class N` covers the rest, from
   the worker's `CLASS:` line. An unknown action fails.
 - **(R) a.** Commands quartermaster owns enforce it: `dispatch`, `resume`,
   `answer`, `stale --release` and the ticker's `auto_close` refuse without
@@ -321,7 +322,9 @@ label, not proof of identity, until then.
 
 ### D7. Where the remaining top-of-ladder items sit
 
-Decided: messages outside the team and spending money at 8. Still open:
+Decided: messages outside the team and spending money at 8. (Spending
+was revised on 2026-11-18 to 4 up to $500 and 7 above; see Decisions.)
+Still open:
 
 - **Approving a PR:**
   - **(R) a.** 8. Approving removes the human-review precondition that makes
@@ -481,6 +484,7 @@ draft evolved:
   guide points at it instead of carrying the level. v1 is labelled advisory.
 - **D7** messages outside the team, spending money and approving a PR at 8;
   answering a classifier denial and loosening agent settings or hooks at 9.
+  (Spending revised 2026-11-18, below.)
 - **D8** workers launch one band below the dial: `bypass_args` only under a
   9 lease, and the coordinator is never launched with bypass.
 - **D9** 8 and 9 are leases (8 defaults to 4h); 9 is set only on beads,
@@ -490,3 +494,28 @@ draft evolved:
   taste or voice, other people, conflicting or missing evidence, and
   `CRITICAL:`.
 - The Muse and Codex designs are folded in, as credited above.
+
+2026-11-18, TJ, revising **D7** for spending money: "A split at 4 and 7 is
+fine. anything more than 500 (single charge or per month subscription)
+should be at 7". The cause: a worker on a level-4 bead stopped to ask before
+re-running a few-minute on-demand CI runner after its fix had merged,
+because money sat at 8 beside a prod deletion, a secret, an outside message
+and approving a PR.
+
+- Spending up to $500, as one charge or per month for a recurring cost, is
+  class 4; more is class 7. Nothing about money is class 8.
+- Read from that decision, not TJ's words, each easily changed: a spend
+  whose amount can't be estimated or bounded is 7 (when in doubt, the higher
+  class); a spend still takes the highest class among its effects, so one
+  that also deletes or replaces in prod is 8 and an irreversible commitment
+  9; the amount is the agent's estimate of the whole step, including what it
+  sets off (a dispatched workflow's runner, a model run's tokens), and its
+  `AUTO:` note states the amount and what it was estimated from.
+- `autonomy check --action spend --amount <USD>[/month]` takes the class
+  from the amount against `spendLimit` in `autonomy.go`; with no `--amount`
+  it is 7. The journal keeps each spend check's amount.
+- Open: nothing sums one bead's spends. The per-hour step budget (30
+  `AUTO:` steps) and the circuit breaker (three failed checks in a row, or
+  the same `AUTO:` step three times running) slow a loop of small spends
+  but don't add them up, so a bead can pass $500 in a month, or in an hour,
+  without TJ.

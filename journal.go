@@ -30,6 +30,11 @@ const (
 	journalCheck   = "check"
 	// journalVerify is a verifier verdict on closing a bead (accept.go).
 	journalVerify = "verify"
+	// journalTap is a refused approval tap (tap.go): answered prompt taps
+	// are journalPrompt, like every prompt answer.
+	journalTap = "tap"
+	// journalNeedsMe is an answered needs_me question tap (tapquestion.go).
+	journalNeedsMe = "needs_me"
 )
 
 type journalRecord struct {
@@ -39,6 +44,8 @@ type journalRecord struct {
 	// Class is an AUTO step's or a check's class, -1 when its note has none.
 	Class  int    `json:"class"`
 	Action string `json:"action,omitempty"`
+	// Amount is a spend check's --amount, as given.
+	Amount string `json:"amount,omitempty"`
 	Pass   bool   `json:"pass,omitempty"`
 	Text   string `json:"text,omitempty"`
 }
