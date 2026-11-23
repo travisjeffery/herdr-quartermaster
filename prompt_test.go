@@ -102,6 +102,29 @@ func TestParsePromptTrust(t *testing.T) {
 	}
 }
 
+func TestParsePromptAgyTrust(t *testing.T) {
+	p, ok := parsePrompt(screen(t, "agy-trust.txt"))
+	if !ok {
+		t.Fatal("no prompt found")
+	}
+	if p.Numbered || !slices.Equal(labels(p), []string{"Yes, I trust this folder", "No, exit"}) || !p.Options[0].Selected {
+		t.Fatalf("options = %+v", p.Options)
+	}
+	if p.Lines[0] != "Accessing workspace:" {
+		t.Errorf("lines = %q", p.Lines)
+	}
+	for choice, want := range map[string][]string{"yes": {"enter"}, "no": {"down", "enter"}} {
+		o, err := p.choose(choice)
+		if err != nil {
+			t.Errorf("choose(%q): %v", choice, err)
+			continue
+		}
+		if got := p.keys(o); !slices.Equal(got, want) {
+			t.Errorf("choose(%q) keys = %q, want %q", choice, got, want)
+		}
+	}
+}
+
 // muse-bash-2.txt is a herdr visible read of a staged muse worker at an
 // approval prompt (escalated bash, 39-column pane, so the title and the
 // second option are cut at the pane edge and the command wraps).

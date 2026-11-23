@@ -191,10 +191,10 @@ func TestEveryKindResumes(t *testing.T) {
 }
 
 func TestKindList(t *testing.T) {
-	if got := kindList(); got != "claude, codex, muse or pi" {
+	if got := kindList(); got != "claude, codex, muse, pi or agy" {
 		t.Errorf("kindList() = %q", got)
 	}
-	if got := kindList("auto"); got != "claude, codex, muse, pi or auto" {
+	if got := kindList("auto"); got != "claude, codex, muse, pi, agy or auto" {
 		t.Errorf(`kindList("auto") = %q`, got)
 	}
 }

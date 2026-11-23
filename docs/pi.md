@@ -1,7 +1,7 @@
 # Workers and the coordinator on pi
 
-[pi](https://github.com/earendil-works/pi) is an opt-in fourth agent kind next
-to `claude`, `codex` and `muse`: `--agent pi`, `worker_agent = "pi"` or
+[pi](https://github.com/earendil-works/pi) is an opt-in agent kind next
+to `claude`, `codex`, `muse` and [`agy`](agy.md): `--agent pi`, `worker_agent = "pi"` or
 `coordinator_agent = "pi"`. Nothing changes until you ask for it. This page
 covers what works under pi, how it differs from Claude Code, and the setup
 steps only you can do. Checked against pi 1.6.0 and herdr 0.9.5; the quota
