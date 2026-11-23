@@ -42,6 +42,9 @@ func (g Group) String() string { return groupNames[g] }
 
 // Thread is one bead with whatever is working on it and delivering it.
 type Thread struct {
+	// state is derived once after gathering, then shared by all view adapters.
+	state      *ThreadState
+	Blockers   []string
 	Bead       Bead
 	Agent      *Agent
 	PR         *PR
@@ -75,36 +78,11 @@ func agentReady(a *Agent) bool {
 // answered it in its pane, or it is still in the turn that asked. Either way
 // nobody is waiting on the user yet.
 func answered(t Thread) bool {
-	return t.Bead.Status == StatusNeedsMe && t.Agent != nil && t.Agent.Status == "working"
+	return t.Bead.Status == StatusNeedsMe && t.Agent != nil && t.Agent.Status == "working" && !t.Unprompted
 }
 
-// classify decides a thread's group. Precedence matters: a human owed an
-// answer outranks everything, and a merged PR outranks review because the
-// only thing left is closing up.
-func classify(t Thread) Group {
-	switch {
-	case t.Bead.Status == StatusNeedsMe && !answered(t), t.Agent != nil && t.Agent.Status == "blocked":
-		return GroupNeedsYou
-	case t.PR != nil && t.PR.State == "MERGED" && t.Bead.HasLabel(LabelRollingOut):
-		return GroupRollingOut
-	case t.PR != nil && t.PR.State == "MERGED":
-		return GroupMerged
-	case readyToMerge(t.PR, t.Checks):
-		return GroupReady
-	case t.PR != nil && t.PR.State == "OPEN" && len(t.Checks.Failing) > 0:
-		return GroupFailing
-	case t.Agent != nil && t.Agent.Status == "working":
-		return GroupWorking
-	case t.PR != nil && t.PR.State == "OPEN" && agentReady(t.Agent):
-		return GroupReview
-	case t.Bead.Status == StatusBlocked:
-		return GroupBlocked
-	case agentReady(t.Agent), t.Agent != nil:
-		return GroupIdle
-	default:
-		return GroupNoAgent
-	}
-}
+// classify is the sidebar/board adapter, not another precedence table.
+func classify(t Thread) Group { return t.derived().group() }
 
 // pendingCommand is the command a worker asked the user to run, from its
 // latest "RUN:" note, until a later "RAN:" or "DONE:" note answers it.
@@ -132,20 +110,16 @@ func pendingCommand(notes string) string {
 
 // runCommand is the pending command of a needs_me thread, the only state in
 // which one is still waiting on the user.
-func runCommand(t Thread) string {
-	if t.Bead.Status != StatusNeedsMe || answered(t) {
-		return ""
-	}
-	return pendingCommand(t.Bead.Notes)
-}
+func runCommand(t Thread) string { return t.derived().Command }
 
 func stateLine(t Thread) string {
-	g := classify(t)
-	s := g.String()
-	if answered(t) {
+	state := t.derived()
+	g := state.group()
+	s := sectionName(g)
+	if state.ActiveTurn {
 		s += " · needs_me"
 	}
-	if runCommand(t) != "" {
+	if state.Command != "" {
 		s += " · run command"
 	}
 	if t.PR != nil {
@@ -194,6 +168,8 @@ type Snapshot struct {
 	Pending      []string          `json:"pending_prompts"`
 	// NeedsMe is the bead's needs_me status at this snapshot.
 	NeedsMe bool `json:"needs_me"`
+	// Unprompted retains background-wake evidence for read-only views.
+	Unprompted bool `json:"unprompted,omitempty"`
 	// ReadyKey is the PR and head commit last seen ready to merge (readyKey),
 	// so ready_to_merge fires once per push and again for a replacement PR.
 	ReadyKey string `json:"ready_key,omitempty"`
@@ -387,7 +363,7 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 }
 
 func snapshotDebounced(t Thread, prev Snapshot, now time.Time, debounce, flap time.Duration, first bool) Snapshot {
-	s := Snapshot{Group: classify(t), Reviews: t.Reviews, BotReviews: len(t.BotReviews), ReviewsSplit: true, Runs: runStates(t.Runs), Failing: t.Checks.Failing, Pending: freshPending(t, prev.Pending), NeedsMe: t.Bead.Status == StatusNeedsMe, ReadyKey: prev.ReadyKey, Relaunch: prev.Relaunch}
+	s := Snapshot{Unprompted: t.Unprompted, Group: classify(t), Reviews: t.Reviews, BotReviews: len(t.BotReviews), ReviewsSplit: true, Runs: runStates(t.Runs), Failing: t.Checks.Failing, Pending: freshPending(t, prev.Pending), NeedsMe: t.Bead.Status == StatusNeedsMe, ReadyKey: prev.ReadyKey, Relaunch: prev.Relaunch}
 	if t.Agent != nil {
 		s.AgentStatus, s.AgentSeq = t.Agent.Status, t.Agent.Seq
 		switch {
@@ -426,7 +402,7 @@ func snapshotDebounced(t Thread, prev Snapshot, now time.Time, debounce, flap ti
 	// The question counts as asked once the thread has sat in needs you, and
 	// stays asked while the bead is needs_me, through any wake.
 	switch {
-	case s.Group == GroupNeedsYou:
+	case s.Group == GroupNeedsYou && !t.Unprompted:
 		s.Asked = asked(t.Bead)
 	case s.NeedsMe:
 		s.Asked = prev.Asked
@@ -476,11 +452,14 @@ func transitionDebounced(t Thread, prev Snapshot, first bool, now time.Time, deb
 	}
 	// A blocked agent can move from one prompt to the next between ticks.
 	newPrompt := t.Prompt != nil && t.Prompt.Hash != prev.PromptHash
+	// A background wake stays in NeedsYou now. Preserve the old settled-turn
+	// question edge without treating unrelated notes on an idle bead as asks.
+	settledQuestion := prev.Unprompted && agentReady(t.Agent) && prev.Asked != "" && asked(t.Bead) != prev.Asked
 	// A worker prompt under the debounce surfaces only when its window
 	// expires with it still showing; a prompt pending when its bead is set
 	// to needs_me is exempt and surfaces at once. Every other needs-you
 	// entry (a needs_me question above all) is undebounced.
-	surface := prev.Group != GroupNeedsYou || newPrompt || (t.Bead.Status == StatusNeedsMe && prev.PromptPending != "")
+	surface := prev.Group != GroupNeedsYou || newPrompt || settledQuestion || (t.Bead.Status == StatusNeedsMe && prev.PromptPending != "")
 	if promptDebounced(t, debounce) {
 		surface = trackPrompt(t, prev, now, debounce, flap).due
 	}

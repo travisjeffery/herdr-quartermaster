@@ -23,6 +23,8 @@ const (
 	SecInProgress
 	SecReady
 	SecBacklog
+	SecMerged
+	SecRollingOut
 )
 
 var sectionNames = map[Section]string{
@@ -32,6 +34,8 @@ var sectionNames = map[Section]string{
 	SecInProgress: "In progress",
 	SecReady:      "Ready / next",
 	SecBacklog:    "Backlog",
+	SecMerged:     "Merged / closing up",
+	SecRollingOut: "Rolling out",
 }
 
 func (s Section) String() string { return sectionNames[s] }
@@ -57,6 +61,8 @@ type DigestPR struct {
 	State          string    `json:"state"`
 	IsDraft        bool      `json:"isDraft,omitempty"`
 	ReviewDecision string    `json:"reviewDecision,omitempty"`
+	HeadSHA        string    `json:"headRefOid,omitempty"`
+	MergeState     string    `json:"mergeStateStatus,omitempty"`
 	Mergeable      string    `json:"mergeable,omitempty"` // MERGEABLE, CONFLICTING or UNKNOWN
 	MergedAt       time.Time `json:"mergedAt,omitzero"`
 	Checks         string    `json:"checks,omitempty"` // SUCCESS, FAILURE, ERROR, PENDING, EXPECTED or ""
@@ -64,6 +70,7 @@ type DigestPR struct {
 
 // DigestItem is one bead's line in the digest.
 type DigestItem struct {
+	State    ThreadState
 	Bead     Bead
 	Section  Section
 	PR       *DigestPR
@@ -118,6 +125,8 @@ func saveDigestState(s digestState) error {
 
 // digestInputs is everything a digest is built from, read once per run.
 type digestInputs struct {
+	ticker TickerState
+	cfg    Config
 	open   []Bead // every bead that isn't closed
 	closed []Bead // beads closed since the last digest
 	agents map[string]Agent
@@ -129,6 +138,7 @@ type digestInputs struct {
 
 // digestEnv is the outside world, so a test can build a digest from fixtures.
 type digestEnv struct {
+	cfg    Config
 	open   func() ([]Bead, error)
 	closed func(since time.Time) ([]Bead, error)
 	agents func() ([]Agent, error)
@@ -138,6 +148,7 @@ type digestEnv struct {
 
 func liveDigestEnv(cfg Config) digestEnv {
 	return digestEnv{
+		cfg:  cfg,
 		open: func() ([]Bead, error) { return Beads{}.list() },
 		closed: func(since time.Time) ([]Bead, error) {
 			return Beads{}.list("--status", StatusClosed, "--closed-after", since.UTC().Format(time.RFC3339))
@@ -165,6 +176,7 @@ func gatherDigest(env digestEnv, prev digestState) (digestInputs, []string, erro
 	wg.Go(func() { agents, agentErr = env.agents() })
 	wg.Go(func() { st = env.ticker() })
 	wg.Wait()
+	in.ticker, in.cfg = st, env.cfg
 	if openErr != nil {
 		return in, nil, openErr
 	}
@@ -242,62 +254,78 @@ func digestPRURLs(beads []Bead, branch map[string]string) []string {
 	return dedupe(out)
 }
 
-// pickPR is the PR a bead's line shows: its first open one, else the last to
-// merge. It also counts the open ones.
+// pickPR adapts the digest's light observations to the common selector.
 func pickPR(urls []string, prs map[string]DigestPR) (*DigestPR, int) {
-	var best *DigestPR
-	open := 0
+	var candidates []PR
 	for _, u := range urls {
-		pr, ok := prs[u]
-		if !ok {
-			continue
-		}
-		switch {
-		case pr.State == "OPEN":
-			open++
-			if best == nil || best.State != "OPEN" {
-				best = &pr
-			}
-		case pr.State == "MERGED" && (best == nil || best.State == "MERGED" && pr.MergedAt.After(best.MergedAt)):
-			best = &pr
+		if pr, ok := prs[u]; ok {
+			candidates = append(candidates, pr.observation(PR{}))
 		}
 	}
-	return best, open
+	selected := selectPR(candidates)
+	if selected.PR == nil {
+		return nil, selected.Open
+	}
+	pr := prs[selected.PR.URL]
+	return &pr, selected.Open
 }
 
-// sectionFor places a bead. A question for the user outranks everything, an
-// explicit blocked status outranks a PR, and an open PR outranks a blocking
-// dependency, since the PR is what is moving.
-func sectionFor(b Bead, pr *DigestPR, blockers []string, agent string) Section {
+// digestObservation renders a full ticker observation in the digest, including
+// when its separate GitHub lookup is unavailable.
+func digestObservation(p PR) DigestPR {
+	d := DigestPR{Number: p.Number, URL: p.URL, State: p.State, MergedAt: p.MergedAt,
+		IsDraft: p.IsDraft, HeadSHA: p.HeadSHA, MergeState: p.MergeState, ReviewDecision: p.ReviewDecision}
+	c := summarizeChecks(p.Checks)
 	switch {
-	case b.Status == StatusNeedsMe && agent != "working", b.Status == StatusInProgress && agent == "blocked":
-		return SecNeedsYou
-	case b.Status == StatusBlocked:
-		return SecBlocked
-	case b.Status == StatusInProgress && pr != nil && pr.State == "OPEN":
-		return SecWaiting
-	case len(blockers) > 0:
-		return SecBlocked
-	case b.Status == StatusInProgress, b.Status == StatusNeedsMe:
-		return SecInProgress
-	case b.HasLabel(LabelNext):
-		return SecReady
-	default:
-		return SecBacklog
+	case len(c.Failing) > 0:
+		d.Checks = "FAILURE"
+	case c.Pending > 0:
+		d.Checks = "PENDING"
+	case c.Passing > 0:
+		d.Checks = "SUCCESS"
 	}
+	return d
 }
 
-func staleFor(s Section, b Bead, now time.Time) bool {
-	age := now.Sub(b.UpdatedAt)
-	switch s {
-	case SecNeedsYou:
-		return age > staleNeedsYou
-	case SecWaiting, SecInProgress:
-		return age > staleInProgress
-	case SecBlocked:
-		return age > staleBlocked
+// observation refreshes light fields without inventing merge eligibility.
+// Detailed policy/review evidence is usable only for the same known head.
+func (p DigestPR) observation(cached PR) PR {
+	pr := PR{}
+	if p.HeadSHA != "" && p.HeadSHA == cached.HeadSHA && p.URL == cached.URL {
+		pr = cached
 	}
-	return false
+	pr.Number, pr.URL, pr.State = p.Number, p.URL, p.State
+	pr.IsDraft, pr.ReviewDecision, pr.MergedAt = p.IsDraft, p.ReviewDecision, p.MergedAt
+	pr.HeadSHA, pr.MergeState = p.HeadSHA, p.MergeState
+	pr.Checks = nil
+	if p.Checks != "" {
+		pr.Checks = []Check{{Name: "checks", State: p.Checks}}
+	}
+	return pr
+}
+
+// sectionFor is a coarser presentation of the same state as the sidebar.
+func sectionFor(s ThreadState) Section {
+	switch s.Kind {
+	case ThreadWaiting:
+		return SecNeedsYou
+	case ThreadDelivering:
+		return SecWaiting
+	case ThreadMerged:
+		if s.RollingOut {
+			return SecRollingOut
+		}
+		return SecMerged
+	case ThreadBlocked:
+		return SecBlocked
+	case ThreadQueued:
+		if s.Next {
+			return SecReady
+		}
+		return SecBacklog
+	default:
+		return SecInProgress
+	}
 }
 
 // buildDigest sorts every open bead into its section and notes what changed
@@ -317,14 +345,21 @@ func buildDigest(in digestInputs, prev digestState, prefixes []string, now time.
 				blockers = append(blockers, fmt.Sprintf("%s (%s)", blk.ID, blk.Status))
 			}
 		}
-		var agent string
-		if a, ok := in.agents[agentName(b.ID)]; ok {
-			agent = a.Status
-		}
+		th := threadFor(in.cfg, in.ticker, b, in.agents)
+		th.Blockers = blockers
 		urls := beadPRURLs(b, in.branch)
+		// References to another thread's selected branch are not delivery.
+		urls = slices.DeleteFunc(urls, func(u string) bool {
+			for id, branch := range in.branch {
+				if id != b.ID && branch == u {
+					return true
+				}
+			}
+			return false
+		})
 		var pr *DigestPR
 		var open int
-		if b.Status != StatusOpen {
+		if b.Status != StatusOpen || th.Agent != nil && (th.Agent.Status == "working" || th.Agent.Status == "blocked") {
 			pr, open = pickPR(urls, in.prs)
 			for _, u := range urls {
 				if p, ok := in.prs[u]; ok {
@@ -335,14 +370,34 @@ func buildDigest(in digestInputs, prev digestState, prefixes []string, now time.
 				}
 			}
 		}
-		s := sectionFor(b, pr, blockers, agent)
+		if pr == nil && th.PR != nil && b.Status != StatusOpen {
+			fallback := digestObservation(*th.PR)
+			pr = &fallback
+			if fallback.State == "OPEN" {
+				open = 1
+			}
+			if fallback.URL != "" {
+				next.PRs[fallback.URL], prOwner[fallback.URL] = fallback, b.ID
+			}
+		}
+		if pr != nil {
+			cached := PR{}
+			if th.PR != nil {
+				cached = *th.PR
+			}
+			observation := pr.observation(cached)
+			th.PR, th.Checks = &observation, summarizeChecks(observation.Checks)
+		}
+		th = th.derive()
+		state := th.derived()
+		s := sectionFor(state)
 		next.Beads[b.ID] = s
 		if n := len(autoNotes(b.Notes)); n > 0 {
 			next.Auto[b.ID] = n
 		}
 		d.Sections[s] = append(d.Sections[s], DigestItem{
-			Bead: b, Section: s, PR: pr, OpenPRs: open, Blockers: blockers, Agent: agent,
-			Linear: linearKey(b, prefixes), Stale: staleFor(s, b, now),
+			State: state, Bead: b, Section: s, PR: pr, OpenPRs: open, Blockers: blockers, Agent: state.Agent,
+			Linear: linearKey(b, prefixes), Stale: state.stale(now),
 		})
 	}
 	for s, items := range d.Sections {
@@ -515,30 +570,30 @@ func itemLine(it DigestItem, now time.Time) string {
 func itemDetail(it DigestItem) string {
 	b := it.Bead
 	var parts []string
-	switch it.Section {
-	case SecNeedsYou:
-		switch {
-		case b.Status == StatusInProgress:
+	switch it.State.Kind {
+	case ThreadWaiting:
+		switch it.State.Waiting {
+		case WaitPrompt:
 			parts = append(parts, "agent stopped at a prompt")
-		case pendingCommand(b.Notes) != "":
-			parts = append(parts, "RUN: "+shortTitle(pendingCommand(b.Notes), 200))
+		case WaitCommand:
+			parts = append(parts, "RUN: "+shortTitle(it.State.Command, 200))
 		default:
 			parts = append(parts, lastNote(b.Notes, 240))
 		}
-	case SecBlocked:
+	case ThreadBlocked:
 		if len(it.Blockers) > 0 {
 			parts = append(parts, "blocked by "+strings.Join(it.Blockers, ", "))
 		}
 		if b.Status == StatusBlocked {
 			parts = append(parts, lastNote(b.Notes, 200))
 		}
-	case SecInProgress:
+	case ThreadWorking, ThreadIdle, ThreadNoAgent, ThreadMerged:
 		if it.Agent != "" {
 			parts = append(parts, "agent "+it.Agent)
 		} else {
 			parts = append(parts, "no agent")
 		}
-		if b.HasLabel(LabelRollingOut) {
+		if it.State.RollingOut {
 			parts = append(parts, "rolling out")
 		}
 	}
@@ -575,6 +630,8 @@ func (d Digest) headline() string {
 		fmt.Sprintf("%d waiting", d.count(SecWaiting)),
 		fmt.Sprintf("%d blocked", d.count(SecBlocked)),
 		fmt.Sprintf("%d in progress", d.count(SecInProgress)),
+		fmt.Sprintf("%d merged", d.count(SecMerged)),
+		fmt.Sprintf("%d rolling out", d.count(SecRollingOut)),
 		fmt.Sprintf("%d next", d.count(SecReady)),
 		fmt.Sprintf("%d backlog", d.count(SecBacklog)),
 	}
@@ -614,7 +671,7 @@ func renderDigest(d Digest) string {
 	for _, c := range d.Changes {
 		fmt.Fprintf(&s, "- %s\n", c)
 	}
-	for _, sec := range []Section{SecNeedsYou, SecWaiting, SecBlocked, SecInProgress, SecReady, SecBacklog} {
+	for _, sec := range []Section{SecNeedsYou, SecWaiting, SecMerged, SecRollingOut, SecBlocked, SecInProgress, SecReady, SecBacklog} {
 		items := d.Sections[sec]
 		fmt.Fprintf(&s, "\n## %s (%d)\n\n", sec, len(items))
 		if len(items) == 0 {
@@ -707,7 +764,7 @@ func (g GH) DigestPRs(urls []string) (map[string]DigestPR, int, error) {
 // parallel finish sooner for the same rate-limit points.
 const digestBatch = 20
 
-const digestPRFields = "number url state isDraft reviewDecision mergeable mergedAt commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"
+const digestPRFields = "number url state isDraft reviewDecision mergeable mergedAt headRefOid mergeStateStatus commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"
 
 func digestQuery(urls []string) (string, map[string]string) {
 	var q strings.Builder

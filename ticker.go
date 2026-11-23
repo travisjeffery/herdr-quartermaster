@@ -147,6 +147,9 @@ func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thre
 	if a, ok := byName[agentName(b.ID)]; ok {
 		th.Agent = &a
 	}
+	// PRs already holds the canonical selection with detailed evidence. Do
+	// not promote a light Noted lookup after a failed detail fetch: it would
+	// establish a false zero-review baseline for the next successful pass.
 	if pr, ok := st.PRs[b.ID]; ok {
 		th.PR = &pr
 		th.Checks = summarizeChecks(pr.Checks)
@@ -155,7 +158,8 @@ func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thre
 	}
 	th.Merged = st.MergedPRs[b.ID]
 	th.Runs = st.Runs[b.ID]
-	return th
+	th = restoreThreadEvidence(th, st.Threads[b.ID])
+	return th.derive()
 }
 
 func (t Ticker) refreshPRs(st *TickerState, active []Bead) {
@@ -424,7 +428,7 @@ func (t Ticker) once(st *TickerState) error {
 	var rows []sidebarRow
 	var alertThreads []Thread
 	current := map[string]bool{}
-	for _, th := range threads {
+	for i, th := range threads {
 		id := th.Bead.ID
 		current[id] = true
 		prev, seen := st.Threads[id]
@@ -440,6 +444,7 @@ func (t Ticker) once(st *TickerState) error {
 				t.log.Printf("%s woke at needs_me with no prompt since %s; not a resume", id, prev.ReadySince.Format(time.RFC3339))
 			}
 		}
+		th = th.derive()
 		out := transitionDebounced(th, prev, !seen, now, t.cfg.promptDebounce(), t.cfg.promptFlap())
 		if out.Resume {
 			if err := t.resume(id); err != nil {
@@ -447,8 +452,10 @@ func (t Ticker) once(st *TickerState) error {
 			} else {
 				t.log.Printf("resumed %s: its agent went back to work after needs_me", id)
 				th.Bead.Status = StatusInProgress
+				th = th.derive()
 			}
 		}
+		threads[i] = th
 		snap := snapshotDebounced(th, prev, now, t.cfg.promptDebounce(), t.cfg.promptFlap(), !seen)
 		t.journalAuto(th, prev, seen, &snap, now)
 		snap.Pending = append(snap.Pending, out.Prompts...)

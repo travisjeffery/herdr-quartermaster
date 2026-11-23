@@ -269,6 +269,11 @@ once per head commit; otherwise the board shows
 
 ### Features in detail
 
+Every view uses one [derived thread state](docs/thread-state.md): the same
+waiting, delivery, merged/rolling-out, working, idle, blocked and no-agent
+precedence, with one PR selector. View state never authorizes a merge or a
+lifecycle action.
+
 - **Names.** Quartermaster ties a worker to its bead by name: the bead id with
   dots as dashes (`backend-ab12.3` → `backend-ab12-3`). Dispatch and resume
   set it. If something else renames a worker, the ticker renames it back once
