@@ -48,6 +48,9 @@ type journalRecord struct {
 	Amount string `json:"amount,omitempty"`
 	Pass   bool   `json:"pass,omitempty"`
 	Text   string `json:"text,omitempty"`
+	// VerifierContext binds a pi pass to its backend, model and acceptance
+	// prompt. Empty on legacy records and all non-verifier actions.
+	VerifierContext string `json:"verifier_context,omitempty"`
 }
 
 func journalPath() string { return filepath.Join(stateDir(), "journal.jsonl") }
