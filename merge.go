@@ -13,10 +13,11 @@ import (
 // The merge runners carry out github.pr.merge and github.pr.automerge. They
 // take neither the worker's word nor the ticker's: before each attempt they
 // read the PR's head, review decision, merge state and checks from GitHub,
-// and they merge with --match-head-commit, so GitHub refuses a head that moved
-// between the check and the act. That compare-and-swap makes them retry-safe,
-// and the probe is the PR merged at that head. Auto requests use the same
-// gate and direct merge: a deferred native request is not head-bound.
+// and they act with --match-head-commit, so GitHub refuses a head that moved
+// between the check and the act. That compare-and-swap makes them retry-safe.
+// Direct merges probe for the PR merged at that head; auto-merge keeps native
+// --auto where GitHub requires an approving review on the base branch (refusing
+// it where no review is required) and probes for auto-merge on or merged there.
 
 // errUnmet is a precondition that doesn't hold yet, such as checks still
 // running: the step fails cleanly, and a later run of the same plan can pass.
@@ -53,9 +54,12 @@ func (m mergeRunner) view(ctx context.Context, s Step) (PR, string, error) {
 	return pr, url, nil
 }
 
-// pre requires the same task policy and live current-head evidence as the
-// ticker, for BOTH direct and auto requests. No branch protection is not
-// permission, and --auto can merge immediately on unprotected repositories.
+// pre requires task policy and live current-head evidence before merging.
+// Direct merges always require a fresh independent approval of the exact head
+// and complete resolved threads. Auto-merge requests keep native --auto where
+// GitHub enforces an approving review on the base branch, and refuse --auto
+// where no approving review is required (or where an already-APPROVED PR fails
+// the current-head review/thread gate).
 func (m mergeRunner) pre(ctx context.Context, s Step) error {
 	if method := s.Args["method"]; method != "" && method != "squash" && method != "merge" && method != "rebase" {
 		return fmt.Errorf("%w: unsupported merge method %q", errUnmet, method)
@@ -76,7 +80,7 @@ func (m mergeRunner) pre(ctx context.Context, s Step) error {
 		return fmt.Errorf("%w: %s is a draft", errUnmet, url)
 	}
 	c := summarizeChecks(pr.Checks)
-	if !mergeable(&pr, c) {
+	if !m.auto && !mergeable(&pr, c) {
 		return fmt.Errorf("%w: %s: %s", errUnmet, url, notReady(pr, c))
 	}
 	// Set the canonical target: never accept a URL or policy in response data.
@@ -84,6 +88,18 @@ func (m mergeRunner) pre(ctx context.Context, s Step) error {
 	if m.policy != nil {
 		policy := m.policy(pr)
 		pr.Policy = &policy
+	}
+	if m.auto {
+		if pr.Policy == nil || !pr.Policy.Allowed {
+			why := "task merge authorization unavailable"
+			if pr.Policy != nil && pr.Policy.Reason != "" {
+				why = pr.Policy.Reason
+			}
+			return fmt.Errorf("%w: %s: %s", errUnmet, url, why)
+		}
+		if !requiresGitHubReview(&pr) {
+			return fmt.Errorf("%w: %s: base branch requires no approving review; refusing native --auto", errUnmet, url)
+		}
 	}
 	q, aliases := gatesQuery([]PR{pr})
 	out, err := m.gh(ctx, "", "api", "graphql", "-f", "query="+q)
@@ -99,6 +115,23 @@ func (m mergeRunner) pre(ctx context.Context, s Step) error {
 	}
 	if pr.Gate != nil && pr.Gate.Head != want {
 		return fmt.Errorf("%w: head moved while fetching merge evidence", errStale)
+	}
+	if m.auto {
+		if pr.Gate == nil {
+			return fmt.Errorf("%w: %s: current-head review evidence unavailable", errUnmet, url)
+		}
+		if pr.Gate.Author == "" || pr.Gate.Viewer == "" || !strings.EqualFold(pr.Gate.Author, pr.Gate.Viewer) {
+			return fmt.Errorf("%w: %s: PR is not owned by the authenticated user", errUnmet, url)
+		}
+		// If GitHub already considers the PR approved, arming --auto could
+		// merge immediately (or as soon as checks finish): enforce the full
+		// current-head approval and thread gate.
+		if pr.ReviewDecision == "APPROVED" {
+			if blockers := mergeBlockers(&pr); len(blockers) > 0 {
+				return fmt.Errorf("%w: %s: %s", errUnmet, url, strings.Join(blockers, "; "))
+			}
+		}
+		return nil
 	}
 	if !readyToMerge(&pr, c) {
 		return fmt.Errorf("%w: %s: %s", errUnmet, url, strings.Join(mergeBlockers(&pr), "; "))
@@ -144,9 +177,9 @@ func (m mergeRunner) do(ctx context.Context, s Step, _ string) (string, error) {
 	if method := s.Args["method"]; method != "" {
 		args = append(args, "--"+method)
 	}
-	// Never arm deferred native auto-merge: it is not bound to this head or
-	// to our review/thread policy after a later push. An eligible auto request
-	// is executed as an exact-head merge; an ineligible one fails pre above.
+	if m.auto {
+		args = append(args, "--auto")
+	}
 	if s.Args["delete_branch"] == "true" {
 		args = append(args, "--delete-branch")
 	}
@@ -158,11 +191,14 @@ func (m mergeRunner) do(ctx context.Context, s Step, _ string) (string, error) {
 	if _, err := m.gh(ctx, "", args...); err != nil {
 		return "", err
 	}
+	if m.auto {
+		return fmt.Sprintf("auto-merge on %s at %s", url, short(s.Pre["head_sha"])), nil
+	}
 	return fmt.Sprintf("merged %s at %s", url, short(s.Pre["head_sha"])), nil
 }
 
-// probe: only a merge at the authorized head proves the effect. A native
-// auto-merge request is not head-bound and cannot count as completion.
+// probe: the PR merged at the step's head, or for auto-merge, auto-merge on
+// at that head (or already merged there).
 func (m mergeRunner) probe(ctx context.Context, s Step, _ string) (bool, bool, string, error) {
 	pr, url, err := m.view(ctx, s)
 	if err != nil {
@@ -172,6 +208,8 @@ func (m mergeRunner) probe(ctx context.Context, s Step, _ string) (bool, bool, s
 	switch {
 	case at && pr.State == "MERGED":
 		return true, true, fmt.Sprintf("merged %s at %s", url, short(pr.HeadSHA)), nil
+	case at && m.auto && pr.State == "OPEN" && pr.AutoMerge != nil && requiresGitHubReview(&pr):
+		return true, true, fmt.Sprintf("auto-merge on %s at %s", url, short(pr.HeadSHA)), nil
 	}
 	return false, true, "", nil
 }

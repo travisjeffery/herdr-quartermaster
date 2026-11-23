@@ -9,13 +9,14 @@ import (
 func autoMergePR() *PR {
 	pr := openPR()
 	pr.URL = "https://github.com/o/r/pull/7"
+	pr.ReviewDecision = "REVIEW_REQUIRED"
 	pr.AutoMerge = &AutoMerge{Method: "SQUASH"}
 	return pr
 }
 
 func TestBriefTurnsOnAutoMerge(t *testing.T) {
 	s := brief(bead(StatusInProgress), "tj/x", "/w/x", "", "")
-	for _, want := range []string{"`gh pr merge <url> --auto --squash`", "Leave it off on drafts", "`gh pr merge <url> --disable-auto`", "note that on the bead and carry on"} {
+	for _, want := range []string{"`gh pr merge <url> --auto --squash`", "Leave auto-merge off on drafts", "`gh pr merge <url> --disable-auto`", "note that on the bead and carry on"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("brief lacks %q:\n%s", want, s)
 		}
@@ -55,6 +56,7 @@ func TestAutoMergeOffQuiet(t *testing.T) {
 		{"waiting on a human decision", StatusNeedsMe, func(pr *PR) { pr.AutoMerge = nil }},
 		{"merged", StatusInProgress, func(pr *PR) { pr.AutoMerge, pr.State = nil, "MERGED" }},
 		{"another PR", StatusInProgress, func(pr *PR) { pr.AutoMerge, pr.Number, pr.URL = nil, 8, "https://github.com/o/r/pull/8" }},
+		{"no review required", StatusInProgress, func(pr *PR) { pr.AutoMerge, pr.ReviewDecision = nil, "" }},
 	}
 	for _, c := range cases {
 		pr := autoMergePR()
@@ -79,7 +81,7 @@ func TestReadyPromptWithAutoMerge(t *testing.T) {
 	pr.AutoMerge = &AutoMerge{Method: "SQUASH"}
 	th := thread(bead(StatusInProgress), agent("idle", 1), pr)
 	o := transition(th, Snapshot{Group: GroupReview, PRNumber: 7, PRState: "OPEN", ReviewsSplit: true}, false, t0)
-	if len(o.Prompts) != 1 || !strings.Contains(o.Prompts[0], "Native auto-merge is on but is not bound to this evidence") || strings.Contains(o.Prompts[0], "--match-head-commit") {
+	if len(o.Prompts) != 1 || !strings.Contains(o.Prompts[0], "Auto-merge is on, so GitHub merges it; don't merge it yourself.") || strings.Contains(o.Prompts[0], "--match-head-commit") {
 		t.Fatalf("got %+v", o.Prompts)
 	}
 	// It is still a ready prompt, dropped like one when the head moves.
@@ -93,26 +95,71 @@ func TestReadyPromptWithAutoMerge(t *testing.T) {
 	}
 }
 
-func TestUnsafeNativeAutoMergeWarnsBeforeReadiness(t *testing.T) {
+func TestUnsafeNativeAutoMergePolicyBAndInboxClear(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
 	pr := readyPR()
+	pr.URL = "https://github.com/o/r/pull/7"
 	pr.AutoMerge = &AutoMerge{Method: "SQUASH"}
 	pr.ReviewDecision, pr.Gate.Reviews = "", nil
 	th := thread(bead(StatusInProgress), agent("idle", 1), pr)
-	o := transition(th, Snapshot{}, true, t0)
-	if len(o.Events) != 1 || o.Events[0].Kind != EventUnsafeAutoMerge || !o.Notify || len(o.Prompts) != 1 || !strings.Contains(o.Prompts[0], "--disable-auto") {
-		t.Fatalf("missing first-pass warning: %+v", o)
+
+	// First sight is a baseline: no warning on first pass.
+	if o := transition(th, Snapshot{}, true, t0); len(o.Events) != 0 || o.Notify || len(o.Prompts) != 0 {
+		t.Fatalf("first pass must not warn: %+v", o)
 	}
-	prev := snapshot(th, Snapshot{}, t0)
+	// Already-armed PRs (for example from a prior snapshot before upgrade, or
+	// after a push) must not fire unsafe_auto_merge either.
+	already := Snapshot{PRNumber: 7, PRState: "OPEN", AutoMerge: pr.URL}
+	if o := transition(th, already, false, t0); len(o.Events) != 0 || o.Notify {
+		t.Fatalf("already-armed PR must not warn: %+v", o)
+	}
+	// Native auto-merge on a base branch requiring review is allowed under policy B.
+	reviewReq := readyPR()
+	reviewReq.URL = pr.URL
+	reviewReq.ReviewDecision, reviewReq.Gate.Reviews = "REVIEW_REQUIRED", nil
+	reviewReq.AutoMerge = &AutoMerge{Method: "SQUASH"}
+	if o := transition(thread(bead(StatusInProgress), agent("idle", 1), reviewReq), Snapshot{PRNumber: 7, PRState: "OPEN"}, false, t0); len(o.Events) != 0 || o.Notify {
+		t.Fatalf("review-required PR must not warn: %+v", o)
+	}
+
+	// Newly arming native auto-merge on an unprotected PR warns via ev() with
+	// a PR@head clear condition.
+	unarmed := Snapshot{PRNumber: 7, PRState: "OPEN"}
+	o := transition(th, unarmed, false, t0)
+	if len(o.Events) != 1 || o.Events[0].Kind != EventUnsafeAutoMerge || !o.Notify || len(o.Prompts) != 1 || !strings.Contains(o.Prompts[0], "--disable-auto") {
+		t.Fatalf("expected newly-armed unsafe warning: %+v", o)
+	}
+	ev := o.Events[0]
+	if ev.Clears == nil || ev.Clears.Kind != "unsafe_auto_merge" || ev.Clears.Key != inboxPRKey(th) {
+		t.Fatalf("missing PR@head clear condition: %+v", ev.Clears)
+	}
+	if err := writeEvent(ev); err != nil {
+		t.Fatal(err)
+	}
+	// Same state does not re-warn; moving head while still armed does not spam.
+	prev := snapshot(th, unarmed, t0)
 	if next := transition(th, prev, false, t0); len(next.Events) != 0 {
 		t.Fatalf("duplicate warning: %+v", next)
 	}
-	pr.HeadSHA = "new"
-	if next := transition(th, prev, false, t0); len(next.Events) != 1 || next.Events[0].Kind != EventUnsafeAutoMerge {
-		t.Fatalf("moved head not warned: %+v", next)
+	// Missing PR observation retains the inbox notice.
+	noPR := th
+	noPR.PR = nil
+	if err := reconcileInbox([]Thread{noPR}, nil); err != nil {
+		t.Fatal(err)
 	}
+	if items, _ := readInbox(); len(items) != 1 {
+		t.Fatalf("missing PR observation archived warning: %+v", items)
+	}
+	// Turning auto-merge off drops the queued disarm prompt and archives the notice.
 	pr.AutoMerge = nil
 	if pending := freshPending(th, o.Prompts); len(pending) != 0 {
 		t.Fatalf("stale disarm prompt: %v", pending)
+	}
+	if err := reconcileInbox([]Thread{th}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if items, _ := readInbox(); len(items) != 0 {
+		t.Fatalf("disarmed warning not archived: %+v", items)
 	}
 }
 

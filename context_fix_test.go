@@ -73,6 +73,8 @@ func TestCoordinatorGuidePointsAtCheck(t *testing.T) {
 	g := coordinatorGuide(Config{Repo: "/r"})
 	for _, want := range []string{
 		"quartermaster autonomy check <bead> --action A [--target T]",
+		"4 main\n  (merging an approved, green PR) and spending up to $500 (one charge, or per month for a recurring cost)",
+		"7 production additive or in place and spending more, or an amount\n  no one can estimate (`--action spend --amount <USD>[/month]`)",
 		"AUTO: [coordinator L<n> C<c>]",
 		"never lower than the worker's `CLASS:`",
 		"a question of taste or voice, involves other people",
@@ -84,7 +86,7 @@ func TestCoordinatorGuidePointsAtCheck(t *testing.T) {
 			t.Errorf("guide missing %q", want)
 		}
 	}
-	for _, gone := range []string{"wait for TJ's go-ahead", "only on TJ's go-ahead", "autonomy grant|revoke", "never answer it for TJ"} {
+	for _, gone := range []string{"outside messages, money or approving a PR", "wait for TJ's go-ahead", "only on TJ's go-ahead", "autonomy grant|revoke", "never answer it for TJ"} {
 		if strings.Contains(g, gone) {
 			t.Errorf("guide still says %q", gone)
 		}

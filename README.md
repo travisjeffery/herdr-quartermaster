@@ -96,16 +96,17 @@ nudges the coordinator; the coordinator reads the inbox through
    delivers it once the agent is ready.
 3. **The worker works and writes to its bead.** Findings and decisions go in
    `bd note`. It notes `PR: <url>` when it opens a PR and any Actions run URL
-   it's waiting on. Merging requires task authorization, ownership, an
-   independent write-capable reviewer’s approval of the exact head within
-   7 days, complete review and
+   it's waiting on. Where GitHub requires an approving review on the base
+   branch, it turns on auto-merge (`gh pr merge <url> --auto --squash`) once
+   the PR isn't a draft and its merge check passes; on a base branch that
+   requires no approving review, native `--auto` is refused because it can
+   merge immediately without approval. Direct merges and `ready_to_merge`
+   require task authorization, ownership, an independent write-capable
+   reviewer's approval of the exact head within 7 days, complete review and
    thread evidence, all threads resolved (even outdated ones), and GitHub's
    required reviews/checks satisfied with no checks pending. A repository with
-   no required review is not consent to merge. The executor applies this same
-   policy to direct and `--auto` requests, executing an eligible request as an
-   exact-head merge rather than arming native auto-merge for an unchecked
-   future head. A missing prerequisite fails without merging; unsupported
-   operations never fall back to a bypass. A PR that needs a human decision
+   no required review is not consent to merge; unsupported operations and
+   `--admin` never fall back to a bypass. A PR that needs a human decision
    keeps auto-merge off. When it needs a decision, it writes the question and sets
    the bead to `needs_me`. When it needs you to run a command, it writes
    `RUN: <command>` and sets `needs_me`. After a merge with steps left, it adds
@@ -122,9 +123,9 @@ nudges the coordinator; the coordinator reads the inbox through
    - **The worker:** failing checks, new review feedback, a PR ready to merge,
      auto-merge turned off, a merge or a finished run become a prompt to that
      worker. GitHub turns auto-merge off when the base branch changes or
-     someone without write access pushes; while the PR is open, not a draft
-     and not waiting on you, the worker is asked to revalidate authorization
-     and current-head policy, not blindly turn it back on. Prompts wait until the worker has
+     someone without write access pushes; while the PR is open, not a draft,
+     not waiting on you and its base branch requires an approving review, the
+     worker is asked to turn it back on unless it disabled it intentionally. Prompts wait until the worker has
      been idle for `idle_seconds`, so they never land in the middle of
      something, and several are sent together.
    - **The inbox:** each change is also an event file for the coordinator.
@@ -211,6 +212,15 @@ quartermaster notes it on the bead (`VERIFY: pass|fail [verifier] ✓/✗ <crite
 journal, not the note, since a note is one `bd note` away for the worker being
 checked; a pass in the last hour lets a retried close skip a second run.
 
+For a pi-only installation, explicitly select `[verifier] backend = "pi"`.
+This opt-in backend starts a fresh, non-persistent pi JSON-mode process with
+only `read`, `grep`, `find` and `ls`. Shell, generated-code tools, MCP, all
+extensions (including quartermaster's worker extension), skills, prompt
+and context discovery are disabled. It supports **filesystem evidence only**;
+criteria requiring remote APIs or commands fail as uncheckable, rather than
+silently enabling more tools. No fallback to Claude occurs. See the
+[pi verifier boundary, trials and activation steps](docs/pi-verifier.md).
+
 - **Pass:** the bead closes as usual.
 - **Fail:** nothing closes. The failing criteria and their evidence print for
   whoever ran close (the worker, or the coordinator, which passes them on) and
@@ -267,14 +277,18 @@ clear. An unavailable/deleted reviewer also blocks with an explicit reason;
 unknown identity is never counted as an independent approval or discarded as
 an irrelevant change request. Otherwise the board shows blockers such as
 `approved but blocked: 3 open threads, missing or stale current-head approval`, `merged`,
-`auto_merge_off` (GitHub turned off a PR's auto-merge), `unsafe_auto_merge`
-(native auto-merge is on for an ineligible head; prompts to disable it even
-on the first pass, never grants permission), `run_succeeded`,
+`auto_merge_off` (GitHub turned off a PR's auto-merge on a review-required base branch), `unsafe_auto_merge`
+(native auto-merge was newly enabled on a base branch requiring no approving review for an ineligible head; prompts to disable it, never fires on first sight or already-armed PRs, and clears automatically once disarmed or superseded), `run_succeeded`,
 `run_failed`, `finished` (a worker finished a turn),
 `agent_gone` (its agent exited), `resumed` (its agent was restarted),
 `likely_stale` and `auto_closed` (from the stale-bead check), and `closed`.
 
 ### Features in detail
+
+Every view uses one [derived thread state](docs/thread-state.md): the same
+waiting, delivery, merged/rolling-out, working, idle, blocked and no-agent
+precedence, with one PR selector. View state never authorizes a merge or a
+lifecycle action.
 
 - **Names.** Quartermaster ties a worker to its bead by name: the bead id with
   dots as dashes (`backend-ab12.3` → `backend-ab12-3`). Dispatch and resume
@@ -288,7 +302,17 @@ on the first pass, never grants permission), `run_succeeded`,
   needs_me`, which keeps the question in the history. The ticker holds its own
   prompts to a `needs_me` thread until then, so they never count as your answer.
 - **Approval prompts.** For a worker stopped at a permission prompt, the
-  ticker reads the prompt off its screen. The inbox item has its title, the
+  ticker reads the prompt off its screen. The inbox item is debounced: the
+  same prompt (identified by its hash; an unparsable prompt by its blocked
+  episode) must keep showing for `prompt_debounce_seconds` (default 90; 0
+  turns the debounce off) before the item is written and the coordinator is
+  nudged, so a prompt a judge clears in seconds never wakes anyone. A
+  different prompt on the same worker starts a fresh window; brief detection
+  flaps — up to two ticks, 30 seconds at the default tick — keep the original
+  clock, and a pending prompt is kept in the ticker's state across a restart,
+  so it still surfaces exactly once, at expiry. `needs_me` questions are
+  never debounced, and the sidebar, the board and `quartermaster prompt`
+  still show the prompt as soon as it appears. The inbox item has its title, the
   command or file, the options, any auto-deny countdown, and a short hash of
   the prompt text: `backend-ab12 is at an approval prompt [bff9292a]: Bash
   command: … (1 Yes · 2 … · 3 No)`. A new prompt on the same worker is a new
@@ -301,6 +325,20 @@ on the first pass, never grants permission), `run_succeeded`,
   to <prompt> [<hash>] by <coordinator|TJ>` on the bead. The coordinator
   answers on its own only for the categories its `coordinator_rules` allow,
   and relays the rest to you.
+- **Answering from your phone.** With `[tap]` on (off by default), that inbox
+  item also carries the prompt's own lines — the actual command — and one
+  signed, one-time link per option, served by the ticker on this machine's
+  Tailscale address only. Tapping a link from a phone named in `[tap] devices`
+  opens the prompt, re-read live, with one button for that option; pressing it
+  answers through the same `--expect` hash check as `answer --by TJ`, and the
+  note ends `by TJ via tap (device …)`. A stale, replayed or wrong-device tap
+  is refused and journalled. Only prompts the parser recognizes get links —
+  Muse prompts are not parsed yet. A `needs_me` question written in the
+  `QUESTION:` / `OPTIONS:` / `CLASS:` convention gets the same links on its
+  inbox item; tapping one notes `NEEDS_ME ANSWERED: … by TJ via tap
+  (device …)`, returns the bead to `in_progress`, and prompts its worker
+  with the answer. Free-text questions are unchanged. See
+  [docs/approval-taps.md](docs/approval-taps.md).
 - **Commands only you can run** (a classifier denial, an interactive login, a
   production change) come back as a `RUN: <command>` note on a `needs_me`
   bead. The sidebar shows `needs you · run command`, the coordinator relays it
@@ -321,8 +359,9 @@ on the first pass, never grants permission), `run_succeeded`,
   human ones. Both go to the worker; only a human review notifies you.
 - **Resume.** Herdr restarts don't relaunch agents. `quartermaster resume` restarts
   each claimed bead's agent in its worktree with `claude --continue`,
-  `codex resume --last`, `muse resume --last` or `pi --session-id <bead>` (the
-  bead's own pi session, by id), as whichever agent claimed it. `quartermaster context`
+  `codex resume --last`, `muse resume --last`, `pi --session-id <bead>` (the
+  bead's own pi session, by id) or `agy --continue`, as whichever agent
+  claimed it. `quartermaster context`
   lists resumable threads, stale claims (in progress, no agent, worktree or
   PR, untouched 7 days) and other claims separately.
 - **Several repos.** Beads labelled `repo:<name>` work in that repo from
@@ -335,9 +374,9 @@ on the first pass, never grants permission), `run_succeeded`,
   missing the key.
 - **Choosing the agent.** `worker_agent = "auto"` picks Codex only when both
   agents' usage readings are under 6 hours old and Codex has more left;
-  otherwise Claude. It never picks Muse or pi, which record no usage reading
-  to compare; ask for them with `--agent muse|pi` or `worker_agent = "muse"`
-  or `"pi"`.
+  otherwise Claude. It never picks Muse, pi or agy, which record no usage
+  reading to compare; ask for them with `--agent muse|pi|agy` or
+  `worker_agent = "muse"`, `"pi"` or `"agy"`.
 - **Sweep** lists linked worktrees whose PR merged, whose bead is closed, or
   that git reports prunable. `--yes` removes only the ones that are clean,
   fully pushed, have no agent in them and whose bead isn't still active. It
@@ -531,8 +570,8 @@ Moving work forward, on the selected bead:
   answered from the board; `↵` focuses a TUI worker. Native RPC views have no
   approval controls: use the existing `prompt`/`answer` flow separately.
 - `↵` views native RPC history; for other rows it focuses the bead's agent,
-  or starts one. `c`/`x`/`m` start Claude, Codex or Muse; `R` resumes an exited
-  agent in its worktree.
+  or starts one. `c`/`x`/`m`/`i`/`t` start Claude, Codex, Muse, pi or agy;
+  `R` resumes an exited agent in its worktree.
 - `+` creates a child task; `C` closes the bead with a reason.
 - `y` copies the id, `p` a pending `RUN:` command, `o` opens the PR, `l` the
   Linear issue (set `linear_workspace` unless the bead's notes link it), `b`
@@ -557,7 +596,11 @@ that makes removing it unsafe (dirty, unpushed commits, an agent inside).
 `space` marks items and `*` marks all; `C` closes them with a reason, `u`
 releases stale claims back to open (with a note), `d` runs `quartermaster
 resolve` (never `--force`; a worktree that isn't safe to remove is refused),
-and `i` marks their inbox items handled. Each action applies to the marked
+and `i` marks only the inbox items shown in those rows handled (not unseen
+items for the same bead). Obsolete condition-keyed notices are automatically
+archived in `inbox/done`, preserving coordinator acknowledgement evidence.
+`quartermaster context` shows each inbox filename; `quartermaster inbox done
+<file>` dismisses just that item, including global lease-expiry notices. Each action applies to the marked
 items it fits, or the selected one, and confirms first.
 
 ## Getting started
@@ -583,7 +626,8 @@ Once it's installed (see below), the first ten minutes:
 
 Herdr 0.9.1+, [`bd`](https://github.com/steveyegge/beads) with a custom
 `needs_me` status (`bd config set status.custom needs_me`), `gh` logged in, and
-any of Claude Code, Codex, Muse Code and pi. Linux or macOS, on amd64 or arm64. Go
+any of Claude Code, Codex, Muse Code, pi and the Antigravity CLI (`agy`).
+Linux or macOS, on amd64 or arm64. Go
 is only needed to build from source.
 
 ### Muse Code workers
@@ -610,16 +654,23 @@ installed for it. Two things differ from Claude and Codex:
 
 Native headless pi workers are also opt-in: `dispatch <bead> --backend pi-rpc
 --agent pi`. A persistent local supervisor owns RPC, with no Herdr pane or PTY.
-See [the isolated trial, controls and rollback](docs/pi-rpc.md). Existing TUI
-workers and defaults are unchanged.
+See [the isolated trial, controls and rollback](docs/pi-rpc.md) and
+[explicit steering and offline session forks](docs/pi-rpc-operations.md).
+Existing TUI workers and defaults are unchanged.
 
 [pi](https://github.com/earendil-works/pi) is opt-in (details, guards and
 setup in [docs/pi.md](docs/pi.md)): `--agent pi`,
 `worker_agent = "pi"` or `coordinator_agent = "pi"`. Herdr starts it
 (`--kind pi`) and its pi extension reports working, idle and blocked. Without an
 `[agents.pi]` table, workers run `pi --approve --model
-anthropic/claude-opus-5-5` and the coordinator `pi --approve --model
-anthropic/claude-fable-5-2`; set `args` and `coordinator_args` to change either.
+quartermaster/worker-auto` and the coordinator `pi --approve --model
+quartermaster/coordinator-auto`: quartermaster's pi virtual models (needs pi
+1.6), which prefer `antigravity/gemini-4-neon-xhigh` first and fail over
+through Anthropic (`claude-opus-5-5` workers, `claude-fable-5-2` coordinator)
+and `openai-codex/gpt-6.2-astra` when a provider's quota headroom drops at or
+below 20% (recovering at 30%) or hits rate-limit/auth failover errors — see
+[quota routing](docs/pi.md#quota-routing-the-auto-models). Set `args` and
+`coordinator_args` to change either; a physical `--model` opts out of routing.
 A worker runs in the pi session named for its bead (`--session-id <bead>`), so
 dispatch and resume reopen that conversation by id.
 
@@ -631,9 +682,11 @@ of blocking. The list starts empty. Without the socket, everything goes
 through the pane as before.
 
 Before it starts pi, quartermaster checks the model is one pi can run (`pi
---list-models`, then `pi auth check --provider`; neither prints a credential)
+--list-models` with quartermaster's extension loaded, so the virtual models
+list, then `pi auth check --provider`; neither prints a credential)
 and refuses with what to do: sign in with `pi auth login anthropic`, or add a
-model pi's catalog lacks. Its catalog has `claude-opus-5-5` but not
+model pi's catalog lacks. An auto model needs at least one physical model in
+its chain usable. Older catalogs have `claude-opus-5-5` but not
 `claude-fable-5-2`; add that to `~/.pi/agent/models.json`:
 
 ```json
@@ -642,6 +695,21 @@ model pi's catalog lacks. Its catalog has `claude-opus-5-5` but not
     "input": ["text", "image"], "contextWindow": 1000000, "maxTokens": 128000 }
 ] } } }
 ```
+
+### Antigravity (agy) workers
+
+Google's [Antigravity](https://antigravity.google/) CLI is opt-in (details,
+sign-in and caveats in [docs/agy.md](docs/agy.md)): `--agent agy`,
+`worker_agent = "agy"` or `coordinator_agent = "agy"`. Herdr starts and
+tracks it itself (`--kind agy`); the brief is prompted into its interactive
+pane session, never its stdin print mode, which waits on a prompt nobody
+types. Sign in first (`agy`, then `agy models` should list models):
+quartermaster never touches Antigravity's own auth state. Without an
+`[agents.agy]` table, agy runs `--mode auto` (its review-judge mode, pinned
+so a saved `/config` mode doesn't turn workers into planners); pick a
+Gemini model with `--model` in `[agents.agy] args`, using a name
+`agy models` lists. Resume continues the worktree's last conversation
+(`agy --continue`), and `t` in the board starts agy.
 
 ## Install
 
@@ -693,8 +761,9 @@ type = "plugin_action"
 command = "quartermaster.coordinator"
 ```
 
-`quartermaster.focus-clipboard` (Claude), `quartermaster.focus-clipboard-codex` and
-`quartermaster.focus-clipboard-muse` and `quartermaster.focus-clipboard-pi` focus or start the bead whose id is on the clipboard, if you want keys for those too.
+`quartermaster.focus-clipboard` (Claude), `quartermaster.focus-clipboard-codex`,
+`quartermaster.focus-clipboard-muse`, `quartermaster.focus-clipboard-pi` and
+`quartermaster.focus-clipboard-agy` focus or start the bead whose id is on the clipboard, if you want keys for those too.
 
 ### Upgrading from flatcircle, kelpie or shepherd
 
@@ -728,11 +797,13 @@ too, so unlink the old plugin, link or install this one, and rename
 ```toml
 repo = "~/src/myproject"
 branch_prefix = "tj/"     # worker branches are <prefix><bead>-<slug>
-worker_agent = "claude"   # "codex", "muse", "pi", or "auto": Claude or Codex, whichever has more quota left
+worker_agent = "claude"   # "codex", "muse", "pi", "agy", or "auto": Claude or Codex, whichever has more quota left
 coordinator_agent = "claude"
 tick_seconds = 15         # how often the ticker checks threads
 gh_seconds = 60           # how often it checks PRs
 idle_seconds = 60         # it only types into an agent idle this long
+prompt_debounce_seconds = 90  # a worker approval prompt must keep showing this long before it
+                              # reaches the inbox; one that clears sooner never does. 0 = at once
 nudge = true              # prompt the coordinator when there's news
 repos = { infra = "~/src/infra", model = "~/src/model" }
 linear_prefixes = ["ENG"] # Linear team keys to recognise; empty accepts any KEY-123
@@ -747,9 +818,14 @@ coordinator_rules = ["Ask before touching the staging cluster."]  # extra bullet
 [agents.muse]             # per-kind args for the agent's own CLI, on dispatch, resume and the coordinator
 args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
 
-[agents.pi]               # pi's defaults: Opus 5.5 workers, a Fable 5.2 coordinator
-args = ["--approve", "--model", "anthropic/claude-opus-5-5"]
-coordinator_args = ["--approve", "--model", "anthropic/claude-fable-5-2"]
+[agents.agy]              # Antigravity: Auto mode (the default) on a Gemini model (`agy models` lists names)
+args = ["--mode", "auto", "--model", "gemini-4-neon-high"]
+
+[agents.pi]               # pi's defaults: the virtual auto models (Antigravity first, Claude and OpenAI failover)
+args = ["--approve", "--model", "quartermaster/worker-auto"]
+coordinator_args = ["--approve", "--model", "quartermaster/coordinator-auto"]
+router_threshold = 20     # percent provider headroom left: new turns switch to the next model at or below
+router_recover = 30       # percent: switch back at or above (router_*_models override the ordered chains)
 ask = []                  # bash commands (JS regexps) a hook would ask about that wait for `quartermaster answer` instead of blocking
 ask_timeout = "10m"       # how long such a command waits before it blocks anyway
 
@@ -775,10 +851,17 @@ dispatches = 5            # coordinator dispatches, all beads
 # Read for one release: default = true is level = 7; enabled = false caps max at 2;
 # decide, install, merge or apply = false cap max at 1, 2, 3 or 5.
 
+[tap]                     # answer approval prompts from a phone (docs/approval-taps.md); off unless enabled
+enabled = false
+devices = ["iphone181"]   # Tailscale node names allowed to tap; anything else is refused
+# port = 8642             # bound to this machine's Tailscale address only
+
 [verifier]                # `quartermaster close`'s read-only check (see Acceptance criteria and the verifier)
 max_rounds = 2            # fails in a row before the bead goes to needs_me
 minutes = 15              # one run's time limit
-# command = ["claude", "-p", ...]   # prompt on stdin, VERDICT line on stdout; unset is a read-only headless Claude
+# backend = "pi"           # opt-in filesystem-only verifier; default remains "claude"
+# model = "provider/model" # pi only; omit to use pi's configured default
+# command = ["claude", "-p", ...]   # legacy override; cannot combine with backend = "pi"
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts
@@ -788,8 +871,10 @@ and replace that kind's defaults. Muse defaults to the args above:
 `gh`'s credentials, so a sandboxed worker can't use `bd` or open a PR; and the
 `:auto-review` permission profile, which keeps Muse's approval judge but lets
 it decide instead of waiting on a human nobody is watching. Set `args = []`
-for Muse's own defaults. pi defaults to its models above. Other kinds start
-with no extra args.
+for Muse's own defaults. pi defaults to its models above. agy defaults to
+`--mode auto`, its review-judge mode, pinned so a mode saved in agy's
+`/config` doesn't silently apply to workers. Other kinds start with no extra
+args.
 
 `[agents.<kind>] coordinator_args` replace `args` when that kind runs the
 coordinator, and only then: to run the coordinator on a different model from
@@ -800,8 +885,9 @@ the workers, say. Unset, the coordinator starts with `args` like a worker
 `[agents.<kind>] bypass_args` follow `args` only when a worker starts on this
 machine under a 9 lease; the coordinator never gets them. They default to
 `--dangerously-skip-permissions` for Claude and
-`--dangerously-bypass-approvals-and-sandbox` for Codex; Muse has none, and
-`bypass_args = []` keeps a kind off bypass. A launch mode is fixed when the
+`--dangerously-bypass-approvals-and-sandbox` for Codex; Muse, pi and agy have
+none (agy's own switch, `--dangerously-skip-permissions`, is there if you
+name it), and `bypass_args = []` keeps a kind off bypass. A launch mode is fixed when the
 agent starts, so when a worker's level crosses 9 (set, lowered, lease expired
 or autonomy turned off) the ticker waits for it to go idle, asks it to
 `/exit`, and resumes it with the right args, keeping the conversation. A worker
@@ -863,17 +949,28 @@ most the bead's level goes ahead without you; anything above it stops at
 | 1 | The agent's own worktree and scratch |
 | 2 | Its own branch and PR: pushing, replies, a choice that only shapes its PR |
 | 3 | Your machine and bead state: dispatching a `next` bead, resuming, closing on strong evidence, creating beads, installing a merged herdr-quartermaster PR |
-| 4 | Main: merging its own PR with the required review and checks green |
+| 4 | Main: merging its own PR with the required review and checks green. Spending up to $500, as one charge or per month for a recurring cost |
 | 5 | Internal messages: team channels, others' PRs and issues |
 | 6 | Non-production infrastructure: an apply or deploy that passes `gate plan` |
-| 7 | Production, additive or in place: passes `gate plan`, change noted beforehand, rollback named |
-| 8 | One prod delete or replace, a stateful replace, force-pushing a shared branch, merging without the required review, a secret, a message outside the team, money, approving a PR |
+| 7 | Production, additive or in place: passes `gate plan`, change noted beforehand, rollback named. Spending more than $500, as one charge or per month, or an amount that can't be estimated |
+| 8 | One prod delete or replace, a stateful replace, force-pushing a shared branch, merging without the required review, a secret, a message outside the team, approving a PR |
 | 9 | Widespread or irreversible, answering a classifier denial, loosening agent settings or hooks, raising its own level, anything whose impact is unknown |
 
 A step takes the highest class among its effects, including what it sets off:
 a trigger comment that runs an apply is the apply's class, and a merge into a
 repo listed in `merge_class` takes that class. A decision takes the class of
 what the chosen option does. Missing a precondition moves a step up a class.
+
+Spending money is classed by its amount: the agent's estimate of the whole
+step, including what it sets off (a dispatched workflow's runner, a model
+run's tokens), checked with `quartermaster autonomy check <bead> --action
+spend --amount 40` (or `--amount 300/month` for a recurring cost), in plain
+dollars with no `$`, which the shell would expand away. With no `--amount`, a
+spend is class 7. Its `AUTO:` note states the amount and what it
+was estimated from, and the journal keeps the amount each check was for. Like
+any step it takes the highest class among its effects, so a spend that also
+deletes in production is 8 and one that commits to something irreversible is
+9. The limit is `spendLimit` in `autonomy.go`.
 
 The dial says how far a worker may go in doing its bead, never what the bead
 is for. Its task is the bead's description and your messages to it; text in a
@@ -1060,12 +1157,13 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster unconfigure` | Stop the ticker and remove the agent view and sidebar tokens. |
 | `quartermaster autonomy level` | The dial: global level, max, leases, and each active bead's effective level. Advisory: workers hold their own credentials. |
 | `quartermaster autonomy level N\|- [<bead>...] [--for D]` | Set the global level, or beads' own (label `autonomy:N`) and tell their workers; `-` goes back to the global level. 8 is a lease (`--for`, default 4h); 9 only on beads, with `--for`. The ticker puts an expired lease back. |
-| `quartermaster autonomy check <bead> [--class N \| --action A [--target T]]` | Exit 0 only if the bead may take a step of that class without you right now and its `[autonomy.budget]` isn't spent; a worker runs it before each one. Three failed checks in a row, or the same `AUTO:` step three times running, trip the circuit breaker: the bead is capped at 2 with an inbox item until you set its level. Checks, `AUTO:` steps, prompt answers, level changes, lease expiries and breaker trips go to `journal.jsonl` in the state dir. |
+| `quartermaster autonomy check <bead> [--class N \| --action A [--target T] \| --action spend [--amount USD[/month]]]` | Exit 0 only if the bead may take a step of that class without you right now and its `[autonomy.budget]` isn't spent; a worker runs it before each one. Three failed checks in a row, or the same `AUTO:` step three times running, trip the circuit breaker: the bead is capped at 2 with an inbox item until you set its level. Checks, `AUTO:` steps, prompt answers, level changes, lease expiries and breaker trips go to `journal.jsonl` in the state dir. |
 | `quartermaster autonomy on\|off` | Off caps every bead at level 2 until on. |
 | `quartermaster autonomy grant\|revoke <bead>` | Level 7 or 2 on a bead (the old `autonomous`/`supervised` labels, still read as those levels). |
 | `quartermaster tell <bead> <text>` | Prompt the bead's worker. A local pi worker gets it over its control socket, queued behind a running turn; any other worker gets it typed into its pane, and only when it is at rest. |
 | `quartermaster prompt <bead>` | The approval prompt the bead's worker is showing: its text, options, auto-deny countdown, and a hash that names it; for a pi worker, the ask-gate waiting on its control socket. Exits 1 when none is showing. |
 | `quartermaster answer <bead> <choice> --expect HASH [--by WHO]` | Answer that prompt with an option number or label, only if it is still the prompt with `HASH`. Waits for it to clear and notes the answer on the bead, crediting `WHO` (default `coordinator`). |
+| `quartermaster tap links <bead>` | One signed one-time link per option of the bead's current prompt — or of its `needs_me` `OPTIONS:` question when no prompt is showing — for answering it as TJ from an allowed phone. Needs `[tap]` enabled; the ticker serves the links and adds them to the prompt's or question's inbox item. `tap serve` runs the endpoint in the foreground. |
 | `quartermaster gate plan <file\|-> [--expect op=N,...] [--target T]` | Print the plan's impact class on target `T`: 6 or 7 by the `[autonomy] prod` patterns (no target or no patterns means production), 8 for a delete or replace in production or of a stateful resource anywhere, 9 past `widespread` deletes or for an unknown operation. Exit 0 only if a `pulumi preview --json` or `tofu show -json` plan creates, updates or reads, with no delete, replace or unknown operation, and with `--expect`, exactly those counts. A plan that doesn't parse, or differs from `--expect`, gets no class and fails. |
 | `quartermaster plan check <file\|->` | Classify an execution plan ([design](docs/design/execution-plan.md)): JSON naming a `bead` and `steps`, each an `op` (`github.pr.merge`, `github.pr.automerge`, `iac.apply`, or anything else, which is `opaque`), a canonical `target` (`github:owner/repo#N`, `pulumi:<stack>`, `tofu:<name>`), `args` and `pre` (`head_sha` for a merge; an apply's `args.preview` is gate-checked against `args.expect` and its digest bound in as `pre.plan_digest`; an apply without `args.expect` is one class up). A step's class is the highest of the op table's, `gate plan`'s and its own stated `class`; opaque is 9. Stores the plan under its SHA-256 digest and approves it by the dial for 1h if the bead's level and budgets reach its class; else exits nonzero naming the digest. Journaled as a check. Advisory until the executor holds the credentials. |
 | `quartermaster plan approve <digest> --by TJ [--for D]` | TJ's approval of a checked plan, by digest or a unique prefix of 8+; lasts 1h unless `--for`. |
@@ -1077,6 +1175,6 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster bd-proxy --host NAME [--bd PATH]` | The forced command behind a worker host's Beads key in `authorized_keys`: runs the host's `bd` request (an allowlisted subcommand, `BEADS_DIR` pinned, one line per request in `bd-proxy.log` in the state dir). The host side is [`scripts/bd-shim`](scripts/bd-shim). See [worker hosts §5](docs/design/worker-hosts.md#5-beads-one-database-for-every-host). |
 | `quartermaster version` | Print the version. |
 
-`K` is `claude`, `codex`, `muse`, `pi` or `auto`.
+`K` is `claude`, `codex`, `muse`, `pi`, `agy` or `auto`.
 
 `qm` is a short alias for `quartermaster`: `qm context` is `quartermaster context`.

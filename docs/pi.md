@@ -1,18 +1,19 @@
 # Workers and the coordinator on pi
 
-[pi](https://github.com/earendil-works/pi) is an opt-in fourth agent kind next
-to `claude`, `codex` and `muse`: `--agent pi`, `worker_agent = "pi"` or
+[pi](https://github.com/earendil-works/pi) is an opt-in agent kind next
+to `claude`, `codex`, `muse` and [`agy`](agy.md): `--agent pi`, `worker_agent = "pi"` or
 `coordinator_agent = "pi"`. Nothing changes until you ask for it. This page
 covers what works under pi, how it differs from Claude Code, and the setup
-steps only you can do. Checked against pi 1.5.2 and herdr 0.9.5.
+steps only you can do. Checked against pi 1.6.0 and herdr 0.9.5; the quota
+router below needs pi 1.6 (virtual models).
 
 ## What works
 
 | | How |
 |---|---|
 | Start | `herdr agent start --kind pi`; herdr's own pi extension reports working, idle and blocked. |
-| Models | Workers `anthropic/claude-opus-5-5`, coordinator `anthropic/claude-fable-5-2`; `[agents.pi] args` and `coordinator_args` replace them. |
-| Model check | Before starting pi, quartermaster runs `pi --list-models <id>` (with the args' `-e` extensions) and, if the model isn't listed, `pi auth check --provider <p>`, and refuses with the fix. Neither prints a credential. Dispatch checks before it creates the worktree or claims the bead. |
+| Models | Workers `quartermaster/worker-auto`, coordinator `quartermaster/coordinator-auto`: quartermaster's pi virtual models, preferring `antigravity/gemini-4-neon-xhigh` first and failing over through `anthropic/claude-opus-5-5` / `anthropic/claude-fable-5-2` and `openai-codex/gpt-6.2-astra` on low provider quota or failover errors (below). `[agents.pi] args` and `coordinator_args` replace them; a physical `--model` opts out of routing. |
+| Model check | Before starting pi, quartermaster runs `pi --list-models <id>` (with the extensions the start will load, quartermaster's included, so the virtual models list) and, if the model isn't listed, `pi auth check --provider <p>`, and refuses with the fix. For a virtual model, at least one physical model in its ordered chain must be listed by pi; if none is usable, dispatch fails closed with actionable per-model errors before creating a worktree or claiming the bead. Neither command prints a credential. |
 | Brief | Typed in with `herdr agent prompt`, as for Claude. pi has no SessionStart hook; the brief already says to run `bd prime` first. |
 | Prompts after the brief | Workers use their control socket (below), with the existing pane fallback. **Coordinator ticker notifications** use a separate authenticated, durable inbox channel, never terminal paste, even when the socket is absent. |
 | Ask-gates | A guarded command on `[agents.pi] ask` waits for `quartermaster answer` instead of blocking (below). The list starts empty. |
@@ -20,7 +21,91 @@ steps only you can do. Checked against pi 1.5.2 and herdr 0.9.5.
 | needs_me wake check | Read from the session file: a prompt after the worker settled resumes the bead, pi waking itself doesn't (below). |
 | Finished turns | The id of the session's last turn-ending assistant entry is kept in the ticker's snapshot; a new id is a finished turn even if no pass saw the agent working, and an `error` or `aborted` turn is reported as `stopped on error: <message>`. |
 | Guards | quartermaster's pi extension, loaded into every pi it starts (below). |
-| Close verifier | Unchanged: `claude -p`, whatever the worker's kind. |
+| Close verifier | Default remains `claude -p`. Opt in separately to the [filesystem-only pi verifier](pi-verifier.md) with `[verifier] backend = "pi"`. |
+
+## Quota routing: the auto models
+
+`quartermaster/worker-auto` and `quartermaster/coordinator-auto` are pi
+virtual models (`docs/virtual-models.md` in pi) registered by
+quartermaster's extension (`pi/router.ts`), so the TUI and native RPC
+launches both get them. The selection stays the virtual model for the
+life of the session; each request is dispatched to a physical model, and
+assistant messages record which one answered. One session, one worktree,
+any provider in the chain.
+
+- **Ordered physical model chains.** Both roles prefer
+  `antigravity/gemini-4-neon-xhigh` first, then fail over through Claude
+  (`anthropic/claude-opus-5-5` for workers, `anthropic/claude-fable-5-2`
+  for the coordinator) and OpenAI (`openai-codex/gpt-6.2-astra`).
+  Reasoning models receive the selected thinking level (`xhigh` unless
+  the launch sets another); fixed-tier non-reasoning models such as
+  `antigravity/gemini-4-neon-xhigh` receive `"off"`.
+  `[agents.pi] router_worker_models` and `router_coordinator_models`
+  replace the full ordered chains (and the legacy `router_worker_model`,
+  `router_coordinator_model`, and `router_fallback_model` fields remain
+  supported). Only physical models listed as available in pi are routed
+  to, so environments with a subset of providers (such as Antigravity
+  alone, or Claude and OpenAI without the Antigravity bridge) work
+  without extra configuration.
+- **Per-provider quota gating.** quartermaster writes one normalized
+  quota snapshot, `<state dir>/pi/quota.json`, from the Antigravity
+  statusline observation (`agy-statusline.observation.json`), Claude's
+  statusline observation, and Codex's latest rollout (a reading older
+  than 6h is stale). It is written on every pi launch and refreshed by
+  the ticker each minute, and the router reads it per request. Each
+  candidate in the chain is gated **only** by its own provider's reading
+  (`antigravity/*` -> `quota.antigravity`, `anthropic/*` ->
+  `quota.claude`, `openai*/*` -> `quota.openai`), so low headroom on one
+  provider never moves a session off a different healthy provider. When
+  a fresh reading shows at most `router_threshold` percent left in its
+  tightest live window (default 20), new turns step to the next healthy
+  model in the chain; if every non-cooled candidate is low, the one with
+  the most headroom wins.
+- **Failover errors, cooldowns, and recovery.** Tool follow-ups stay
+  sticky on the turn's physical model. On a retry after quota
+  exhaustion, rate limits (`429`, `529`, `ResourceExhausted` /
+  `agy rate limit`), provider unavailability, or expired/invalid auth
+  tokens (such as `authentication token has expired` or `401`), the
+  router puts the failed provider in cooldown on the session branch
+  (parsing `resets in <duration>` when present, else defaulting to 15m)
+  and steps to the next healthy usable model in the chain. Once switched
+  away for low quota, a provider is held out until a fresh reading
+  recovers to `router_recover` percent (default 30) or its tight window
+  resets; a quota cooldown clears when its reset time passes or a
+  strictly newer fresh reading reaches `router_recover`, and an auth
+  cooldown clears when its cooldown expires. Context overflow and
+  ordinary network errors stay on the same model.
+- **No fresh quota.** A missing, stale or malformed snapshot never
+  triggers a switch and never fails a request over quota data. (A
+  provider already held out for low quota stays held until a fresh
+  reading says it recovered.)
+- **Existing sessions are not migrated.** A session keeps the model it
+  was started with; only new pi starts select the auto models (a resume
+  of a session started on one restores it, as pi restores any selection).
+  Remote pi starts load no extension, so the auto models don't exist
+  there: the model check refuses them with the fix (a physical `--model`
+  in `[agents.pi] args`).
+
+```toml
+[agents.pi]
+router_threshold = 20   # percent provider headroom left: switch at or below
+router_recover = 30     # percent: switch back at or above
+# router_worker_models = [
+#   "antigravity/gemini-4-neon-xhigh",
+#   "anthropic/claude-opus-5-5",
+#   "openai-codex/gpt-6.2-astra",
+# ]
+# router_coordinator_models = [
+#   "antigravity/gemini-4-neon-xhigh",
+#   "anthropic/claude-fable-5-2",
+#   "openai-codex/gpt-6.2-astra",
+# ]
+```
+
+The physical chains and thresholds reach the extension as
+`<state dir>/pi/router.json`, named by `--quartermaster-router`, which
+quartermaster writes on each pi start and refreshes from the ticker, and
+the router re-reads per request.
 
 ## Native RPC alternative
 
@@ -167,10 +252,14 @@ MCP.
 
 ## Setup only you can do
 
-1. Sign pi in to Anthropic: `pi auth login anthropic` (account sign-in), or
-   `pi auth login anthropic --api-key`. Check with
-   `pi auth check --provider anthropic` (prints `ready`).
-2. Add Fable 5.2, which pi 1.5.2's catalog lacks, under `providers` in
+1. Configure at least one provider in the auto-model chain (all three for
+   full failover): the Antigravity bridge for `antigravity/gemini-4-neon-xhigh`,
+   `pi auth login anthropic` (account sign-in, or `--api-key`), and
+   `pi auth login openai-codex`. Check with `pi --list-models` and
+   `pi auth check --provider <p>` (`ready`). The model check refuses an
+   auto-model start when no physical model in the chain is usable; a
+   physical `--model` in `[agents.pi]` needs only its own.
+2. Add Fable 5.2, which older pi catalogs lack, under `providers` in
    `~/.pi/agent/models.json`, next to any provider already there:
 
    ```json
@@ -190,7 +279,7 @@ MCP.
 
 ## What still assumes Claude Code
 
-- **The close verifier** runs `claude -p`, on purpose.
+- **The default close verifier** still runs `claude -p`; the [pi backend](pi-verifier.md) is a separate opt-in, independent of the worker kind.
 - **Approval prompts.** `quartermaster prompt` and `answer` parse Claude Code
   and Codex screens, and read a pi worker's ask-gates from its control
   socket. A pi extension dialog shows the thread as blocked with no hash to

@@ -140,6 +140,20 @@ func readyToMerge(pr *PR, c Checks) bool {
 	return mergeable(pr, c) && len(mergeBlockers(pr)) == 0
 }
 
+// requiresGitHubReview reports whether GitHub enforces an approving review on
+// pr's base branch. An empty reviewDecision means GitHub requires no approving
+// review, so arming native --auto could merge immediately without approval.
+func requiresGitHubReview(pr *PR) bool {
+	if pr == nil {
+		return false
+	}
+	switch pr.ReviewDecision {
+	case "REVIEW_REQUIRED", "APPROVED", "CHANGES_REQUESTED":
+		return true
+	}
+	return false
+}
+
 // mergeable reports only GitHub's requirements, not permission to act.
 // UNSTABLE allows optional failures; pending checks still block even when no
 // checks are required by protection.
@@ -559,17 +573,11 @@ func prForBead(b Bead, branchPrefix string, mine []PR, byURL map[string]PR, owne
 		}
 		add(pr)
 	}
-	var best PR
-	var merged []PR
-	for i, pr := range cands {
-		if i == 0 || prRank(pr, best) {
-			best = pr
-		}
-		if pr.State == "MERGED" {
-			merged = append(merged, pr)
-		}
+	s := selectPR(cands)
+	if s.PR == nil {
+		return PR{}, s.Merged, false
 	}
-	return best, merged, len(cands) > 0
+	return *s.PR, s.Merged, true
 }
 
 // prRank reports whether a outranks b as a bead's PR: open beats merged beats

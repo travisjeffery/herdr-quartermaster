@@ -136,27 +136,38 @@ func (h Herdr) call(timeout time.Duration, args ...string) (json.RawMessage, err
 const callTimeout = 10 * time.Second
 
 func (h Herdr) Agents() ([]Agent, error) {
+	agents, _, err := h.observedAgents()
+	return agents, err
+}
+
+// observedAgents keeps native workers usable during a Herdr outage, while
+// reporting that absence from a partial list is not evidence of an exit.
+func (h Herdr) observedAgents() ([]Agent, bool, error) {
 	var native []Agent
 	if h.hostName() == localHost {
 		native = rpcAgents()
 	}
+	return h.agentsWithNative(native)
+}
+
+func (h Herdr) agentsWithNative(native []Agent) ([]Agent, bool, error) {
 	res, err := h.call(callTimeout, "agent", "list")
 	if err != nil {
 		if len(native) > 0 {
-			return native, nil
+			return native, false, nil
 		}
-		return nil, err
+		return nil, false, err
 	}
 	var out struct {
 		Agents []Agent `json:"agents"`
 	}
 	if err := json.Unmarshal(res, &out); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	for i := range out.Agents {
 		out.Agents[i].Host = h.hostName()
 	}
-	return append(out.Agents, native...), nil
+	return append(out.Agents, native...), true, nil
 }
 
 type Opened struct {

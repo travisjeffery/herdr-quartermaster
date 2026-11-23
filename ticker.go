@@ -110,7 +110,7 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 	if err != nil {
 		return nil, nil, err
 	}
-	agents, err := t.herdr.Agents()
+	agents, agentsComplete, err := t.herdr.observedAgents()
 	if err != nil {
 		// Bead truth is available even if worker transport is not. Return
 		// those observations for desktop alerts only; do not run ordinary
@@ -134,7 +134,9 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 	}
 	threads := make([]Thread, 0, len(active))
 	for _, b := range active {
-		threads = append(threads, threadFor(t.cfg, *st, b, byName))
+		th := threadFor(t.cfg, *st, b, byName)
+		th.AgentUnknown = !agentsComplete && th.Agent == nil
+		threads = append(threads, th)
 	}
 	return threads, byName, nil
 }
@@ -147,6 +149,9 @@ func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thre
 	if a, ok := byName[agentName(b.ID)]; ok {
 		th.Agent = &a
 	}
+	// PRs already holds the canonical selection with detailed evidence. Do
+	// not promote a light Noted lookup after a failed detail fetch: it would
+	// establish a false zero-review baseline for the next successful pass.
 	if pr, ok := st.PRs[b.ID]; ok {
 		// The ticker reloads its state every tick. Preserve a successful
 		// observation between polls, but never indefinitely (or after a
@@ -166,7 +171,8 @@ func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thre
 	}
 	th.Merged = st.MergedPRs[b.ID]
 	th.Runs = st.Runs[b.ID]
-	return th
+	th = restoreThreadEvidence(th, st.Threads[b.ID])
+	return th.derive()
 }
 
 func (t Ticker) refreshPRs(st *TickerState, active []Bead) {
@@ -428,13 +434,28 @@ func (t Ticker) once(st *TickerState) error {
 		}
 	}
 	relaunch := t.launchMismatch(threads)
-	for _, name := range deliverOutbox(t.cfg, t.herdr, agents, needsMe, relaunch) {
-		t.log.Printf("delivered queued brief to %s", name)
+	// Remove departed workers' notices before delivery, not just at the end
+	// of this pass when leftActive clears their sidebar rows.
+	outboxReady := true
+	for id := range st.Threads {
+		if _, active := needsMe[agentName(id)]; !active {
+			if err := clearQueuedOutbox(agentName(id)); err != nil {
+				t.log.Printf("outbox %s: %v", id, err)
+				outboxReady = false
+			}
+		}
+	}
+	// Failed cleanup holds delivery, but must not halt inbox reconciliation
+	// or the other ticker work. leftActive keeps failed snapshots for retry.
+	if outboxReady {
+		for _, name := range deliverOutbox(t.cfg, t.herdr, agents, needsMe, relaunch) {
+			t.log.Printf("delivered queued brief to %s", name)
+		}
 	}
 	var rows []sidebarRow
 	var alertThreads []Thread
 	current := map[string]bool{}
-	for _, th := range threads {
+	for i, th := range threads {
 		id := th.Bead.ID
 		current[id] = true
 		prev, seen := st.Threads[id]
@@ -450,20 +471,36 @@ func (t Ticker) once(st *TickerState) error {
 				t.log.Printf("%s woke at needs_me with no prompt since %s; not a resume", id, prev.ReadySince.Format(time.RFC3339))
 			}
 		}
-		out := transition(th, prev, !seen, now)
+		th = th.derive()
+		out := transitionDebounced(th, prev, !seen, now, t.cfg.promptDebounce(), t.cfg.promptFlap())
 		if out.Resume {
 			if err := t.resume(id); err != nil {
 				t.log.Printf("resume %s: %v", id, err)
 			} else {
 				t.log.Printf("resumed %s: its agent went back to work after needs_me", id)
 				th.Bead.Status = StatusInProgress
+				th = th.derive()
 			}
 		}
-		snap := snapshot(th, prev, now)
+		threads[i] = th
+		snap := snapshotDebounced(th, prev, now, t.cfg.promptDebounce(), t.cfg.promptFlap(), !seen)
+		if out.Resume {
+			// transition saw needs_me and withheld the ready event. A
+			// successful resume must not baseline it away before next pass.
+			snap.ReadyKey = ""
+		}
 		t.journalAuto(th, prev, seen, &snap, now)
 		snap.Pending = append(snap.Pending, out.Prompts...)
 		t.relaunch(th, &snap, relaunch[agentName(id)], now)
 		for _, e := range out.Events {
+			// A parsable approval prompt's event carries its tap links, so
+			// what the coordinator relays to TJ is tappable as it stands;
+			// a needs_me OPTIONS question's event carries its own.
+			if e.Kind == EventNeedsYou && th.Prompt != nil {
+				e.Summary += t.tapEventSuffix(th)
+			} else if e.Kind == EventNeedsYou {
+				e.Summary += t.tapQuestionEventSuffix(th)
+			}
 			if err := writeEvent(e); err != nil {
 				t.log.Printf("inbox: %v", err)
 			}
@@ -492,6 +529,9 @@ func (t Ticker) once(st *TickerState) error {
 			rows = append(rows, sidebarRow{Name: id, Pane: th.Agent.PaneID, Tokens: tokens})
 		}
 		st.Threads[id] = snap
+	}
+	if err := reconcileInbox(alertThreads, t.beads.Show); err != nil {
+		t.log.Printf("inbox reconciliation: %v", err)
 	}
 	if err := reconcileDesktop(alertThreads, now, submitDesktop); err != nil {
 		t.log.Printf("desktop notifications: %v", err)
@@ -632,6 +672,10 @@ func (t Ticker) resume(id string) error {
 // leftActive handles a bead that is no longer in_progress/needs_me/blocked:
 // usually closed by its thread after the PR merged.
 func (t Ticker) leftActive(st *TickerState, id string, prev Snapshot, agents map[string]Agent, now time.Time) {
+	if err := clearQueuedOutbox(agentName(id)); err != nil {
+		t.log.Printf("outbox %s: %v", id, err)
+		return // keep the snapshot so the next pass retries cleanup
+	}
 	b, err := t.beads.Show(id)
 	if err != nil {
 		t.log.Printf("show %s: %v", id, err)
@@ -827,6 +871,15 @@ func tickerRun(cfg Config) error {
 	logger := log.New(f, "", log.LstdFlags)
 	logger.Printf("ticker %s started, every %s, on %s", version, cfg.tick(), cfg.coordSocket())
 	t := newTicker(cfg, logger)
+	if cfg.Tap.Enabled {
+		// The tap endpoint rides the ticker: no new daemon. A bind failure
+		// (no tailnet, port taken) leaves the ticker running and taps off.
+		if ln, err := startTapServer(cfg.Tap, livePromptEnv(cfg, t.herdr), logger.Printf); err != nil {
+			logger.Printf("tap: %v (approval taps unavailable)", err)
+		} else {
+			defer ln.Close()
+		}
+	}
 	done := make(chan struct{})
 	defer close(done)
 	go t.side.run(done)
@@ -834,10 +887,27 @@ func tickerRun(cfg Config) error {
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	timer := time.NewTicker(cfg.tick())
 	defer timer.Stop()
+	var lastQuota time.Time
 	for {
 		st := loadState()
 		if err := t.once(&st); err != nil {
 			logger.Printf("tick: %v", err)
+		}
+		// Keep the pi quota router's extensions, config and snapshot fresh for
+		// sessions already running and new launches; a launch writes them too.
+		// A failed write only leaves the router on older readings, which age
+		// out on their own.
+		if now := time.Now(); now.Sub(lastQuota) >= time.Minute {
+			lastQuota = now
+			if _, err := piExtensionFile(); err != nil {
+				logger.Printf("pi extension: %v", err)
+			}
+			if _, err := cfg.writePiRouterConfig(); err != nil {
+				logger.Printf("pi router config: %v", err)
+			}
+			if err := writeQuotaSnapshot(now); err != nil {
+				logger.Printf("quota snapshot: %v", err)
+			}
 		}
 		if err := saveState(st); err != nil {
 			logger.Printf("state: %v", err)
@@ -933,6 +1003,9 @@ func tickerStatus(cfg Config) {
 func inboxDir() string { return filepath.Join(stateDir(), "inbox") }
 
 func writeEvent(e Event) error {
+	if e.Clears == nil {
+		e.Clears = defaultInboxCondition(e)
+	}
 	if err := os.MkdirAll(inboxDir(), 0o700); err != nil {
 		return err
 	}
@@ -972,7 +1045,8 @@ func readInbox() ([]InboxItem, error) {
 	return items, nil
 }
 
-// inboxDone marks items handled: all of them, or those for the given beads.
+// inboxDone retains the bulk CLI: all items, or matching bead IDs/filenames.
+// Interactive views use inboxDoneFiles instead, with the files they displayed.
 func inboxDone(beads []string) (int, error) {
 	items, err := readInbox()
 	if err != nil {
@@ -982,20 +1056,13 @@ func inboxDone(beads []string) (int, error) {
 	for _, b := range beads {
 		want[b] = true
 	}
-	done := filepath.Join(inboxDir(), "done")
-	if err := os.MkdirAll(done, 0o755); err != nil {
-		return 0, err
-	}
-	n := 0
+	var files []string
 	for _, it := range items {
-		if (len(want) > 0 && !want[it.Bead]) || headlessOwned(it.Bead) {
-			continue // managed events require verified outcomes, not transport acknowledgment
-		}
-		if err := os.Rename(filepath.Join(inboxDir(), it.File), filepath.Join(done, it.File)); err == nil {
-			n++
+		if len(want) == 0 || want[it.Bead] || want[it.File] {
+			files = append(files, it.File)
 		}
 	}
-	return n, nil
+	return inboxDoneFiles(files)
 }
 
 func (t Ticker) fixNames(st *TickerState) {

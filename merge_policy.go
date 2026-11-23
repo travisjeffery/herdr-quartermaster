@@ -42,7 +42,7 @@ func mergePlanPolicy(cfg Config, b Bead, pr PR, approval planEvent) MergePolicy 
 // rechecks the plan's digest approval, level and budget immediately before an
 // action. GitHub mergeability never substitutes for that authorization.
 func tickerMergePolicy(cfg Config, b Bead, pr PR) MergePolicy {
-	class, err := cfg.actionClass(b, "merge", "")
+	class, err := cfg.actionClass(b, "merge", "", "")
 	if m := prURL.FindStringSubmatch(pr.URL); m != nil {
 		_, name, _ := strings.Cut(m[1], "/")
 		class = max(class, cfg.Autonomy.MergeClass[name])

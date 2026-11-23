@@ -15,6 +15,7 @@ import (
 )
 
 type boardRow struct {
+	state  *ThreadState
 	header string
 	// count is a header's number of rows.
 	count int
@@ -104,7 +105,7 @@ type boardEnv struct {
 	release     func(b Bead, days int) error
 	autonomy    func(id string, n int, d time.Duration) (string, error)
 	focus       func(agent string) error
-	inboxDone   func(id string) error
+	inboxDone   func(files []string) error
 	copy        func(text string) error
 	open        func(url string) string
 }
@@ -166,8 +167,8 @@ func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 			return bd.SetStatus(b.ID, StatusOpen)
 		},
 		focus: h.Focus,
-		inboxDone: func(id string) error {
-			_, err := inboxDone([]string{id})
+		inboxDone: func(files []string) error {
+			_, err := inboxDoneFiles(files)
 			return err
 		},
 		copy: func(text string) error { return exec.Command("wl-copy", text).Run() },
@@ -761,8 +762,8 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 			return []cmd{func() msg { return doneMsg{err: m.env.focus(name), quit: true} }}
 		}
 		m.dispatchAsk(r, "")
-	case "c", "x", "m", "i":
-		m.dispatchAsk(r, map[string]string{"c": "claude", "x": "codex", "m": "muse", "i": "pi"}[k])
+	case "c", "x", "m", "i", "t":
+		m.dispatchAsk(r, map[string]string{"c": "claude", "x": "codex", "m": "muse", "i": "pi", "t": "agy"}[k])
 	case "R":
 		if r.agent != nil {
 			m.status = id + " already has an agent (" + r.agent.Name + ")"
@@ -1077,7 +1078,7 @@ func (m *board) gcKey(k string) []cmd {
 		if m.none(items, "dismiss") {
 			return nil
 		}
-		return m.gcRun("dismissed", items, func(it gcItem) (string, error) { return "", m.env.inboxDone(it.bead.ID) })
+		return m.gcRun("dismissed", items, func(it gcItem) (string, error) { return "", m.env.inboxDone(it.inboxFiles) })
 	}
 	return nil
 }

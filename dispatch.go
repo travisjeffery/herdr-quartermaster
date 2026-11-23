@@ -13,7 +13,7 @@ import (
 
 // kinds are the agents quartermaster starts, by their Herdr kind, which is
 // also the executable and the actor a worker claims its bead as.
-var kinds = []string{"claude", "codex", "muse", "pi"}
+var kinds = []string{"claude", "codex", "muse", "pi", "agy"}
 
 var validKinds = func() map[string]bool {
 	m := map[string]bool{}
@@ -23,7 +23,7 @@ var validKinds = func() map[string]bool {
 	return m
 }()
 
-// kindList names the kinds for messages: "claude, codex, muse or pi".
+// kindList names the kinds for messages: "claude, codex, muse, pi or agy".
 func kindList(extra ...string) string {
 	all := append(slices.Clone(kinds), extra...)
 	return strings.Join(all[:len(all)-1], ", ") + " or " + all[len(all)-1]
@@ -41,8 +41,8 @@ func brief(b Bead, branch, path, linear, instructions string) string {
 	s.WriteString(`How this thread reports (the quartermaster ticker and coordinator read these, not your chat):
 - Keep the bead current with ` + "`bd note`" + `: findings, decisions, blockers.
 - When you open a PR, ` + "`bd note " + b.ID + " \"PR: <url>\"`" + ` so the ticker follows it. It will prompt you when checks fail, review feedback lands, or it merges.
-- Do not arm auto-merge merely because a PR is non-draft or GitHub says no review is required: ` + "`--auto`" + ` can merge immediately. First require your own task-associated PR, an independent approval of the exact current head within 7 days from a write-capable reviewer (human or app), complete review/thread evidence with every thread resolved (including outdated threads), no changes requested, required reviews/checks satisfied and no pending checks. Then run ` + "`quartermaster autonomy check " + b.ID + " --action merge`" + `. If it fails, leave merging to the user. The executor accepts ` + "`gh pr merge <url> --auto --squash`" + ` only through that same gate and performs an exact-head merge instead of arming deferred native auto-merge, which cannot bind future execution to that head. Without the executor, use ` + "`gh pr merge <url> --squash --match-head-commit <sha>`" + ` after revalidating the same prerequisites; never use ` + "`--admin`" + `. Leave it off on drafts and on a PR that needs a human decision; turn it off (` + "`gh pr merge <url> --disable-auto`" + `) if a PR comes to need one. If the repo refuses (auto-merge not allowed), note that on the bead and carry on; never retry through a bypass.
-- If you need a human decision: put the exact question and options in a note, run ` + "`bd update " + b.ID + " --status needs_me`" + `, and stop. When the user answers you, directly in this pane or otherwise, run ` + "`bd update " + b.ID + " --status in_progress`" + ` first.
+- Turn on auto-merge for every non-draft PR you open, and for a draft when you mark it ready, on repositories where GitHub requires an approving review on the base branch, once ` + "`quartermaster autonomy check " + b.ID + " --action merge`" + ` passes: ` + "`gh pr merge <url> --auto --squash`" + `. Do not arm ` + "`--auto`" + ` when the base branch requires no approving review: ` + "`--auto`" + ` can merge immediately without approval, and the executor refuses it there. For a direct merge (` + "`gh pr merge <url> --squash --match-head-commit <sha>`" + `), first require your own task-associated PR, an independent approval of the exact current head within 7 days from a write-capable reviewer (human or app), complete review/thread evidence with every thread resolved (including outdated threads), no changes requested, required reviews/checks satisfied and no pending checks, and then run ` + "`quartermaster autonomy check " + b.ID + " --action merge`" + `; never use ` + "`--admin`" + `. If the check fails, leave merging to the user. Leave auto-merge off on drafts and on a PR that needs a human decision; turn it off (` + "`gh pr merge <url> --disable-auto`" + `) if a PR comes to need one. If the repo refuses (auto-merge not allowed), note that on the bead and carry on; never retry through a bypass.
+- If you need a human decision: put the exact question and options in a note, run ` + "`bd update " + b.ID + " --status needs_me`" + `, and stop. When the decision has enumerated options, write that note as ` + "`QUESTION: <question> Recommendation: <n> — <why>`" + `, then ` + "`OPTIONS:`" + `, then one ` + "`<n>. <option>`" + ` line each, then ` + "`CLASS: <n> — <step>`" + ` (one multi-line note): the user can then answer it by tapping a link, which notes ` + "`NEEDS_ME ANSWERED: ...`" + ` on the bead, returns it to in_progress, and prompts you with the answer. Free text still works when the options aren't enumerable. When the user answers you, directly in this pane or otherwise, run ` + "`bd update " + b.ID + " --status in_progress`" + ` first.
 - If a step needs the user to run a command themselves (a permission or classifier denial, an interactive login, a production change they must make): ` + "`bd note " + b.ID + " \"RUN: <exact command>\"`" + `, a one-line note of why, ` + "`bd update " + b.ID + " --status needs_me`" + `, and stop. Once they report the result, record it with ` + "`bd note " + b.ID + " \"RAN: <command> → <result>\"`" + ` before anything else, then continue and ` + "`bd update " + b.ID + " --status in_progress`" + `.
 - Don't close the bead before the PR merges; after it merges, verify and ` + "`quartermaster close " + b.ID + " --by worker --reason \"<what shipped and how it was verified>\"`" + `. Close only that way, never with ` + "`bd close`" + `.
 - If steps remain after the merge (a deploy dispatch, canary, provision, rollout), ` + "`bd label add " + b.ID + " rolling-out`" + ` and note each Actions run URL so the ticker follows it. Keep the label until the rollout is finished and verified, then close as above; close removes it.
@@ -455,6 +455,30 @@ func queueBrief(agent, text string) error { return queueBriefOn(localHost, agent
 
 func queueBriefOn(host, agent, text string) error {
 	return writeAtomic(filepath.Join(outboxDirOn(host), agent+".md"), []byte(text))
+}
+
+// clearQueuedOutbox removes only this agent's queued notices, locally and on
+// every host (including hosts removed from config). It never removes a host
+// directory or another agent's files.
+func clearQueuedOutbox(agent string) error {
+	dirs := []string{outboxDir()}
+	entries, err := os.ReadDir(outboxDir())
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dirs = append(dirs, filepath.Join(outboxDir(), entry.Name()))
+		}
+	}
+	for _, dir := range dirs {
+		for _, suffix := range []string{".md", ".autonomy"} {
+			if err := os.Remove(filepath.Join(dir, agent+suffix)); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // moveQueuedBrief follows a renamed agent with its queued brief, which is

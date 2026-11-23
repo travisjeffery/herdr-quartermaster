@@ -40,9 +40,9 @@ type PromptOption struct {
 }
 
 var (
-	optionRe    = regexp.MustCompile(`^(\s*)([❯›>]\s*)?(\d+)\.\s+(.*)$`)
-	cursorRe    = regexp.MustCompile(`^(\s*)[❯›>]\s+(.*)$`)
-	footerRe    = regexp.MustCompile(`(?i)\b(esc|enter) to\b|press enter|enter to confirm`)
+	optionRe    = regexp.MustCompile(`^(\s*)([❯›>⟩]\s*)?(\d+)\.\s+(.*)$`)
+	cursorRe    = regexp.MustCompile(`^(\s*)[❯›>⟩]\s+(.*)$`)
+	footerRe    = regexp.MustCompile(`(?i)\b(esc|enter) to\b|press enter|\benter (?:to )?confirm\b`)
 	countdownRe = regexp.MustCompile(`will automatically deny this request in (.+?), to avoid`)
 )
 
@@ -53,7 +53,8 @@ const promptHeaderMax = 20
 // parsePrompt finds the selection prompt at the bottom of a pane's text. A
 // prompt ends in a footer naming esc or enter ("Esc to cancel"), right below
 // its options, with one of them under the cursor; anything else on screen, a
-// numbered list in the conversation included, is not a prompt.
+// numbered list in the conversation included, is not a prompt. A screen with
+// no such footer can still hold a boxed prompt (parseBoxedPrompt).
 func parsePrompt(screen string) (ApprovalPrompt, bool) {
 	lines := strings.Split(strings.ReplaceAll(screen, "\r", ""), "\n")
 	for i := range lines {
@@ -63,8 +64,11 @@ func parsePrompt(screen string) (ApprovalPrompt, bool) {
 	for end >= 0 && lines[end] == "" {
 		end--
 	}
-	if end < 0 || !footerRe.MatchString(lines[end]) {
+	if end < 0 {
 		return ApprovalPrompt{}, false
+	}
+	if !footerRe.MatchString(lines[end]) {
+		return parseBoxedPrompt(lines, end)
 	}
 	// The option block: the non-blank lines right above the footer.
 	last := end - 1
@@ -95,19 +99,89 @@ func parsePrompt(screen string) (ApprovalPrompt, bool) {
 		}
 	}
 	top = max(top, 0)
-	for _, l := range lines[top:first] {
+	p.Lines, p.Countdown = headerLines(lines[top:first])
+	p.Hash = promptHash(p)
+	return p, true
+}
+
+// headerLines is a prompt's text above its options: blank and separator
+// lines dropped, an auto-deny countdown read out of its line.
+func headerLines(raw []string) (lines []string, countdown string) {
+	for _, l := range raw {
 		l = strings.TrimSpace(l)
 		if l == "" || isSeparator(l) {
 			continue
 		}
 		if m := countdownRe.FindStringSubmatch(l); m != nil {
-			p.Countdown = m[1]
+			countdown = m[1]
 			continue
 		}
-		p.Lines = append(p.Lines, l)
+		lines = append(lines, l)
 	}
-	p.Hash = promptHash(p)
-	return p, true
+	return lines, countdown
+}
+
+// boxedHeaderMax bounds how far above its options a boxed prompt's top rule
+// is looked for: its title plus a command wrapped by a narrow pane.
+const boxedHeaderMax = 120
+
+// parseBoxedPrompt reads a prompt drawn between two rules at the bottom of
+// the screen, with the agent's status line below the lower rule and no
+// esc/enter footer (muse's approval box): a title ("Would you like to run
+// the following command?"), the command or action it is about, its options
+// under a ⟩ cursor, and a hint line ("Change approval defaults in
+// /permissions"). The spinner lines above the top rule, whose elapsed time
+// ticks while the prompt shows, stay out of the prompt and its hash.
+func parseBoxedPrompt(lines []string, end int) (ApprovalPrompt, bool) {
+	// The lower rule: within a few lines of the bottom, the status line
+	// (which a narrow pane may wrap) below it.
+	low := -1
+	for i := end; i >= 0 && i >= end-3; i-- {
+		if isRule(lines[i]) {
+			low = i
+			break
+		}
+	}
+	if low < 0 || low == end {
+		return ApprovalPrompt{}, false
+	}
+	last := low - 1
+	for last >= 0 && lines[last] == "" {
+		last--
+	}
+	if last < 0 {
+		return ApprovalPrompt{}, false
+	}
+	// The top rule above the options and the text they are about.
+	top := -1
+	for i := last - 1; i >= 0 && i >= last-boxedHeaderMax; i-- {
+		if isRule(lines[i]) {
+			top = i + 1
+			break
+		}
+	}
+	if top < 0 {
+		return ApprovalPrompt{}, false
+	}
+	// The box ends in its options, or in a hint line below them.
+	for _, optEnd := range []int{last, last - 1} {
+		for optEnd >= top && lines[optEnd] == "" {
+			optEnd--
+		}
+		if optEnd < top {
+			break
+		}
+		opts, numbered, skip, ok := parseOptions(lines[top : optEnd+1])
+		if !ok {
+			continue
+		}
+		var p ApprovalPrompt
+		p.Options, p.Numbered = opts, numbered
+		p.Lines, p.Countdown = headerLines(lines[top : top+skip])
+		p.Hash = promptHash(p)
+		return p, true
+	}
+	return ApprovalPrompt{}, false
 }
 
 // parseOptions reads an option block: a numbered menu (1. Yes, 2. No, with
@@ -313,6 +387,11 @@ type promptEnv struct {
 	read  func(host, pane string) (string, error)
 	keys  func(host, pane string, keys ...string) error
 	note  func(id, text string) error
+	// setStatus returns an answered needs_me bead to in_progress (tapquestion.go).
+	setStatus func(id, status string) error
+	// tell delivers text to a worker at rest, over its control socket when
+	// it has one: how a tap answer reaches the worker it unblocks.
+	tell  func(host string, a *Agent, text string) error
 	sleep func(time.Duration)
 	// level is the bead's effective autonomy level and the cap that lowered it.
 	level func(id string) (int, string)
@@ -334,7 +413,12 @@ func livePromptEnv(cfg Config, h Herdr) promptEnv {
 		keys: func(host, pane string, keys ...string) error {
 			return cfg.herdrOn(h, host).SendKeys(pane, keys...)
 		},
-		note:  bd.Note,
+		note:      bd.Note,
+		setStatus: bd.SetStatus,
+		tell: func(host string, a *Agent, text string) error {
+			_, err := promptPiAgent(cfg.herdrOn(h, host), *a, text)
+			return err
+		},
 		sleep: time.Sleep,
 		piAsk: piAskOf,
 		piAnswer: func(a *Agent, id string, choice int, by string) error {
@@ -440,6 +524,15 @@ const answerWait = 5 * time.Second
 // Anyone but TJ answers only within the bead's autonomy level, by the class
 // of what the answer releases, and the note starts AUTO:.
 func answerPrompt(env promptEnv, id, choice, expect, by string, class int) (string, error) {
+	return answerPromptVia(env, id, choice, expect, by, class, "")
+}
+
+// answerPromptVia is answerPrompt with via naming how TJ's answer arrived
+// (a phone tap, tap.go), appended to the PROMPT ANSWERED note so the audit
+// trail carries the transport and its identity evidence. Every guard — the
+// expected hash, the wait for the prompt to clear, the note, the journal —
+// is this one path; a tap is only another way of reaching it.
+func answerPromptVia(env promptEnv, id, choice, expect, by string, class int, via string) (string, error) {
 	if expect == "" {
 		return "", fmt.Errorf("--expect <hash> is required: read the prompt with `quartermaster prompt %s` first", id)
 	}
@@ -496,6 +589,9 @@ func answerPrompt(env promptEnv, id, choice, expect, by string, class int) (stri
 	}
 	msg := fmt.Sprintf("answered %s: %d %s to %s", a.Name, o.Number, o.Label, p.Summary())
 	note := fmt.Sprintf("PROMPT ANSWERED: %d %s to %s [%s] by %s", o.Number, shortTitle(o.Label, 60), p.Summary(), p.Hash, by)
+	if via != "" {
+		note += " via " + via
+	}
 	if auto != "" {
 		note = auto + " " + note
 	}

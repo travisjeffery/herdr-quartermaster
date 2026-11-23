@@ -93,7 +93,7 @@ func (f *fakeBoard) env() boardEnv {
 			return "autonomy set", rec("autonomy %s %d %s", id, n, d)
 		},
 		focus:     func(a string) error { return rec("focus %s", a) },
-		inboxDone: func(id string) error { return rec("dismiss %s", id) },
+		inboxDone: func(files []string) error { return rec("dismiss %s", strings.Join(files, ",")) },
 		copy:      func(text string) error { return rec("copy %s", text) },
 		open:      func(u string) string { rec("open %s", u); return "opened " + u },
 	}
@@ -199,10 +199,10 @@ func TestBuildRowsShowsEveryOpenBeadBySection(t *testing.T) {
 		"needs you bk-ask",
 		"idle bk-idle",
 		"working bk-work",
-		"blocked bk-wait",
+		"blocked bk-dep bk-wait", // dependencies agree with the digest
 		"no agent bk-gone",
 		"next bk-nx1 bk-nx2", // P1 first
-		"backlog bk-dep bk-old",
+		"backlog bk-old",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("sections =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

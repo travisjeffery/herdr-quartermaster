@@ -360,22 +360,27 @@ func TestMergeRunner(t *testing.T) {
 		t.Error("merged at another head counted")
 	}
 
-	// Auto requests have the same gate; native auto-merge is never armed.
+	// Policy B auto-merge: kept where GitHub requires an approving review,
+	// refused where the base branch requires no review.
 	a := mergeRunner{auto: true, gh: g.run, policy: m.policy}
 	as := mergeStep("github.pr.automerge")
 	g.pr = greenPR()
-	g.pr.ReviewDecision, g.pr.MergeState = "REVIEW_REQUIRED", "BLOCKED"
+	g.pr.ReviewDecision, g.pr.MergeState, g.pr.Gate.Reviews = "", "CLEAN", nil
 	if err := a.pre(ctx, as); !errors.Is(err, errUnmet) {
-		t.Errorf("unapproved auto-merge pre: %v", err)
+		t.Errorf("unprotected auto-merge pre: %v", err)
 	}
 	g.pr = greenPR()
+	g.pr.ReviewDecision, g.pr.MergeState, g.pr.Gate.Reviews = "REVIEW_REQUIRED", "BLOCKED", nil
+	if err := a.pre(ctx, as); err != nil {
+		t.Errorf("review-required auto-merge pre: %v", err)
+	}
 	g.calls = nil
-	if _, err := a.do(ctx, as, ""); err != nil || len(g.calls) != 1 || strings.Contains(strings.Join(g.calls[0], " "), "--auto") {
+	if _, err := a.do(ctx, as, ""); err != nil || len(g.calls) != 1 || !strings.Contains(strings.Join(g.calls[0], " "), "--squash --auto") {
 		t.Errorf("auto-merge do: %v %v", err, g.calls)
 	}
 	g.pr.AutoMerge = &AutoMerge{Method: "SQUASH"}
-	if happened, _, ev, _ := a.probe(ctx, as, ""); happened {
-		t.Errorf("an unbound auto-merge request is not completion: %v %q", happened, ev)
+	if happened, _, ev, _ := a.probe(ctx, as, ""); !happened || !strings.Contains(ev, "auto-merge on") {
+		t.Errorf("auto-merge probe: %v %q", happened, ev)
 	}
 	if !m.retrySafe() || !a.retrySafe() {
 		t.Error("merges carry --match-head-commit, so they're retry-safe")

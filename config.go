@@ -32,6 +32,11 @@ type Config struct {
 	// on Herdr 0.9.1 a prompt merges with whatever the user has half-typed.
 	IdleSeconds int  `toml:"idle_seconds"`
 	Nudge       bool `toml:"nudge"`
+	// PromptDebounceSeconds is how long a worker approval/question prompt
+	// must keep showing before the ticker surfaces it to the inbox; a prompt
+	// that clears sooner (a judge transient) never surfaces. 0 disables the
+	// debounce: prompts surface on the tick they are first seen.
+	PromptDebounceSeconds int `toml:"prompt_debounce_seconds"`
 	// Only keys with these team prefixes count as Linear issues; empty accepts
 	// any key outside a small denylist.
 	LinearPrefixes []string `toml:"linear_prefixes"`
@@ -86,6 +91,41 @@ type Config struct {
 	// Verifier checks in-scope beads before `quartermaster close` closes
 	// them; see accept.go.
 	Verifier VerifierConfig `toml:"verifier"`
+
+	// Tap serves signed one-time approval links on the tailnet, so TJ can
+	// answer a worker's approval prompt from a phone; see tap.go and
+	// docs/approval-taps.md. Off unless [tap] enabled is set.
+	Tap TapConfig `toml:"tap"`
+}
+
+// TapConfig is [tap]: the approval-tap endpoint the ticker runs. Devices are
+// the Tailscale node names (the part before the tailnet domain) allowed to
+// tap; a tap from anywhere else, this machine included, is refused. The
+// listener binds this machine's Tailscale IPv4 only.
+type TapConfig struct {
+	Enabled bool     `toml:"enabled"`
+	Port    int      `toml:"port"` // 0 takes defaultTapPort
+	Devices []string `toml:"devices"`
+}
+
+func (c TapConfig) port() int {
+	if c.Port == 0 {
+		return defaultTapPort
+	}
+	return c.Port
+}
+
+// validateTap fails closed: an enabled tap endpoint with no device allowlist
+// would take a tap from any tailnet node holding a link.
+func (c Config) validateTap() error {
+	t := c.Tap
+	if t.Port < 0 || t.Port > 65535 {
+		return fmt.Errorf("[tap] port %d is out of range", t.Port)
+	}
+	if t.Enabled && len(t.Devices) == 0 {
+		return errors.New("[tap] enabled needs devices: the Tailscale node names allowed to tap (see `tailscale status`)")
+	}
+	return nil
 }
 
 type AgentConfig struct {
@@ -110,24 +150,46 @@ type AgentConfig struct {
 	// AskTimeout (pi only) is how long a worker waits for that answer before
 	// it blocks the command anyway (default 10m).
 	AskTimeout string `toml:"ask_timeout"`
+	// The pi virtual-model router (pi/router.ts, docs/pi.md): the ordered
+	// physical model chains quartermaster/worker-auto and
+	// quartermaster/coordinator-auto route through (defaulting to
+	// Antigravity Neon XHigh, then Claude, then OpenAI), and the per-provider
+	// headroom (percent left in the tightest live window) at or below which
+	// new turns switch to the next model, and at or above which they switch
+	// back. router_worker_model, router_coordinator_model and
+	// router_fallback_model remain supported for backward compatibility.
+	RouterWorkerModels      []string `toml:"router_worker_models"`
+	RouterCoordinatorModels []string `toml:"router_coordinator_models"`
+	RouterWorkerModel       string   `toml:"router_worker_model"`
+	RouterCoordinatorModel  string   `toml:"router_coordinator_model"`
+	RouterFallbackModel     string   `toml:"router_fallback_model"`
+	RouterThreshold         *float64 `toml:"router_threshold"`
+	RouterRecover           *float64 `toml:"router_recover"`
 }
 
 // defaultAgentArgs apply to a kind with no [agents.<kind>] table. Muse's
 // sandbox scrubs the environment (BEADS_DIR) and blocks gh's credentials, so
 // a sandboxed Muse worker can't use bd or open a PR. Its :auto-review profile
 // keeps the approval judge but lets the judge, not a human, decide, so an
-// unattended worker doesn't wait on a prompt nobody is watching.
+// unattended worker doesn't wait on a prompt nobody is watching. agy's Auto
+// mode is the same idea (a review judge for commands that would leave its
+// sandbox); it is agy's own default, pinned here so a saved /config mode
+// such as plan doesn't silently turn a worker into a planner.
 var defaultAgentArgs = map[string][]string{
+	"agy":  {"--mode", "auto"},
 	"muse": {"--disable-sandbox", "--permission-profile", ":auto-review"},
 	// pi: --approve trusts the worktree's own .pi resources, since a fresh
-	// worktree has no saved trust decision to skip the prompt with.
-	"pi": {"--approve", "--model", piWorkerModel},
+	// worktree has no saved trust decision to skip the prompt with. The
+	// model is quartermaster's virtual auto model: Antigravity Neon XHigh
+	// first, failing over through Claude and OpenAI on low quota or errors
+	// (pi/router.ts). A physical --model in [agents.pi] args opts out.
+	"pi": {"--approve", "--model", piWorkerVirtualModel},
 }
 
 // defaultCoordinatorArgs apply when a kind runs the coordinator and has no
 // [agents.<kind>] table.
 var defaultCoordinatorArgs = map[string][]string{
-	"pi": {"--approve", "--model", piCoordinatorModel},
+	"pi": {"--approve", "--model", piCoordinatorVirtualModel},
 }
 
 // defaultBypassArgs are each kind's switch for its own permission checks,
@@ -169,6 +231,9 @@ func (c Config) validateAgents() error {
 		return fmt.Errorf("unknown worker_backend %q (herdr or pi-rpc)", c.WorkerBackend)
 	}
 	if err := c.validatePiAsk(); err != nil {
+		return err
+	}
+	if err := c.validatePiRouter(); err != nil {
 		return err
 	}
 	for kind, a := range c.Agents {
@@ -235,20 +300,21 @@ func (c Config) launchBypass(b Bead, host string) bool {
 
 func defaultConfig() Config {
 	return Config{
-		BranchPrefix:     "tj/",
-		BaseBranch:       "main",
-		WorkerAgent:      "claude",
-		CoordinatorAgent: "claude",
-		CoordinatorName:  toolName,
-		TickSeconds:      15,
-		GHSeconds:        60,
-		IdleSeconds:      60,
-		Nudge:            true,
-		VerifyMinutes:    60,
-		StaleDays:        3,
-		VerifyMax:        20,
-		GHMinRemaining:   1000,
-		Autonomy:         AutonomyConfig{Level: 4, Max: maxStanding, Widespread: 5, Budget: BudgetConfig{Steps: 30, Applies: 3, Dispatches: 5}},
+		BranchPrefix:          "tj/",
+		BaseBranch:            "main",
+		WorkerAgent:           "claude",
+		CoordinatorAgent:      "claude",
+		CoordinatorName:       toolName,
+		TickSeconds:           15,
+		GHSeconds:             60,
+		IdleSeconds:           60,
+		Nudge:                 true,
+		PromptDebounceSeconds: 90,
+		VerifyMinutes:         60,
+		StaleDays:             3,
+		VerifyMax:             20,
+		GHMinRemaining:        1000,
+		Autonomy:              AutonomyConfig{Level: 4, Max: maxStanding, Widespread: 5, Budget: BudgetConfig{Steps: 30, Applies: 3, Dispatches: 5}},
 	}
 }
 
@@ -401,6 +467,12 @@ func loadConfig() (Config, error) {
 	if err := cfg.validateAgents(); err != nil {
 		return cfg, err
 	}
+	if err := cfg.validateTap(); err != nil {
+		return cfg, err
+	}
+	if cfg.PromptDebounceSeconds < 0 {
+		return cfg, fmt.Errorf("prompt_debounce_seconds %d is negative; use 0 to disable the prompt debounce", cfg.PromptDebounceSeconds)
+	}
 	if cfg.Repo == "" {
 		return cfg, errNoRepo
 	}
@@ -480,6 +552,23 @@ func (c Config) verifyEvery() time.Duration {
 }
 func (c Config) staleAge() time.Duration { return time.Duration(max(c.StaleDays, 0)) * 24 * time.Hour }
 func (c Config) idle() time.Duration     { return time.Duration(c.IdleSeconds) * time.Second }
+
+// promptDebounce is the window a worker prompt must keep showing before it
+// surfaces; 0 (or a zero Config that never went through defaultConfig)
+// disables it.
+func (c Config) promptDebounce() time.Duration {
+	if c.PromptDebounceSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(c.PromptDebounceSeconds) * time.Second
+}
+
+// promptFlap is how long a prompt may go undetected (agent briefly not
+// blocked, or its screen unreadable) without losing its debounce clock or
+// its already-surfaced dedup: two ticks (30s at the default tick). A longer
+// absence is a cleared prompt; the same prompt showing again after it is a
+// new instance with a fresh window.
+func (c Config) promptFlap() time.Duration { return 2 * c.tick() }
 
 func instructionsPath() string { return filepath.Join(configDir(), "instructions.md") }
 

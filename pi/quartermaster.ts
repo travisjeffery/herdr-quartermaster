@@ -39,10 +39,17 @@
 //      600 in a 700 directory; a request must carry the token. Without the
 //      flag, or if the socket can't be opened, the worker behaves as without
 //      this: prompts come through the pane and guards block.
+//   7. Registers the virtual models quartermaster/worker-auto and
+//      quartermaster/coordinator-auto (pi/router.ts), which route each turn
+//      through the role's ordered physical model chain (Antigravity Neon
+//      XHigh first, then Claude, then OpenAI), failing over on per-provider
+//      low quota (quota.json beside the --quartermaster-router file), rate
+//      limits, provider unavailability, or expired/invalid auth tokens.
 //
 // @ts-nocheck
 
 import { installCoordinatorInbox } from "./coordinator.ts";
+import { decideRoute, parseQuotaSnapshot, parseRouterConfig } from "./router.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -159,6 +166,107 @@ export default function (pi) {
     type: "string",
     default: "",
   });
+  pi.registerFlag("quartermaster-router", {
+    description: "router.json for the quartermaster virtual models (set by quartermaster)",
+    type: "string",
+    default: "",
+  });
+
+  // The virtual auto models (pi/router.ts): one selectable model per role
+  // that starts each turn on the highest-priority healthy physical model in
+  // the role's ordered chain (default: Antigravity Neon XHigh -> Claude ->
+  // OpenAI), failing over on per-provider low quota, rate limits, provider
+  // unavailability, or expired auth tokens. Route reads both JSON files per
+  // request, so a ticker refresh applies at the next turn boundary; a missing
+  // or bad file routes on defaults with no quota, never an error.
+  if (typeof pi.registerVirtualModel === "function") {
+    const readOr = (p: string): string => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch {
+        return "";
+      }
+    };
+    const refOf = (m: any): string | null =>
+      m && typeof m.provider === "string" && typeof m.id === "string" ? m.provider + "/" + m.id : null;
+    const findUsable = (ctx: any, ref: string): any => {
+      const slash = ref.indexOf("/");
+      if (slash <= 0 || slash === ref.length - 1) return null;
+      const [provider, id] = [ref.slice(0, slash), ref.slice(slash + 1)];
+      const model = ctx.modelRegistry.find(provider, id);
+      if (!model) return null;
+      const avail = typeof ctx.modelRegistry.getAvailable === "function" ? ctx.modelRegistry.getAvailable() : null;
+      if (Array.isArray(avail) && !avail.some((m: any) => refOf(m) === ref)) return null;
+      return model;
+    };
+    for (const [role, id, name] of [
+      ["worker", "worker-auto", "Worker auto (Antigravity, Claude, OpenAI failover)"],
+      ["coordinator", "coordinator-auto", "Coordinator auto (Antigravity, Claude, OpenAI failover)"],
+    ] as const) {
+      pi.registerVirtualModel({
+        provider: "quartermaster",
+        id,
+        name,
+        thinkingLevels: ["off", "low", "medium", "high", "xhigh"],
+        // The smaller physical window, shown only before the first
+        // response; compaction re-checks the routed model's own limits.
+        contextWindow: 272_000,
+        maxTokens: 65_536,
+        route(request: any, ctx: any) {
+          const routerPath = pi.getFlag("quartermaster-router");
+          const config = parseRouterConfig(typeof routerPath === "string" && routerPath ? readOr(routerPath) : "");
+          const quotaPath =
+            typeof routerPath === "string" && routerPath ? path.join(path.dirname(routerPath), "quota.json") : "";
+          const nowMs = Date.now();
+          const quota = parseQuotaSnapshot(quotaPath ? readOr(quotaPath) : "", nowMs, config.quota_max_age_seconds * 1000);
+          const chain = role === "coordinator" ? config.coordinator_models : config.worker_models;
+          const usableMap = new Map<string, any>();
+          for (const ref of chain) {
+            const m = findUsable(ctx, ref);
+            if (m) usableMap.set(ref, m);
+          }
+          const decision = decideRoute({
+            role,
+            config,
+            quota,
+            nowMs,
+            usable: [...usableMap.keys()],
+            reason: request.reason,
+            previous: refOf(request.previous?.model),
+            failed: refOf(request.failed?.model),
+            failedError: request.failed?.message
+              ? String(request.failed.message.errorMessage || "") + " " + String(request.failed.message.stopReason || "")
+              : "",
+            state: request.state ?? null,
+          });
+          // Keep the exact model object of a sticky route; else use the
+          // resolved usable physical model from the chain, falling back to
+          // the first usable model so route() errors only when no physical
+          // model can serve at all.
+          let model = null;
+          const sticky = request.failed?.model ?? request.previous?.model;
+          if (sticky && refOf(sticky) === decision.model) model = sticky;
+          if (!model) model = usableMap.get(decision.model) || findUsable(ctx, decision.model);
+          if (!model) {
+            for (const m of usableMap.values()) {
+              model = m;
+              break;
+            }
+          }
+          if (!model && sticky) model = sticky;
+          if (!model) {
+            throw new Error(
+              "quartermaster router: none of " +
+                chain.join(", ") +
+                " is usable in pi (check `pi --list-models` and `pi auth check`)",
+            );
+          }
+          const thinkingLevel = model.reasoning ? request.thinkingLevel || "xhigh" : "off";
+          return { model, thinkingLevel, state: decision.state };
+        },
+      });
+    }
+  }
 
   // Texts of prompts quartermaster sent over the socket that pi hasn't yet
   // passed to the input event, so it can be recorded as their source.

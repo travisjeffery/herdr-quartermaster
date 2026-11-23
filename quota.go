@@ -25,21 +25,30 @@ type quotaReading struct {
 // headroom is the percent left in the tightest window, or false when there is
 // no reading recent enough to trust.
 func headroom(r *quotaReading, now time.Time) (float64, bool) {
+	left, _, ok := headroomDetail(r, now)
+	return left, ok
+}
+
+// headroomDetail also reports when the tightest live window resets (zero
+// when every window has reset), which the pi quota router needs for its
+// switch-back rule.
+func headroomDetail(r *quotaReading, now time.Time) (float64, time.Time, bool) {
 	if r == nil || len(r.Windows) == 0 || now.Sub(r.At) > quotaMaxAge {
-		return 0, false
+		return 0, time.Time{}, false
 	}
 	left := 100.0
+	var resets time.Time
 	for _, w := range r.Windows {
-		if w.ResetsAt.After(now) {
-			left = min(left, 100-w.Used)
+		if w.ResetsAt.After(now) && 100-w.Used < left {
+			left, resets = 100-w.Used, w.ResetsAt
 		}
 	}
-	return left, true
+	return left, resets, true
 }
 
 // pickAgent is worker_agent = "auto": codex only when both readings are
-// usable and codex has strictly more left. It never picks muse or pi, which
-// leave no usage reading to compare.
+// usable and codex has strictly more left. It never picks muse, pi or agy,
+// which leave no usage reading to compare.
 func pickAgent(claude, codex *quotaReading, now time.Time) string {
 	cl, ok1 := headroom(claude, now)
 	cx, ok2 := headroom(codex, now)
@@ -51,6 +60,133 @@ func pickAgent(claude, codex *quotaReading, now time.Time) string {
 
 func autoAgent(now time.Time) string {
 	return pickAgent(claudeQuota(), codexQuota(now), now)
+}
+
+// quotaSnapshot is the normalized headroom quartermaster writes for its pi
+// extension's virtual-model router (pi/router.ts), so the Antigravity, Claude
+// and Codex readings are parsed once, here, with the same freshness semantics
+// as worker_agent=auto. A provider is null when it has no reading at all; a
+// reading too old to trust is present with fresh false.
+type quotaSnapshot struct {
+	GeneratedAt time.Time              `json:"generated_at"`
+	Antigravity *quotaSnapshotProvider `json:"antigravity"`
+	Claude      *quotaSnapshotProvider `json:"claude"`
+	OpenAI      *quotaSnapshotProvider `json:"openai"`
+}
+
+type quotaSnapshotProvider struct {
+	HeadroomPct   *float64   `json:"headroom_pct"`
+	Fresh         bool       `json:"fresh"`
+	At            time.Time  `json:"at"`
+	TightResetsAt *time.Time `json:"tight_resets_at"`
+}
+
+func snapshotProvider(r *quotaReading, now time.Time) *quotaSnapshotProvider {
+	if r == nil || len(r.Windows) == 0 {
+		return nil
+	}
+	p := &quotaSnapshotProvider{At: r.At.UTC()}
+	if left, resets, ok := headroomDetail(r, now); ok {
+		p.HeadroomPct, p.Fresh = &left, true
+		if !resets.IsZero() {
+			u := resets.UTC()
+			p.TightResetsAt = &u
+		}
+	}
+	return p
+}
+
+func buildQuotaSnapshot(now time.Time) quotaSnapshot {
+	return quotaSnapshot{
+		GeneratedAt: now.UTC(),
+		Antigravity: snapshotProvider(antigravityQuota(), now),
+		Claude:      snapshotProvider(claudeQuota(), now),
+		OpenAI:      snapshotProvider(codexQuota(now), now),
+	}
+}
+
+// piQuotaSnapshotPath is quota.json beside the pi extension files, which the
+// router reads through the --quartermaster-router flag's directory.
+func piQuotaSnapshotPath() string { return filepath.Join(stateDir(), "pi", "quota.json") }
+
+// writeQuotaSnapshot atomically writes the current snapshot, skipping the
+// write when only generated_at would change. Written on every local pi
+// launch and refreshed by the ticker, so a long-lived session routes on
+// fresh readings at each turn boundary.
+func writeQuotaSnapshot(now time.Time) error {
+	snap := buildQuotaSnapshot(now)
+	b, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := piQuotaSnapshotPath()
+	if cur, err := os.ReadFile(path); err == nil {
+		var old quotaSnapshot
+		if json.Unmarshal(cur, &old) == nil {
+			old.GeneratedAt, snap.GeneratedAt = time.Time{}, time.Time{}
+			if ob, err := json.Marshal(old); err == nil {
+				if nb, err := json.Marshal(snap); err == nil && bytes.Equal(ob, nb) {
+					return nil
+				}
+			}
+		}
+	}
+	return writeAtomic(path, b)
+}
+
+// antigravityQuota reads the rate limits Antigravity records in the
+// herdr-agent-quota statusline observation file.
+func antigravityQuota() *quotaReading {
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".local", "state", "herdr", "plugins", "herdr-agent-quota", "agy-statusline.observation.json")
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return parseAgyStatusline(data, fi.ModTime())
+}
+
+func parseAgyStatusline(data []byte, at time.Time) *quotaReading {
+	var obs struct {
+		Snapshot struct {
+			FetchedAtUnix int64 `json:"fetched_at_unix"`
+			Windows       []struct {
+				UsedPercent      *float64 `json:"used_percent"`
+				RemainingPercent *float64 `json:"remaining_percent"`
+				ResetsAt         int64    `json:"resets_at"`
+			} `json:"windows"`
+		} `json:"snapshot"`
+	}
+	if json.Unmarshal(data, &obs) != nil {
+		return nil
+	}
+	readingAt := at
+	if obs.Snapshot.FetchedAtUnix > 0 {
+		readingAt = time.Unix(obs.Snapshot.FetchedAtUnix, 0)
+	}
+	r := &quotaReading{At: readingAt}
+	for _, w := range obs.Snapshot.Windows {
+		var used float64
+		switch {
+		case w.UsedPercent != nil:
+			used = *w.UsedPercent
+		case w.RemainingPercent != nil:
+			used = 100 - *w.RemainingPercent
+		default:
+			continue
+		}
+		if used < 0 {
+			used = 0
+		} else if used > 100 {
+			used = 100
+		}
+		r.Windows = append(r.Windows, quotaWindow{Used: used, ResetsAt: time.Unix(w.ResetsAt, 0)})
+	}
+	return r
 }
 
 // claudeQuota reads the rate limits Claude Code hands its status line, which

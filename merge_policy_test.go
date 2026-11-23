@@ -92,12 +92,89 @@ func TestMergePolicyMatrix(t *testing.T) {
 					}
 					return *p.Policy
 				}}
-				if err := m.pre(context.Background(), mergeStep("github.pr.merge")); err == nil {
-					t.Fatal("executor accepted unsafe PR")
+				step := mergeStep("github.pr.merge")
+				if auto {
+					step = mergeStep("github.pr.automerge")
 				}
-				if _, err := m.do(context.Background(), mergeStep("github.pr.merge"), ""); err == nil || len(g.calls) != 0 {
-					t.Fatalf("do wrote: %v %v", err, g.calls)
+				if err := m.pre(context.Background(), step); err == nil {
+					t.Fatalf("executor accepted unsafe PR (auto=%v)", auto)
 				}
+				if _, err := m.do(context.Background(), step, ""); err == nil || len(g.calls) != 0 {
+					t.Fatalf("do wrote (auto=%v): %v %v", auto, err, g.calls)
+				}
+			}
+		})
+	}
+}
+
+func TestAutoMergePolicyB(t *testing.T) {
+	cases := []struct {
+		name  string
+		edit  func(*PR)
+		allow bool
+	}{
+		{"review required with pending checks", func(p *PR) {
+			p.ReviewDecision = "REVIEW_REQUIRED"
+			p.MergeState = "BLOCKED"
+			p.Gate.Reviews = nil
+			p.Checks = []Check{{Name: "build", Status: "IN_PROGRESS"}}
+		}, true},
+		{"changes requested waits on GitHub", func(p *PR) {
+			p.ReviewDecision = "CHANGES_REQUESTED"
+			p.MergeState = "BLOCKED"
+			p.Gate.Reviews = nil
+		}, true},
+		{"approved with fresh head approval and pending checks", func(p *PR) {
+			p.ReviewDecision = "APPROVED"
+			p.MergeState = "BLOCKED"
+			p.Checks = []Check{{Name: "build", Status: "IN_PROGRESS"}}
+		}, true},
+		{"unprotected repo refused", func(p *PR) {
+			p.ReviewDecision = ""
+			p.Gate.Reviews = nil
+		}, false},
+		{"unprotected repo even with fresh approval refused for native auto", func(p *PR) {
+			p.ReviewDecision = ""
+		}, false},
+		{"approved with stale head approval refused", func(p *PR) {
+			p.ReviewDecision = "APPROVED"
+			p.Gate.Reviews[0].Commit.OID = "old"
+		}, false},
+		{"approved with open thread refused", func(p *PR) {
+			p.ReviewDecision = "APPROVED"
+			p.Gate.OpenThreads = 1
+		}, false},
+		{"review required wrong owner refused", func(p *PR) {
+			p.ReviewDecision = "REVIEW_REQUIRED"
+			p.Gate.Author = "someone-else"
+		}, false},
+		{"review required denied task policy refused", func(p *PR) {
+			p.ReviewDecision = "REVIEW_REQUIRED"
+			p.Policy.Allowed = false
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := greenPR()
+			tc.edit(&p)
+			g := &fakeGH{pr: p}
+			m := mergeRunner{auto: true, gh: g.run, policy: func(PR) MergePolicy {
+				if p.Policy == nil {
+					return MergePolicy{}
+				}
+				return *p.Policy
+			}}
+			s := mergeStep("github.pr.automerge")
+			err := m.pre(context.Background(), s)
+			if (err == nil) != tc.allow {
+				t.Fatalf("pre err=%v, allow=%v", err, tc.allow)
+			}
+			_, err = m.do(context.Background(), s, "")
+			if (err == nil) != tc.allow || (len(g.calls) == 1) != tc.allow {
+				t.Fatalf("do err=%v calls=%v, allow=%v", err, g.calls, tc.allow)
+			}
+			if tc.allow && !strings.Contains(strings.Join(g.calls[0], " "), "--auto") {
+				t.Fatalf("expected --auto in %v", g.calls[0])
 			}
 		})
 	}
