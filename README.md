@@ -618,8 +618,9 @@ installed for it. Two things differ from Claude and Codex:
 
 Native headless pi workers are also opt-in: `dispatch <bead> --backend pi-rpc
 --agent pi`. A persistent local supervisor owns RPC, with no Herdr pane or PTY.
-See [the isolated trial, controls and rollback](docs/pi-rpc.md). Existing TUI
-workers and defaults are unchanged.
+See [the isolated trial, controls and rollback](docs/pi-rpc.md) and
+[explicit steering and offline session forks](docs/pi-rpc-operations.md).
+Existing TUI workers and defaults are unchanged.
 
 [pi](https://github.com/earendil-works/pi) is opt-in (details, guards and
 setup in [docs/pi.md](docs/pi.md)): `--agent pi`,

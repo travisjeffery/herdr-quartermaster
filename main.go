@@ -26,14 +26,17 @@ Usage:
                 [--backend herdr|pi-rpc]               opt in to native pi RPC; no default or live sessions change
   quartermaster rpc status|output|events <bead>        inspect a native worker (no Herdr needed)
   quartermaster rpc tell <bead> <request-id> <text>     idempotent submission/reconciliation; never replays intent
-  quartermaster rpc receipt <bead> <request-id>        reconcile a possibly delivered prompt, even after exit
+  quartermaster rpc steer <bead> <request-id> <text>    explicit running-turn steering (class 3); never tell fallback
+  quartermaster rpc fork <source> <dest> <entry-id>    prepare a parked independent checkpoint copy; source stopped
+  quartermaster rpc fork-status <dest>                inspect durable fork intent/completion; never retry it
+  quartermaster rpc receipt <bead> <request-id>        reconcile a possibly delivered message, even after exit
   quartermaster rpc cancel|stop|resume <bead>          abort queued work; stop (legacy may kill); restore session
   quartermaster rpc stop-graceful <bead>              guarded idle-only EOF shutdown; bounded wait, never kill
   quartermaster rpc prepare <bead> <exact-pane>        reserve an idle local pi TUI worker for migration
   quartermaster rpc adopt <bead>                      verify old owner exited; start same session parked
   quartermaster rpc handoff-prepare <bead> <pane> <json> checkpoint non-pi worker and durable fresh-session context
   quartermaster rpc handoff <bead>                    verify source exit; start a fresh pi session parked
-  quartermaster rpc activate <bead>                   explicitly unpark an adopted, unblocked worker (no prompt)
+  quartermaster rpc activate <bead>                   explicitly unpark an adopted/forked, unblocked worker (no prompt)
   quartermaster host list                              the worker hosts: machine, slots, labels, repos
   quartermaster focus [<bead>] [--agent K]             focus the bead's worker, else dispatch it
                                                        (no bead: read it from the clipboard)
