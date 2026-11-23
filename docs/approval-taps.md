@@ -18,7 +18,9 @@ devices = ["iphone181"]   # Tailscale node names allowed to tap (`tailscale stat
 
 With `[tap]` on, the ticker also serves a small HTTP endpoint bound to this
 machine's Tailscale IPv4 address (never `0.0.0.0`; no tailnet, no listener).
-When a worker's parsed approval prompt reaches the inbox, the event carries
+When a worker's parsed approval prompt reaches the inbox — after
+`prompt_debounce_seconds` (default 90) of it continuously showing, unless
+that knob is 0 — the event carries
 the prompt's own lines — the actual command, not only the agent's description
 of it — and one signed link per option. `quartermaster tap links <bead>`
 mints the same links at any time. The coordinator relays the event as it

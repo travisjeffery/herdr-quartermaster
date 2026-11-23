@@ -440,7 +440,7 @@ func (t Ticker) once(st *TickerState) error {
 				t.log.Printf("%s woke at needs_me with no prompt since %s; not a resume", id, prev.ReadySince.Format(time.RFC3339))
 			}
 		}
-		out := transition(th, prev, !seen, now)
+		out := transitionDebounced(th, prev, !seen, now, t.cfg.promptDebounce(), t.cfg.promptFlap())
 		if out.Resume {
 			if err := t.resume(id); err != nil {
 				t.log.Printf("resume %s: %v", id, err)
@@ -449,7 +449,7 @@ func (t Ticker) once(st *TickerState) error {
 				th.Bead.Status = StatusInProgress
 			}
 		}
-		snap := snapshot(th, prev, now)
+		snap := snapshotDebounced(th, prev, now, t.cfg.promptDebounce(), t.cfg.promptFlap(), !seen)
 		t.journalAuto(th, prev, seen, &snap, now)
 		snap.Pending = append(snap.Pending, out.Prompts...)
 		t.relaunch(th, &snap, relaunch[agentName(id)], now)
