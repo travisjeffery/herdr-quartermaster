@@ -15,6 +15,7 @@ import (
 )
 
 type boardRow struct {
+	state  *ThreadState
 	header string
 	// count is a header's number of rows.
 	count int

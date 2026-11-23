@@ -92,7 +92,7 @@ func inboxObsolete(it InboxItem, active map[string]Thread) bool {
 	case "needs_you":
 		return t.Bead.Status != StatusNeedsMe && !t.AgentUnknown && !blocked
 	case "needs_me":
-		return t.Bead.Status != StatusNeedsMe || (c.Key != "" && c.Key != asked(t.Bead))
+		return t.Bead.Status != StatusNeedsMe || (!t.Unprompted && c.Key != "" && c.Key != asked(t.Bead))
 	case "agent_blocked":
 		return !t.AgentUnknown && !blocked
 	case "prompt":

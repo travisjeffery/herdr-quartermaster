@@ -95,7 +95,7 @@ func TestInFlightStateLineFromTickerSnapshot(t *testing.T) {
 		Threads: map[string]Snapshot{"backend-seen": {AgentStatus: "idle"}},
 	}
 	r := buildReport(t0, nil, active, nil, st, "tj/")
-	if r.InFlight[0].State != "review · PR #8 approved" || r.InFlight[1].State != "" {
+	if r.InFlight[0].State != "review · PR #8 approved" || r.InFlight[1].State != "no agent · PR #8 approved" {
 		t.Fatalf("got %q and %q", r.InFlight[0].State, r.InFlight[1].State)
 	}
 }

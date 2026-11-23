@@ -149,6 +149,9 @@ func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thre
 	if a, ok := byName[agentName(b.ID)]; ok {
 		th.Agent = &a
 	}
+	// PRs already holds the canonical selection with detailed evidence. Do
+	// not promote a light Noted lookup after a failed detail fetch: it would
+	// establish a false zero-review baseline for the next successful pass.
 	if pr, ok := st.PRs[b.ID]; ok {
 		th.PR = &pr
 		th.Checks = summarizeChecks(pr.Checks)
@@ -157,7 +160,8 @@ func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thre
 	}
 	th.Merged = st.MergedPRs[b.ID]
 	th.Runs = st.Runs[b.ID]
-	return th
+	th = restoreThreadEvidence(th, st.Threads[b.ID])
+	return th.derive()
 }
 
 func (t Ticker) refreshPRs(st *TickerState, active []Bead) {
@@ -441,7 +445,7 @@ func (t Ticker) once(st *TickerState) error {
 	var rows []sidebarRow
 	var alertThreads []Thread
 	current := map[string]bool{}
-	for _, th := range threads {
+	for i, th := range threads {
 		id := th.Bead.ID
 		current[id] = true
 		prev, seen := st.Threads[id]
@@ -457,16 +461,19 @@ func (t Ticker) once(st *TickerState) error {
 				t.log.Printf("%s woke at needs_me with no prompt since %s; not a resume", id, prev.ReadySince.Format(time.RFC3339))
 			}
 		}
-		out := transition(th, prev, !seen, now)
+		th = th.derive()
+		out := transitionDebounced(th, prev, !seen, now, t.cfg.promptDebounce(), t.cfg.promptFlap())
 		if out.Resume {
 			if err := t.resume(id); err != nil {
 				t.log.Printf("resume %s: %v", id, err)
 			} else {
 				t.log.Printf("resumed %s: its agent went back to work after needs_me", id)
 				th.Bead.Status = StatusInProgress
+				th = th.derive()
 			}
 		}
-		snap := snapshot(th, prev, now)
+		threads[i] = th
+		snap := snapshotDebounced(th, prev, now, t.cfg.promptDebounce(), t.cfg.promptFlap(), !seen)
 		if out.Resume {
 			// transition saw needs_me and withheld the ready event. A
 			// successful resume must not baseline it away before next pass.
@@ -476,6 +483,14 @@ func (t Ticker) once(st *TickerState) error {
 		snap.Pending = append(snap.Pending, out.Prompts...)
 		t.relaunch(th, &snap, relaunch[agentName(id)], now)
 		for _, e := range out.Events {
+			// A parsable approval prompt's event carries its tap links, so
+			// what the coordinator relays to TJ is tappable as it stands;
+			// a needs_me OPTIONS question's event carries its own.
+			if e.Kind == EventNeedsYou && th.Prompt != nil {
+				e.Summary += t.tapEventSuffix(th)
+			} else if e.Kind == EventNeedsYou {
+				e.Summary += t.tapQuestionEventSuffix(th)
+			}
 			if err := writeEvent(e); err != nil {
 				t.log.Printf("inbox: %v", err)
 			}
@@ -846,6 +861,15 @@ func tickerRun(cfg Config) error {
 	logger := log.New(f, "", log.LstdFlags)
 	logger.Printf("ticker %s started, every %s, on %s", version, cfg.tick(), cfg.coordSocket())
 	t := newTicker(cfg, logger)
+	if cfg.Tap.Enabled {
+		// The tap endpoint rides the ticker: no new daemon. A bind failure
+		// (no tailnet, port taken) leaves the ticker running and taps off.
+		if ln, err := startTapServer(cfg.Tap, livePromptEnv(cfg, t.herdr), logger.Printf); err != nil {
+			logger.Printf("tap: %v (approval taps unavailable)", err)
+		} else {
+			defer ln.Close()
+		}
+	}
 	done := make(chan struct{})
 	defer close(done)
 	go t.side.run(done)
@@ -853,10 +877,20 @@ func tickerRun(cfg Config) error {
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	timer := time.NewTicker(cfg.tick())
 	defer timer.Stop()
+	var lastQuota time.Time
 	for {
 		st := loadState()
 		if err := t.once(&st); err != nil {
 			logger.Printf("tick: %v", err)
+		}
+		// Keep the pi quota router's snapshot fresh for sessions already
+		// running; a launch writes it too. A failed write only leaves the
+		// router on older readings, which age out to Claude on their own.
+		if now := time.Now(); now.Sub(lastQuota) >= time.Minute {
+			lastQuota = now
+			if err := writeQuotaSnapshot(now); err != nil {
+				logger.Printf("quota snapshot: %v", err)
+			}
 		}
 		if err := saveState(st); err != nil {
 			logger.Printf("state: %v", err)

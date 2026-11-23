@@ -101,7 +101,9 @@ func renderContext(cfg Config, threads []Thread, next, ready []Bead, inbox []Inb
 			if cmd != "" {
 				fmt.Fprintf(&s, "  run: %s\n", cmd)
 			}
-			if q := lastNote(t.Bead.Notes, 200); cmd == "" || !strings.HasPrefix(q, "RUN:") {
+			if q, ok := liveQuestion(t); ok {
+				fmt.Fprintf(&s, "  question: %s\n  options: %s\n", shortTitle(strings.Join(q.Lines, " "), 200), q.Choices())
+			} else if q := lastNote(t.Bead.Notes, 200); cmd == "" || !strings.HasPrefix(q, "RUN:") {
 				fmt.Fprintf(&s, "  question: %s\n", q)
 			}
 		}
@@ -197,7 +199,7 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
 1. Run `+"`quartermaster context`"+` first. It lists the inbox, every active thread with its
    state (needs you, merged, ready to merge, review, rolling out, checks failing,
    idle, working, blocked, no agent), the beads labelled `+"`next`"+`, and other ready beads.
-2. Deal with inbox items, then `+"`quartermaster inbox done <bead>...`"+`.
+2. Deal with inbox items, then `+"`quartermaster inbox done <file>...`"+` (each item's `+"`file:`"+` line from `+"`quartermaster context`"+`, or `+"`<bead>...`"+` for bulk).
 3. Answer TJ.
 
 ## Rules
@@ -206,9 +208,11 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   class by where its output lands: 0 read-only, 1 a worktree, 2 a worker's own
   branch and PR, 3 TJ's machine and bead state (dispatching a `+"`next`"+` bead,
   resuming, releasing a stale claim, closing a verified-done bead), 4 main
-  (merging an approved, green PR), 5 internal messages, 6 non-prod infra and
-  dispatching a bead TJ didn't select, 7 production additive or in place, 8 a
-  scoped prod deletion, secrets, outside messages, money or approving a PR, 9
+  (merging an approved, green PR) and spending up to `+spendLimitText+`,
+  5 internal messages, 6 non-prod infra and dispatching a bead TJ didn't
+  select, 7 production additive or in place and spending more, or an amount
+  no one can estimate (`+"`--action spend --amount <USD>[/month]`"+`), 8 a
+  scoped prod deletion, secrets, outside messages or approving a PR, 9
   widespread or irreversible, a classifier denial, loosening agent settings, or
   anything you can't place. Before acting for TJ, find the class of what you'd
   authorize and run `+"`quartermaster autonomy check <bead> --action A [--target T]`"+` or
@@ -272,7 +276,13 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   Relay it to TJ verbatim with the options instead, whatever the level, when it is
   a question of taste or voice, involves other people (what to say to someone,
   asking another team), the evidence conflicts or is missing, or it starts
-  "CRITICAL:". When TJ answers, prompt the worker and it resets the status.
+  "CRITICAL:". When TJ answers, prompt the worker and it resets the status. A
+  question written in the `+"`QUESTION:`"+` / `+"`OPTIONS:`"+` convention is also tappable:
+  with `+"`[tap]`"+` on, its inbox item carries one signed link per option
+  (`+"`quartermaster tap links <bead>`"+` mints them again); a tap is TJ's answer — it
+  notes `+"`NEEDS_ME ANSWERED: ... by TJ via tap (device …)`"+`, returns the bead to
+  in_progress and prompts the worker itself — so relay those links verbatim
+  and don't prompt the worker a second time for an answer a tap already gave.
 - Workers check the dial before each step above their routine work and leave an
   "AUTO:" note for each. Change a level only when TJ says so, with
   `+"`quartermaster autonomy level N <bead>`"+` (8 and 9 need `+"`--for <duration>`"+`; it labels the

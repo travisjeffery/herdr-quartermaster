@@ -81,10 +81,10 @@ func TestDigestSections(t *testing.T) {
 		"app-run":      SecNeedsYou,
 		"app-prompt":   SecNeedsYou,   // in progress, but its agent is waiting at a prompt
 		"app-answered": SecInProgress, // needs_me, but answered: its agent is working again
-		"app-review":   SecWaiting,    // an open PR beside a merged one
+		"app-review":   SecInProgress, // the PR is open, but the agent is missing
 		"app-held":     SecBlocked,    // blocked status outranks its open PR
 		"app-dep":      SecBlocked,    // marked next, but an open bead blocks it
-		"app-wip":      SecInProgress, // its blocker is closed and parent-child never blocks
+		"app-wip":      SecRollingOut, // merged, rolling out; its blocker is closed
 		"app-next":     SecReady,
 		"app-epic":     SecBacklog,
 		"app-later":    SecBacklog,
@@ -144,7 +144,7 @@ func TestDigestDetailLines(t *testing.T) {
 		"app-ask":    "QUESTION: one region first, or all at once? · acme/app#10 merged",
 		"app-run":    "RUN: aws sso login --profile admin · acme/app#6 · conflicts · no checks · no review required",
 		"app-prompt": "agent stopped at a prompt",
-		"app-review": "acme/app#2 · checks green · review required",
+		"app-review": "no agent · acme/app#2 · checks green · review required",
 		"app-held":   "BLOCKED until 2026-10-01 (soak). · acme/app#3 · checks running · approved",
 		"app-dep":    "blocked by app-review (in_progress)",
 		"app-wip":    "agent idle · rolling out · acme/app#4 merged",
@@ -292,7 +292,7 @@ func TestRenderDigestAndSummary(t *testing.T) {
 	out := renderDigest(d)
 	for _, want := range []string{
 		"# Beads digest: 2026-09-24 12:00 UTC",
-		"3 need you · 1 waiting · 2 blocked · 2 in progress · 1 next · 9 backlog · 3 stale (18 open)",
+		"3 need you · 0 waiting · 2 blocked · 2 in progress · 0 merged · 1 rolling out · 1 next · 9 backlog · 3 stale (18 open)",
 		"## Changed since the last digest (0)\n\n_Nothing._",
 		"## Needs you (3)\n\n- **app-ask** P1 Pick a rollout order · @claude · STALE since 6h ago\n  - QUESTION:",
 		"## Backlog (9)",
