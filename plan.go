@@ -195,7 +195,7 @@ func (c Config) stepClass(b Bead, s Step) (int, string) {
 func (c Config) opClass(b Bead, s Step) (int, string) {
 	switch s.Op {
 	case "github.pr.merge", "github.pr.automerge":
-		class, _ := c.actionClass(b, "merge", "")
+		class, _ := c.actionClass(b, "merge", "", "")
 		m := githubTarget.FindStringSubmatch(s.Target)
 		if mc := c.Autonomy.MergeClass[m[2]]; mc > class {
 			class = mc

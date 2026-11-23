@@ -26,14 +26,17 @@ Usage:
                 [--backend herdr|pi-rpc]               opt in to native pi RPC; no default or live sessions change
   quartermaster rpc status|output|events <bead>        inspect a native worker (no Herdr needed)
   quartermaster rpc tell <bead> <request-id> <text>     idempotent submission/reconciliation; never replays intent
-  quartermaster rpc receipt <bead> <request-id>        reconcile a possibly delivered prompt, even after exit
+  quartermaster rpc steer <bead> <request-id> <text>    explicit running-turn steering (class 3); never tell fallback
+  quartermaster rpc fork <source> <dest> <entry-id>    prepare a parked independent checkpoint copy; source stopped
+  quartermaster rpc fork-status <dest>                inspect durable fork intent/completion; never retry it
+  quartermaster rpc receipt <bead> <request-id>        reconcile a possibly delivered message, even after exit
   quartermaster rpc cancel|stop|resume <bead>          abort queued work; stop (legacy may kill); restore session
   quartermaster rpc stop-graceful <bead>              guarded idle-only EOF shutdown; bounded wait, never kill
   quartermaster rpc prepare <bead> <exact-pane>        reserve an idle local pi TUI worker for migration
   quartermaster rpc adopt <bead>                      verify old owner exited; start same session parked
   quartermaster rpc handoff-prepare <bead> <pane> <json> checkpoint non-pi worker and durable fresh-session context
   quartermaster rpc handoff <bead>                    verify source exit; start a fresh pi session parked
-  quartermaster rpc activate <bead>                   explicitly unpark an adopted, unblocked worker (no prompt)
+  quartermaster rpc activate <bead>                   explicitly unpark an adopted/forked, unblocked worker (no prompt)
   quartermaster host list                              the worker hosts: machine, slots, labels, repos
   quartermaster focus [<bead>] [--agent K]             focus the bead's worker, else dispatch it
                                                        (no bead: read it from the clipboard)
@@ -70,7 +73,9 @@ Usage:
                 [--for D]                              workers; - goes back to the global/config level;
                                                        8 needs --for (default 4h), 9 only on beads with --for
   quartermaster autonomy check <bead> [--class N]      exit 0 only if the bead may take a step of class N
-                [--action A [--target T]]              (or action A, on target T) without TJ right now
+                [--action A [--target T]]              (or action A, on target T) without TJ right now;
+                [--amount USD[/month]]                 --action spend is class 4 up to $500, one charge or
+                                                       per month, else 7 (7 too with no --amount)
   quartermaster autonomy on|off                        off caps every bead at level 2 until on
   quartermaster autonomy grant|revoke <bead>           level 7 or 2 on a bead (the old autonomous/supervised)
   quartermaster tell <bead> <text>                     prompt the bead's worker: a pi worker over its control
@@ -82,6 +87,13 @@ Usage:
                 [--by WHO] [--class N]                 if it is still the one with HASH; waits for it to clear
                                                        and notes the answer on the bead; N is the class of
                                                        the command it releases
+  quartermaster tap links <bead>                       signed one-time links, one per option, that answer the
+                                                       bead's prompt (or its needs_me OPTIONS question) as
+                                                       TJ when tapped from an allowed phone (needs [tap]
+                                                       enabled; the ticker serves them, and adds them to
+                                                       the prompt's or question's inbox event)
+  quartermaster tap serve                              run the tap endpoint in the foreground (the ticker
+                                                       runs it too when [tap] is on)
   quartermaster gate plan <file|-> [--expect op=N,...] print a pulumi preview --json or tofu show -json
                 [--target T]                           plan's class on target T (6/7 by [autonomy] prod, 8
                                                        delete/replace in prod or stateful, 9 widespread or
@@ -219,6 +231,7 @@ func run(args []string) error {
 	actionFlag := fs.String("action", "", "autonomy check: the kind of step, from the action table (merge, apply, ...)")
 	classFlag := fs.Int("class", -1, "autonomy check: the step's impact class, 0-9; answer: the class of the command the answer releases")
 	targetFlag := fs.String("target", "", "autonomy check: the stack or environment an apply, deploy or rollout lands on")
+	amountFlag := fs.String("amount", "", "autonomy check: a spend's estimated cost in US dollars, one charge (40) or per month (300/month)")
 	forFlag := fs.Duration("for", 0, "autonomy level: how long a level 8 or 9 lease lasts (8 defaults to 4h); plan approve: how long the approval lasts (default 1h)")
 	expect := fs.String("expect", "", "answer: the hash of the prompt being answered, from quartermaster prompt")
 	reasonFlag := fs.String("reason", "", "close: what shipped and how it was verified")
@@ -361,7 +374,7 @@ func run(args []string) error {
 		}
 		return err
 	case "autonomy":
-		o := autonomyOpts{Class: *classFlag, Action: *actionFlag, Target: *targetFlag, For: *forFlag}
+		o := autonomyOpts{Class: *classFlag, Action: *actionFlag, Target: *targetFlag, Amount: *amountFlag, For: *forFlag}
 		return autonomyCmd(cfg, liveAutonomyEnv(cfg, h.on(cfg.coordSocket())), pos, o, os.Stdout)
 	case "plan":
 		return planCmd(cfg, Beads{}.Show, pos, *by, *forFlag, os.Stdin, os.Stdout)
@@ -397,6 +410,8 @@ func run(args []string) error {
 			fmt.Println(msg)
 		}
 		return err
+	case "tap":
+		return tapCmd(cfg, livePromptEnv(cfg, h.on(cfg.coordSocket())), pos)
 	case "board":
 		return runBoard(cfg)
 	case "action":
