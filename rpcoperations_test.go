@@ -137,7 +137,7 @@ func TestRPCOperationAutonomyAndAllowlist(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, action := range []string{"steer", "fork"} {
-		class, err := f.cfg.actionClass(f.source, action, "")
+		class, err := f.cfg.actionClass(f.source, action, "", "")
 		if err != nil || class != 3 {
 			t.Fatal(action, class, err)
 		}
