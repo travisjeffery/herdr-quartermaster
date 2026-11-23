@@ -32,6 +32,11 @@ type Config struct {
 	// on Herdr 0.9.1 a prompt merges with whatever the user has half-typed.
 	IdleSeconds int  `toml:"idle_seconds"`
 	Nudge       bool `toml:"nudge"`
+	// PromptDebounceSeconds is how long a worker approval/question prompt
+	// must keep showing before the ticker surfaces it to the inbox; a prompt
+	// that clears sooner (a judge transient) never surfaces. 0 disables the
+	// debounce: prompts surface on the tick they are first seen.
+	PromptDebounceSeconds int `toml:"prompt_debounce_seconds"`
 	// Only keys with these team prefixes count as Linear issues; empty accepts
 	// any key outside a small denylist.
 	LinearPrefixes []string `toml:"linear_prefixes"`
@@ -270,20 +275,21 @@ func (c Config) launchBypass(b Bead, host string) bool {
 
 func defaultConfig() Config {
 	return Config{
-		BranchPrefix:     "tj/",
-		BaseBranch:       "main",
-		WorkerAgent:      "claude",
-		CoordinatorAgent: "claude",
-		CoordinatorName:  toolName,
-		TickSeconds:      15,
-		GHSeconds:        60,
-		IdleSeconds:      60,
-		Nudge:            true,
-		VerifyMinutes:    60,
-		StaleDays:        3,
-		VerifyMax:        20,
-		GHMinRemaining:   1000,
-		Autonomy:         AutonomyConfig{Level: 4, Max: maxStanding, Widespread: 5, Budget: BudgetConfig{Steps: 30, Applies: 3, Dispatches: 5}},
+		BranchPrefix:          "tj/",
+		BaseBranch:            "main",
+		WorkerAgent:           "claude",
+		CoordinatorAgent:      "claude",
+		CoordinatorName:       toolName,
+		TickSeconds:           15,
+		GHSeconds:             60,
+		IdleSeconds:           60,
+		Nudge:                 true,
+		PromptDebounceSeconds: 90,
+		VerifyMinutes:         60,
+		StaleDays:             3,
+		VerifyMax:             20,
+		GHMinRemaining:        1000,
+		Autonomy:              AutonomyConfig{Level: 4, Max: maxStanding, Widespread: 5, Budget: BudgetConfig{Steps: 30, Applies: 3, Dispatches: 5}},
 	}
 }
 
@@ -439,6 +445,9 @@ func loadConfig() (Config, error) {
 	if err := cfg.validateTap(); err != nil {
 		return cfg, err
 	}
+	if cfg.PromptDebounceSeconds < 0 {
+		return cfg, fmt.Errorf("prompt_debounce_seconds %d is negative; use 0 to disable the prompt debounce", cfg.PromptDebounceSeconds)
+	}
 	if cfg.Repo == "" {
 		return cfg, errNoRepo
 	}
@@ -518,6 +527,23 @@ func (c Config) verifyEvery() time.Duration {
 }
 func (c Config) staleAge() time.Duration { return time.Duration(max(c.StaleDays, 0)) * 24 * time.Hour }
 func (c Config) idle() time.Duration     { return time.Duration(c.IdleSeconds) * time.Second }
+
+// promptDebounce is the window a worker prompt must keep showing before it
+// surfaces; 0 (or a zero Config that never went through defaultConfig)
+// disables it.
+func (c Config) promptDebounce() time.Duration {
+	if c.PromptDebounceSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(c.PromptDebounceSeconds) * time.Second
+}
+
+// promptFlap is how long a prompt may go undetected (agent briefly not
+// blocked, or its screen unreadable) without losing its debounce clock or
+// its already-surfaced dedup: two ticks (30s at the default tick). A longer
+// absence is a cleared prompt; the same prompt showing again after it is a
+// new instance with a fresh window.
+func (c Config) promptFlap() time.Duration { return 2 * c.tick() }
 
 func instructionsPath() string { return filepath.Join(configDir(), "instructions.md") }
 

@@ -272,7 +272,17 @@ once per head commit; otherwise the board shows
   needs_me`, which keeps the question in the history. The ticker holds its own
   prompts to a `needs_me` thread until then, so they never count as your answer.
 - **Approval prompts.** For a worker stopped at a permission prompt, the
-  ticker reads the prompt off its screen. The inbox item has its title, the
+  ticker reads the prompt off its screen. The inbox item is debounced: the
+  same prompt (identified by its hash; an unparsable prompt by its blocked
+  episode) must keep showing for `prompt_debounce_seconds` (default 90; 0
+  turns the debounce off) before the item is written and the coordinator is
+  nudged, so a prompt a judge clears in seconds never wakes anyone. A
+  different prompt on the same worker starts a fresh window; brief detection
+  flaps — up to two ticks, 30 seconds at the default tick — keep the original
+  clock, and a pending prompt is kept in the ticker's state across a restart,
+  so it still surfaces exactly once, at expiry. `needs_me` questions are
+  never debounced, and the sidebar, the board and `quartermaster prompt`
+  still show the prompt as soon as it appears. The inbox item has its title, the
   command or file, the options, any auto-deny countdown, and a short hash of
   the prompt text: `backend-ab12 is at an approval prompt [bff9292a]: Bash
   command: … (1 Yes · 2 … · 3 No)`. A new prompt on the same worker is a new
@@ -731,6 +741,8 @@ coordinator_agent = "claude"
 tick_seconds = 15         # how often the ticker checks threads
 gh_seconds = 60           # how often it checks PRs
 idle_seconds = 60         # it only types into an agent idle this long
+prompt_debounce_seconds = 90  # a worker approval prompt must keep showing this long before it
+                              # reaches the inbox; one that clears sooner never does. 0 = at once
 nudge = true              # prompt the coordinator when there's news
 repos = { infra = "~/src/infra", model = "~/src/model" }
 linear_prefixes = ["ENG"] # Linear team keys to recognise; empty accepts any KEY-123

@@ -207,8 +207,19 @@ type Snapshot struct {
 	// worker hears once when GitHub turns it off.
 	AutoMerge string `json:"auto_merge,omitempty"`
 	// PromptHash is the approval prompt last announced, so each prompt a
-	// blocked agent shows reaches the inbox once.
+	// blocked agent shows reaches the inbox once. For a blocked agent whose
+	// prompt cannot be parsed it holds promptUnparsedKey once that prompt
+	// has surfaced (or was baselined on first sight).
 	PromptHash string `json:"prompt_hash,omitempty"`
+	// PromptPending is a worker prompt seen but not yet surfaced while the
+	// prompt debounce runs: its hash, or promptUnparsedKey, first seen at
+	// PromptSince. PromptLastSeen is when the tracked prompt (pending or
+	// announced) was last detected; it bounds the flap tolerance after
+	// which a missing prompt counts as cleared. All three ride state.json
+	// with the snapshot, so a ticker restart mid-window keeps the clock.
+	PromptPending  string    `json:"prompt_pending,omitempty"`
+	PromptSince    time.Time `json:"prompt_since,omitempty"`
+	PromptLastSeen time.Time `json:"prompt_last_seen,omitempty"`
 	// TurnID is the id of the last turn end in a pi worker's session.
 	TurnID string `json:"turn_id,omitempty"`
 	// Relaunch marks a worker asked to exit so it can be resumed in the
@@ -280,7 +291,102 @@ func asked(b Bead) string {
 // stays in the notes above it.
 const resumeNote = "auto: agent resumed after needs_me"
 
+// promptUnparsedKey is the identity of a blocked agent's prompt that
+// cannot be parsed off its screen. Parsed prompts are identified by their
+// hash (a pi ask's hash covers its ask id, so the same command asked twice
+// is two prompts); an unparsed one is only known by its blocked episode.
+const promptUnparsedKey = "unparsed"
+
+// promptKey is the identity of the worker prompt t is showing, or false when
+// its agent is not blocked at one.
+func promptKey(t Thread) (string, bool) {
+	if t.Agent == nil || t.Agent.Status != "blocked" {
+		return "", false
+	}
+	if t.Prompt != nil && t.Prompt.Hash != "" {
+		return t.Prompt.Hash, true
+	}
+	return promptUnparsedKey, true
+}
+
+// promptDebounced reports whether t's worker prompt is held by the prompt
+// debounce. A needs_me bead is already waiting on a human decision, so a
+// prompt on it surfaces at once, as its question does.
+func promptDebounced(t Thread, debounce time.Duration) bool {
+	if debounce <= 0 || t.Bead.Status == StatusNeedsMe {
+		return false
+	}
+	_, present := promptKey(t)
+	return present
+}
+
+// promptTrack is one tick's prompt tracking: what the next snapshot
+// remembers, and whether a pending prompt surfaces on this tick.
+type promptTrack struct {
+	key      string // the prompt showing now, "" when none is
+	surfaced string // next PromptHash
+	pending  string
+	since    time.Time
+	lastSeen time.Time
+	due      bool
+}
+
+// trackPrompt advances the debounce state for t against prev. The same
+// prompt seen again keeps the clock it started on its first tick; a
+// different hash is a new instance with a fresh window. While the prompt
+// goes undetected for at most flap (the agent briefly not blocked, or a
+// parsed prompt's screen briefly unreadable) its clock and its
+// already-surfaced dedup are kept; a longer absence clears both, so the
+// prompt counts as cleared and a later showing starts over. A prompt
+// surfaces only on a tick where it is present: due is never set in its
+// absence, so one that clears inside the window never surfaces.
+func trackPrompt(t Thread, prev Snapshot, now time.Time, debounce, flap time.Duration) promptTrack {
+	key, present := promptKey(t)
+	tr := promptTrack{key: key, surfaced: prev.PromptHash, pending: prev.PromptPending, since: prev.PromptSince, lastSeen: prev.PromptLastSeen}
+	if !present {
+		if tr.lastSeen.IsZero() || now.Sub(tr.lastSeen) > flap {
+			tr.surfaced, tr.pending, tr.since, tr.lastSeen = "", "", time.Time{}, time.Time{}
+		}
+		return tr
+	}
+	// A snapshot from before the debounce kept no pending state and left
+	// PromptHash empty for an unparsed prompt, announced or baselined on
+	// its entry to needs-you: adopt it as surfaced rather than announcing
+	// it again after the upgrade's first window.
+	if key == promptUnparsedKey && prev.PromptPending == "" && prev.PromptHash == "" && prev.PromptLastSeen.IsZero() && prev.Group == GroupNeedsYou && prev.AgentStatus == "blocked" {
+		tr.surfaced, tr.lastSeen = promptUnparsedKey, now
+		return tr
+	}
+	switch {
+	case key == tr.surfaced:
+		tr.pending, tr.since, tr.lastSeen = "", time.Time{}, now
+	case key == promptUnparsedKey && !tr.lastSeen.IsZero() && now.Sub(tr.lastSeen) <= flap &&
+		((tr.pending != "" && tr.pending != promptUnparsedKey) || (tr.pending == "" && tr.surfaced != "" && tr.surfaced != promptUnparsedKey)):
+		// The screen is unreadable this tick while a parsed prompt is
+		// tracked: a flap in detection, not a new prompt. Clock, dedup
+		// and lastSeen (when it was last actually read) stand.
+	case key == tr.pending || tr.pending == promptUnparsedKey:
+		// The pending prompt again, or an unreadable blocked episode
+		// that just became parseable: the same prompt, now identified,
+		// keeps the clock it started unparsed.
+		tr.pending = key
+		if tr.since.IsZero() {
+			tr.since = now
+		}
+		tr.lastSeen = now
+		tr.due = now.Sub(tr.since) >= debounce
+	default:
+		// A new instance: a different hash, or the first detection.
+		tr.pending, tr.since, tr.lastSeen = key, now, now
+	}
+	return tr
+}
+
 func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
+	return snapshotDebounced(t, prev, now, 0, 0, false)
+}
+
+func snapshotDebounced(t Thread, prev Snapshot, now time.Time, debounce, flap time.Duration, first bool) Snapshot {
 	s := Snapshot{Group: classify(t), Reviews: t.Reviews, BotReviews: len(t.BotReviews), ReviewsSplit: true, Runs: runStates(t.Runs), Failing: t.Checks.Failing, Pending: freshPending(t, prev.Pending), NeedsMe: t.Bead.Status == StatusNeedsMe, ReadyKey: prev.ReadyKey, Relaunch: prev.Relaunch}
 	if t.Agent != nil {
 		s.AgentStatus, s.AgentSeq = t.Agent.Status, t.Agent.Seq
@@ -292,8 +398,25 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 			s.ReadySince = now
 		}
 	}
-	if t.Prompt != nil {
-		s.PromptHash = t.Prompt.Hash
+	switch {
+	case debounce <= 0 || t.Bead.Status == StatusNeedsMe:
+		// No debounce: a prompt counts as announced from the tick it is
+		// seen, exactly as before the debounce existed.
+		if t.Prompt != nil {
+			s.PromptHash = t.Prompt.Hash
+		}
+	case first:
+		// First sight is a baseline, not news: a prompt already showing
+		// is remembered as surfaced, so it never produces an event.
+		if key, present := promptKey(t); present {
+			s.PromptHash, s.PromptLastSeen = key, now
+		}
+	default:
+		tr := trackPrompt(t, prev, now, debounce, flap)
+		s.PromptHash, s.PromptPending, s.PromptSince, s.PromptLastSeen = tr.surfaced, tr.pending, tr.since, tr.lastSeen
+		if tr.due {
+			s.PromptHash, s.PromptPending, s.PromptSince, s.PromptLastSeen = tr.key, "", time.Time{}, now
+		}
 	}
 	if t.Turn != nil {
 		s.TurnID = t.Turn.ID
@@ -332,6 +455,10 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 // transition compares a thread against its last snapshot. first is true the
 // first time the ticker sees a bead, when nothing counts as a change.
 func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
+	return transitionDebounced(t, prev, first, now, 0, 0)
+}
+
+func transitionDebounced(t Thread, prev Snapshot, first bool, now time.Time, debounce, flap time.Duration) Outcome {
 	var o Outcome
 	if first {
 		return o
@@ -349,7 +476,15 @@ func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
 	}
 	// A blocked agent can move from one prompt to the next between ticks.
 	newPrompt := t.Prompt != nil && t.Prompt.Hash != prev.PromptHash
-	if g == GroupNeedsYou && (prev.Group != GroupNeedsYou || newPrompt) {
+	// A worker prompt under the debounce surfaces only when its window
+	// expires with it still showing; a prompt pending when its bead is set
+	// to needs_me is exempt and surfaces at once. Every other needs-you
+	// entry (a needs_me question above all) is undebounced.
+	surface := prev.Group != GroupNeedsYou || newPrompt || (t.Bead.Status == StatusNeedsMe && prev.PromptPending != "")
+	if promptDebounced(t, debounce) {
+		surface = trackPrompt(t, prev, now, debounce, flap).due
+	}
+	if g == GroupNeedsYou && surface {
 		o.Notify = true
 		switch {
 		case t.Prompt != nil:
