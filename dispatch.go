@@ -457,6 +457,30 @@ func queueBriefOn(host, agent, text string) error {
 	return writeAtomic(filepath.Join(outboxDirOn(host), agent+".md"), []byte(text))
 }
 
+// clearQueuedOutbox removes only this agent's queued notices, locally and on
+// every host (including hosts removed from config). It never removes a host
+// directory or another agent's files.
+func clearQueuedOutbox(agent string) error {
+	dirs := []string{outboxDir()}
+	entries, err := os.ReadDir(outboxDir())
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dirs = append(dirs, filepath.Join(outboxDir(), entry.Name()))
+		}
+	}
+	for _, dir := range dirs {
+		for _, suffix := range []string{".md", ".autonomy"} {
+			if err := os.Remove(filepath.Join(dir, agent+suffix)); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // moveQueuedBrief follows a renamed agent with its queued brief, which is
 // delivered by agent name. A brief already queued under the new name wins.
 func moveQueuedBrief(from, to string) {

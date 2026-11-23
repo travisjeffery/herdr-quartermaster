@@ -61,12 +61,15 @@ func renderContext(cfg Config, threads []Thread, next, ready []Bead, inbox []Inb
 	s.WriteString("\n## Autonomy (`quartermaster autonomy level`)\n")
 	s.WriteString(dialContext(cfg.Autonomy, now))
 
-	s.WriteString("\n## Inbox (unhandled; `quartermaster inbox done [bead...]` when dealt with)\n")
+	s.WriteString("\n## Inbox (unhandled; `quartermaster inbox done <file>` for one item, [bead...] for bulk)\n")
 	if len(inbox) == 0 {
 		s.WriteString("(empty)\n")
 	}
 	for _, it := range inbox {
 		fmt.Fprintf(&s, "- %s %s [%s] %s\n", it.At.Local().Format("15:04"), it.Bead, it.Kind, it.Summary)
+		if it.File != "" {
+			fmt.Fprintf(&s, "  file: %s\n", it.File)
+		}
 	}
 
 	s.WriteString("\n## Threads (bead · state · agent)\n")
@@ -196,7 +199,7 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
 1. Run `+"`quartermaster context`"+` first. It lists the inbox, every active thread with its
    state (needs you, merged, ready to merge, review, rolling out, checks failing,
    idle, working, blocked, no agent), the beads labelled `+"`next`"+`, and other ready beads.
-2. Deal with inbox items, then `+"`quartermaster inbox done <bead>...`"+`.
+2. Deal with inbox items, then `+"`quartermaster inbox done <file>...`"+` (each item's `+"`file:`"+` line from `+"`quartermaster context`"+`, or `+"`<bead>...`"+` for bulk).
 3. Answer TJ.
 
 ## Rules

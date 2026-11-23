@@ -43,16 +43,18 @@ func (g Group) String() string { return groupNames[g] }
 // Thread is one bead with whatever is working on it and delivering it.
 type Thread struct {
 	// state is derived once after gathering, then shared by all view adapters.
-	state      *ThreadState
-	Blockers   []string
-	Bead       Bead
-	Agent      *Agent
-	PR         *PR
-	Checks     Checks
-	Reviews    int // human reviews by someone other than the user
-	BotReviews []string
-	Runs       []Run
-	Linear     string
+	state    *ThreadState
+	Blockers []string
+	Bead     Bead
+	Agent    *Agent
+	// AgentUnknown means a partial discovery could not observe this worker.
+	AgentUnknown bool
+	PR           *PR
+	Checks       Checks
+	Reviews      int // human reviews by someone other than the user
+	BotReviews   []string
+	Runs         []Run
+	Linear       string
 	// Merged is every merged PR of the bead's, the pick or not, so a merge
 	// behind another open PR is still announced.
 	Merged []PR
@@ -159,6 +161,7 @@ type Snapshot struct {
 	ReadySince  time.Time `json:"ready_since"`
 	PRNumber    int       `json:"pr_number"`
 	PRState     string    `json:"pr_state"`
+	InboxPRKey  string    `json:"inbox_pr_key,omitempty"`
 	Failing     []string  `json:"failing"`
 	Reviews     int       `json:"reviews"`
 	BotReviews  int       `json:"bot_reviews"`
@@ -230,10 +233,11 @@ const (
 )
 
 type Event struct {
-	Bead    string    `json:"bead"`
-	Kind    EventKind `json:"kind"`
-	Summary string    `json:"summary"`
-	At      time.Time `json:"at"`
+	Bead    string          `json:"bead"`
+	Kind    EventKind       `json:"kind"`
+	Summary string          `json:"summary"`
+	At      time.Time       `json:"at"`
+	Clears  *InboxCondition `json:"clears,omitempty"`
 }
 
 // Outcome is what one thread's transition asks the ticker to do.
@@ -253,14 +257,93 @@ func wokeAfterNeedsMe(t Thread, prev Snapshot) bool {
 	return answered(t) && prev.NeedsMe && (agentReady(&Agent{Status: prev.AgentStatus}) || prev.AgentStatus == "blocked")
 }
 
-// asked fingerprints a needs_me bead's question: its notes, where the worker
-// writes it. A thread that comes back to rest with the same notes asks nothing
-// new.
+// asked fingerprints a needs_me bead's active question rather than the full
+// notes log, so unrelated or AUTO notes appended while waiting neither archive
+// the inbox item nor trigger duplicate needs_you notifications.
 func asked(b Bead) string {
 	if b.Status != StatusNeedsMe {
 		return ""
 	}
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(b.Notes)))[:16]
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(activeQuestionText(b.Notes))))[:16]
+}
+
+func isBookkeepingNote(line string) bool {
+	for _, prefix := range []string{
+		"AUTO:", "auto:", "VERIFY:", "PR:", "Linear:",
+		"PROMPT ANSWERED:", "NEEDS_ME ANSWERED:", "RAN:", "DONE:",
+	} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// structuredQuestionBlock returns the canonical QUESTION/OPTIONS/CLASS block
+// containing line idx if idx is the OPTIONS: header or one of its options.
+func structuredQuestionBlock(lines []string, idx int) (string, bool) {
+	at := idx
+	if lines[at] != "OPTIONS:" {
+		if !questionOptionRe.MatchString(lines[at]) {
+			return "", false
+		}
+		for at > 0 && questionOptionRe.MatchString(lines[at-1]) {
+			at--
+		}
+		if at == 0 || lines[at-1] != "OPTIONS:" {
+			return "", false
+		}
+		at--
+	}
+	start := -1
+	for j := at - 1; j >= 0; j-- {
+		if isBookkeepingNote(lines[j]) {
+			break
+		}
+		if strings.HasPrefix(lines[j], "QUESTION:") {
+			start = j
+			break
+		}
+	}
+	if start < 0 {
+		return "", false
+	}
+	if start > 0 && strings.HasPrefix(lines[start-1], "CRITICAL:") {
+		start--
+	}
+	end := at + 1
+	for end < len(lines) && questionOptionRe.MatchString(lines[end]) {
+		end++
+	}
+	if end < len(lines) {
+		if _, _, ok := parseClassLine(lines[end]); ok {
+			end++
+		}
+	}
+	return strings.Join(lines[start:end], "\n"), true
+}
+
+// activeQuestionText extracts the question a needs_me bead is currently asking.
+// Trailing bookkeeping or non-question notes leave the active question intact.
+func activeQuestionText(notes string) string {
+	lines := noteLines(notes)
+	lastNonBookkeeping := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := lines[i]
+		if isBookkeepingNote(l) {
+			continue
+		}
+		if lastNonBookkeeping == "" {
+			lastNonBookkeeping = l
+		}
+		if block, ok := structuredQuestionBlock(lines, i); ok {
+			return block
+		}
+		if asks(l) {
+			return l
+		}
+	}
+	return lastNonBookkeeping
 }
 
 // resumeNote is the note left on a bead the ticker resumed; the question
@@ -400,9 +483,9 @@ func snapshotDebounced(t Thread, prev Snapshot, now time.Time, debounce, flap ti
 		s.TurnID = prev.TurnID
 	}
 	// The question counts as asked once the thread has sat in needs you, and
-	// stays asked while the bead is needs_me, through any wake.
+	// stays asked while the bead is needs_me, through any wake or prompt.
 	switch {
-	case s.Group == GroupNeedsYou && !t.Unprompted:
+	case s.Group == GroupNeedsYou && !t.Unprompted && t.Prompt == nil && (t.Agent == nil || t.Agent.Status != "blocked"):
 		s.Asked = asked(t.Bead)
 	case s.NeedsMe:
 		s.Asked = prev.Asked
@@ -413,8 +496,14 @@ func snapshotDebounced(t Thread, prev Snapshot, now time.Time, debounce, flap ti
 			s.Merged = append(s.Merged, pr.URL)
 		}
 	}
+	if t.Bead.Status == StatusNeedsMe {
+		// A human decision supersedes an earlier ready notice. After the
+		// answer the same head needs a fresh announcement.
+		s.ReadyKey = ""
+	}
 	if t.PR != nil {
 		s.PRNumber, s.PRState = t.PR.Number, t.PR.State
+		s.InboxPRKey = inboxPRKey(t)
 		// A PR is ready to announce only once nobody is waiting on TJ: a
 		// worker at needs_me leaves auto-merge off for the decision it asked for,
 		// and the announcement follows the answer.
@@ -442,7 +531,7 @@ func transitionDebounced(t Thread, prev Snapshot, first bool, now time.Time, deb
 	id := t.Bead.ID
 	g := classify(t)
 	ev := func(k EventKind, format string, a ...any) {
-		o.Events = append(o.Events, Event{Bead: id, Kind: k, Summary: fmt.Sprintf(format, a...), At: now})
+		o.Events = append(o.Events, Event{Bead: id, Kind: k, Summary: fmt.Sprintf(format, a...), At: now, Clears: eventCondition(t, k)})
 	}
 	// Only a needs_me that was already settled, with the agent at rest, counts:
 	// the turn that asked the question is itself still working.
@@ -452,14 +541,17 @@ func transitionDebounced(t Thread, prev Snapshot, first bool, now time.Time, deb
 	}
 	// A blocked agent can move from one prompt to the next between ticks.
 	newPrompt := t.Prompt != nil && t.Prompt.Hash != prev.PromptHash
-	// A background wake stays in NeedsYou now. Preserve the old settled-turn
-	// question edge without treating unrelated notes on an idle bead as asks.
-	settledQuestion := prev.Unprompted && agentReady(t.Agent) && prev.Asked != "" && asked(t.Bead) != prev.Asked
+	promptResolved := prev.AgentStatus == "blocked" && (t.Agent == nil || t.Agent.Status != "blocked")
+	// A new question on a waiting bead (or an unannounced question revealed
+	// when a prompt clears) surfaces once the worker is not at a prompt or in
+	// an unprompted background wake. asked() ignores unrelated/AUTO notes.
+	newQuestion := t.Bead.Status == StatusNeedsMe && !t.Unprompted && (t.Agent == nil || t.Agent.Status != "blocked") &&
+		(promptResolved || (prev.Asked != "" && prev.Asked != asked(t.Bead)))
 	// A worker prompt under the debounce surfaces only when its window
 	// expires with it still showing; a prompt pending when its bead is set
 	// to needs_me is exempt and surfaces at once. Every other needs-you
 	// entry (a needs_me question above all) is undebounced.
-	surface := prev.Group != GroupNeedsYou || newPrompt || settledQuestion || (t.Bead.Status == StatusNeedsMe && prev.PromptPending != "")
+	surface := prev.Group != GroupNeedsYou || newPrompt || newQuestion || (t.Bead.Status == StatusNeedsMe && prev.PromptPending != "")
 	if promptDebounced(t, debounce) {
 		surface = trackPrompt(t, prev, now, debounce, flap).due
 	}
@@ -485,7 +577,7 @@ func transitionDebounced(t Thread, prev Snapshot, first bool, now time.Time, deb
 		}
 	}
 	if t.PR != nil && t.PR.State == "OPEN" {
-		if len(t.Checks.Failing) > 0 && !slices.Equal(t.Checks.Failing, prev.Failing) {
+		if len(t.Checks.Failing) > 0 && (!slices.Equal(t.Checks.Failing, prev.Failing) || (prev.InboxPRKey != "" && prev.InboxPRKey != inboxPRKey(t))) {
 			ev(EventFailing, "PR #%d checks failing: %s", t.PR.Number, strings.Join(t.Checks.Failing, ", "))
 			o.Prompts = append(o.Prompts, fmt.Sprintf(
 				"[quartermaster: automated, not the user] PR #%d has failing checks: %s. Investigate with `gh pr checks %d`, fix them on this branch, and push.",
