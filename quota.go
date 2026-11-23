@@ -63,12 +63,13 @@ func autoAgent(now time.Time) string {
 }
 
 // quotaSnapshot is the normalized headroom quartermaster writes for its pi
-// extension's virtual-model router (pi/router.ts), so the Claude and Codex
-// readings are parsed once, here, with the same freshness semantics as
-// worker_agent=auto. A provider is null when it has no reading at all; a
+// extension's virtual-model router (pi/router.ts), so the Antigravity, Claude
+// and Codex readings are parsed once, here, with the same freshness semantics
+// as worker_agent=auto. A provider is null when it has no reading at all; a
 // reading too old to trust is present with fresh false.
 type quotaSnapshot struct {
 	GeneratedAt time.Time              `json:"generated_at"`
+	Antigravity *quotaSnapshotProvider `json:"antigravity"`
 	Claude      *quotaSnapshotProvider `json:"claude"`
 	OpenAI      *quotaSnapshotProvider `json:"openai"`
 }
@@ -98,6 +99,7 @@ func snapshotProvider(r *quotaReading, now time.Time) *quotaSnapshotProvider {
 func buildQuotaSnapshot(now time.Time) quotaSnapshot {
 	return quotaSnapshot{
 		GeneratedAt: now.UTC(),
+		Antigravity: snapshotProvider(antigravityQuota(), now),
 		Claude:      snapshotProvider(claudeQuota(), now),
 		OpenAI:      snapshotProvider(codexQuota(now), now),
 	}
@@ -130,6 +132,61 @@ func writeQuotaSnapshot(now time.Time) error {
 		}
 	}
 	return writeAtomic(path, b)
+}
+
+// antigravityQuota reads the rate limits Antigravity records in the
+// herdr-agent-quota statusline observation file.
+func antigravityQuota() *quotaReading {
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".local", "state", "herdr", "plugins", "herdr-agent-quota", "agy-statusline.observation.json")
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return parseAgyStatusline(data, fi.ModTime())
+}
+
+func parseAgyStatusline(data []byte, at time.Time) *quotaReading {
+	var obs struct {
+		Snapshot struct {
+			FetchedAtUnix int64 `json:"fetched_at_unix"`
+			Windows       []struct {
+				UsedPercent      *float64 `json:"used_percent"`
+				RemainingPercent *float64 `json:"remaining_percent"`
+				ResetsAt         int64    `json:"resets_at"`
+			} `json:"windows"`
+		} `json:"snapshot"`
+	}
+	if json.Unmarshal(data, &obs) != nil {
+		return nil
+	}
+	readingAt := at
+	if obs.Snapshot.FetchedAtUnix > 0 {
+		readingAt = time.Unix(obs.Snapshot.FetchedAtUnix, 0)
+	}
+	r := &quotaReading{At: readingAt}
+	for _, w := range obs.Snapshot.Windows {
+		var used float64
+		switch {
+		case w.UsedPercent != nil:
+			used = *w.UsedPercent
+		case w.RemainingPercent != nil:
+			used = 100 - *w.RemainingPercent
+		default:
+			continue
+		}
+		if used < 0 {
+			used = 0
+		} else if used > 100 {
+			used = 100
+		}
+		r.Windows = append(r.Windows, quotaWindow{Used: used, ResetsAt: time.Unix(w.ResetsAt, 0)})
+	}
+	return r
 }
 
 // claudeQuota reads the rate limits Claude Code hands its status line, which

@@ -649,10 +649,10 @@ setup in [docs/pi.md](docs/pi.md)): `--agent pi`,
 `[agents.pi]` table, workers run `pi --approve --model
 quartermaster/worker-auto` and the coordinator `pi --approve --model
 quartermaster/coordinator-auto`: quartermaster's pi virtual models (needs pi
-1.6), which start each turn on Anthropic (`claude-opus-5-5` workers,
-`claude-fable-5-2` coordinator) and switch the session's physical model to
-`openai-codex/gpt-6.2-astra` while quartermaster's quota snapshot shows Claude
-headroom at or below 20%, switching back at 30% — see
+1.6), which prefer `antigravity/gemini-4-neon-xhigh` first and fail over
+through Anthropic (`claude-opus-5-5` workers, `claude-fable-5-2` coordinator)
+and `openai-codex/gpt-6.2-astra` when a provider's quota headroom drops at or
+below 20% (recovering at 30%) or hits rate-limit/auth failover errors — see
 [quota routing](docs/pi.md#quota-routing-the-auto-models). Set `args` and
 `coordinator_args` to change either; a physical `--model` opts out of routing.
 A worker runs in the pi session named for its bead (`--session-id <bead>`), so
@@ -669,8 +669,8 @@ Before it starts pi, quartermaster checks the model is one pi can run (`pi
 --list-models` with quartermaster's extension loaded, so the virtual models
 list, then `pi auth check --provider`; neither prints a credential)
 and refuses with what to do: sign in with `pi auth login anthropic`, or add a
-model pi's catalog lacks. An auto model needs both physical models it routes
-between usable. Older catalogs have `claude-opus-5-5` but not
+model pi's catalog lacks. An auto model needs at least one physical model in
+its chain usable. Older catalogs have `claude-opus-5-5` but not
 `claude-fable-5-2`; add that to `~/.pi/agent/models.json`:
 
 ```json
@@ -805,11 +805,11 @@ args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
 [agents.agy]              # Antigravity: Auto mode (the default) on a Gemini model (`agy models` lists names)
 args = ["--mode", "auto", "--model", "gemini-4-neon-high"]
 
-[agents.pi]               # pi's defaults: the virtual auto models (Claude per turn, OpenAI on low quota)
+[agents.pi]               # pi's defaults: the virtual auto models (Antigravity first, Claude and OpenAI failover)
 args = ["--approve", "--model", "quartermaster/worker-auto"]
 coordinator_args = ["--approve", "--model", "quartermaster/coordinator-auto"]
-router_threshold = 20     # percent Claude headroom left: new turns switch to the fallback at or below
-router_recover = 30       # percent: switch back at or above (router_*_model name the physical models)
+router_threshold = 20     # percent provider headroom left: new turns switch to the next model at or below
+router_recover = 30       # percent: switch back at or above (router_*_models override the ordered chains)
 ask = []                  # bash commands (JS regexps) a hook would ask about that wait for `quartermaster answer` instead of blocking
 ask_timeout = "10m"       # how long such a command waits before it blocks anyway
 

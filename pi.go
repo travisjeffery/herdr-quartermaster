@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -94,14 +95,17 @@ func (c Config) piLaunch(host string, args []string, role, id string) ([]string,
 	return args, nil
 }
 
-// Default pi physical models: workers on Opus 5.5, the coordinator on
-// Fable 5.2, with OpenAI Codex as the quota fallback. The pi kind's default
-// --model is the role's virtual auto model, which routes between them per
-// turn (pi/router.ts); [agents.pi] router_* settings replace the physical
-// models and thresholds, and a physical --model opts out of routing.
+// Default pi physical models: Antigravity Neon XHigh first for both workers
+// and the coordinator, failing over through Claude (Opus 5.5 for workers,
+// Fable 5.2 for the coordinator) and OpenAI Codex (GPT-6.2 Astra). The pi
+// kind's default --model is the role's virtual auto model, which routes
+// through that ordered chain per turn (pi/router.ts); [agents.pi] router_*
+// settings replace the physical chains/models and thresholds, and a physical
+// --model opts out of routing.
 // pi's built-in catalog has claude-opus-5-5 but not claude-fable-5-2, which
 // needs a models entry in ~/.pi/agent/models.json (docs/pi.md).
 const (
+	piAntigravityModel = "antigravity/gemini-4-neon-xhigh"
 	piWorkerModel      = "anthropic/claude-opus-5-5"
 	piCoordinatorModel = "anthropic/claude-fable-5-2"
 	piFallbackModel    = "openai-codex/gpt-6.2-astra"
@@ -109,12 +113,12 @@ const (
 	piWorkerVirtualModel      = "quartermaster/worker-auto"
 	piCoordinatorVirtualModel = "quartermaster/coordinator-auto"
 
-	piRouterThresholdDefault = 20.0 // percent Claude headroom left
+	piRouterThresholdDefault = 20.0 // percent provider headroom left
 	piRouterRecoverDefault   = 30.0
 )
 
 // isPiVirtualModel reports whether model is one of quartermaster's virtual
-// auto models, and which role's Claude physical model it routes from.
+// auto models, and which role's chain it routes through.
 func isPiVirtualModel(model string) (role string, ok bool) {
 	switch model {
 	case piWorkerVirtualModel:
@@ -125,35 +129,64 @@ func isPiVirtualModel(model string) (role string, ok bool) {
 	return "", false
 }
 
-// piRouterConfig is router.json beside the extension files: the physical
-// models and thresholds pi/router.ts routes with, read on each request.
+// piRouterConfig is router.json beside the extension files: the ordered
+// physical model chains and thresholds pi/router.ts routes with, read on each
+// request. WorkerModel, CoordinatorModel and FallbackModel stay populated for
+// backward compatibility with older router extensions.
 type piRouterConfig struct {
-	WorkerModel      string  `json:"worker_model"`
-	CoordinatorModel string  `json:"coordinator_model"`
-	FallbackModel    string  `json:"fallback_model"`
-	ThresholdPct     float64 `json:"threshold_pct"`
-	RecoverPct       float64 `json:"recover_pct"`
-	QuotaMaxAgeSecs  int64   `json:"quota_max_age_seconds"`
+	WorkerModels      []string `json:"worker_models"`
+	CoordinatorModels []string `json:"coordinator_models"`
+	WorkerModel       string   `json:"worker_model"`
+	CoordinatorModel  string   `json:"coordinator_model"`
+	FallbackModel     string   `json:"fallback_model"`
+	ThresholdPct      float64  `json:"threshold_pct"`
+	RecoverPct        float64  `json:"recover_pct"`
+	QuotaMaxAgeSecs   int64    `json:"quota_max_age_seconds"`
+}
+
+func dedupePiModels(models []string) []string {
+	out := make([]string, 0, len(models))
+	for _, m := range models {
+		if m != "" && !slices.Contains(out, m) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func (c Config) routerConfig() piRouterConfig {
 	pc := c.Agents["pi"]
-	rc := piRouterConfig{
-		WorkerModel:      piWorkerModel,
-		CoordinatorModel: piCoordinatorModel,
-		FallbackModel:    piFallbackModel,
-		ThresholdPct:     piRouterThresholdDefault,
-		RecoverPct:       piRouterRecoverDefault,
-		QuotaMaxAgeSecs:  int64(quotaMaxAge.Seconds()),
-	}
-	if pc.RouterWorkerModel != "" {
-		rc.WorkerModel = pc.RouterWorkerModel
-	}
-	if pc.RouterCoordinatorModel != "" {
-		rc.CoordinatorModel = pc.RouterCoordinatorModel
-	}
+	fallback := piFallbackModel
 	if pc.RouterFallbackModel != "" {
-		rc.FallbackModel = pc.RouterFallbackModel
+		fallback = pc.RouterFallbackModel
+	}
+	var workerChain []string
+	switch {
+	case len(pc.RouterWorkerModels) > 0:
+		workerChain = dedupePiModels(pc.RouterWorkerModels)
+	case pc.RouterWorkerModel != "":
+		workerChain = dedupePiModels([]string{pc.RouterWorkerModel, fallback})
+	default:
+		workerChain = dedupePiModels([]string{piAntigravityModel, piWorkerModel, fallback})
+	}
+	var coordChain []string
+	switch {
+	case len(pc.RouterCoordinatorModels) > 0:
+		coordChain = dedupePiModels(pc.RouterCoordinatorModels)
+	case pc.RouterCoordinatorModel != "":
+		coordChain = dedupePiModels([]string{pc.RouterCoordinatorModel, fallback})
+	default:
+		coordChain = dedupePiModels([]string{piAntigravityModel, piCoordinatorModel, fallback})
+	}
+	rc := piRouterConfig{
+		WorkerModels:      workerChain,
+		CoordinatorModels: coordChain,
+		WorkerModel:       workerChain[0],
+		CoordinatorModel:  coordChain[0],
+		FallbackModel:     fallback,
+		ThresholdPct:      piRouterThresholdDefault,
+		RecoverPct:        piRouterRecoverDefault,
+		QuotaMaxAgeSecs:   int64(quotaMaxAge.Seconds()),
 	}
 	if pc.RouterThreshold != nil {
 		rc.ThresholdPct = *pc.RouterThreshold
@@ -164,13 +197,13 @@ func (c Config) routerConfig() piRouterConfig {
 	return rc
 }
 
-// claudeModelFor is the Claude-side physical model a virtual model for
-// routerRole routes from.
-func (rc piRouterConfig) claudeModelFor(routerRole string) string {
+// modelsFor is the ordered physical model chain a virtual model for routerRole
+// routes through.
+func (rc piRouterConfig) modelsFor(routerRole string) []string {
 	if routerRole == "coordinator" {
-		return rc.CoordinatorModel
+		return rc.CoordinatorModels
 	}
-	return rc.WorkerModel
+	return rc.WorkerModels
 }
 
 func piRouterConfigPath() string { return filepath.Join(stateDir(), "pi", "router.json") }
@@ -189,30 +222,63 @@ func (c Config) writePiRouterConfig() (string, error) {
 	return path, writeAtomic(path, b)
 }
 
+func validatePiPhysicalModel(name, m string) error {
+	if p, id, ok := strings.Cut(m, "/"); !ok || p == "" || id == "" || strings.ContainsAny(m, " \t") {
+		return fmt.Errorf("[agents.pi] %s %q: want provider/model", name, m)
+	}
+	if _, virtual := isPiVirtualModel(m); virtual {
+		return fmt.Errorf("[agents.pi] %s %q: a virtual model cannot route to another virtual model; name a physical model", name, m)
+	}
+	return nil
+}
+
 // validatePiRouter checks [agents.pi] router_*: physical models are
 // provider/id, thresholds are percents with recover not below threshold
 // (a lower recover would flap back the turn after switching), and the
 // settings apply only to pi.
 func (c Config) validatePiRouter() error {
 	for kind, a := range c.Agents {
-		set := a.RouterWorkerModel != "" || a.RouterCoordinatorModel != "" || a.RouterFallbackModel != "" ||
+		set := a.RouterWorkerModels != nil || a.RouterCoordinatorModels != nil ||
+			a.RouterWorkerModel != "" || a.RouterCoordinatorModel != "" || a.RouterFallbackModel != "" ||
 			a.RouterThreshold != nil || a.RouterRecover != nil
 		if kind != "pi" && set {
 			return fmt.Errorf("[agents.%s] router_* applies only to pi", kind)
 		}
 	}
 	pc := c.Agents["pi"]
+	if pc.RouterWorkerModels != nil && len(pc.RouterWorkerModels) == 0 {
+		return fmt.Errorf("[agents.pi] router_worker_models: must list at least one physical model")
+	}
+	if pc.RouterCoordinatorModels != nil && len(pc.RouterCoordinatorModels) == 0 {
+		return fmt.Errorf("[agents.pi] router_coordinator_models: must list at least one physical model")
+	}
+	if len(pc.RouterWorkerModels) > 0 && pc.RouterWorkerModel != "" {
+		return fmt.Errorf("[agents.pi] set router_worker_models or router_worker_model, not both")
+	}
+	if len(pc.RouterCoordinatorModels) > 0 && pc.RouterCoordinatorModel != "" {
+		return fmt.Errorf("[agents.pi] set router_coordinator_models or router_coordinator_model, not both")
+	}
+	for _, list := range []struct {
+		name   string
+		models []string
+	}{
+		{"router_worker_models", pc.RouterWorkerModels},
+		{"router_coordinator_models", pc.RouterCoordinatorModels},
+	} {
+		for _, m := range list.models {
+			if err := validatePiPhysicalModel(list.name, m); err != nil {
+				return err
+			}
+		}
+	}
 	for name, m := range map[string]string{
 		"router_worker_model":      pc.RouterWorkerModel,
 		"router_coordinator_model": pc.RouterCoordinatorModel,
 		"router_fallback_model":    pc.RouterFallbackModel,
 	} {
 		if m != "" {
-			if p, id, ok := strings.Cut(m, "/"); !ok || p == "" || id == "" || strings.ContainsAny(m, " \t") {
-				return fmt.Errorf("[agents.pi] %s %q: want provider/model", name, m)
-			}
-			if _, virtual := isPiVirtualModel(m); virtual {
-				return fmt.Errorf("[agents.pi] %s %q: a virtual model cannot route to another virtual model; name a physical model", name, m)
+			if err := validatePiPhysicalModel(name, m); err != nil {
+				return err
 			}
 		}
 	}
@@ -272,9 +338,11 @@ func (c Config) piOn(host string) piRunner {
 // from a model pi doesn't know. Neither prints a credential.
 //
 // A virtual auto model is ready when pi lists it (the check loads the same
-// extensions the start will) and both physical models it routes between
-// pass this same check: a start whose Claude model has no credentials
-// fails here, at dispatch, instead of silently starting on the fallback.
+// extensions the start will) and at least one physical model in its ordered
+// chain is listed by pi. That fails closed with actionable per-model errors
+// when nothing in the chain is usable, while allowing environments that only
+// have a subset of providers configured (such as Antigravity alone, or Claude
+// and OpenAI without the Antigravity bridge).
 func (c Config) checkPiModel(run piRunner, args []string, role string) error {
 	model := piModel(args)
 	if model == "" {
@@ -287,11 +355,12 @@ func (c Config) checkPiModel(run piRunner, args []string, role string) error {
 }
 
 func (c Config) checkPiVirtualModel(run piRunner, args []string, role, model, routerRole string) error {
-	if len(piExtensionArgs(args)) == 0 {
+	extArgs := piExtensionArgs(args)
+	if len(extArgs) == 0 {
 		return fmt.Errorf("pi's %s model %s is registered by quartermaster's pi extension, which only a pi start on this machine loads: set [agents.pi] %s to a physical model for a remote pi", role, model, map[bool]string{true: "coordinator_args", false: "args"}[role == "coordinator"])
 	}
 	provider, id, _ := strings.Cut(model, "/")
-	out, _, err := run(append(piExtensionArgs(args), "--list-models", id)...)
+	out, _, err := run(append(slices.Clone(extArgs), "--list-models", id)...)
 	if err != nil {
 		return fmt.Errorf("pi: %w (is pi installed?)", err)
 	}
@@ -299,12 +368,29 @@ func (c Config) checkPiVirtualModel(run piRunner, args []string, role, model, ro
 		return fmt.Errorf("pi doesn't list the %s model %s even with quartermaster's extension loaded (a pi too old for virtual models, which need pi 1.6?): check `pi --version`, or set [agents.pi] %s to a physical model", role, model, map[bool]string{true: "coordinator_args", false: "args"}[role == "coordinator"])
 	}
 	rc := c.routerConfig()
-	for _, physical := range []string{rc.claudeModelFor(routerRole), rc.FallbackModel} {
-		if err := checkPiPhysicalModel(run, args, role, physical); err != nil {
-			return fmt.Errorf("%s routes to %s: %w", model, physical, err)
+	chain := rc.modelsFor(routerRole)
+	for _, physical := range chain {
+		p, mid, ok := strings.Cut(physical, "/")
+		if !ok {
+			p, mid = "", physical
+		}
+		out, _, err := run(append(slices.Clone(extArgs), "--list-models", mid)...)
+		if err != nil {
+			return fmt.Errorf("pi: %w (is pi installed?)", err)
+		}
+		if piListed(out, p, mid) {
+			return nil
 		}
 	}
-	return nil
+	var errs []string
+	for _, physical := range chain {
+		p, _, ok := strings.Cut(physical, "/")
+		if !ok {
+			p = ""
+		}
+		errs = append(errs, fmt.Sprintf("%s: %v", physical, explainMissingPiModel(run, role, physical, p)))
+	}
+	return fmt.Errorf("%s has no usable physical model in [%s]: %s", model, strings.Join(chain, ", "), strings.Join(errs, "; "))
 }
 
 func checkPiPhysicalModel(run piRunner, args []string, role, model string) error {
@@ -319,6 +405,10 @@ func checkPiPhysicalModel(run piRunner, args []string, role, model string) error
 	if piListed(out, provider, id) {
 		return nil
 	}
+	return explainMissingPiModel(run, role, model, provider)
+}
+
+func explainMissingPiModel(run piRunner, role, model, provider string) error {
 	fix := fmt.Sprintf("set [agents.pi] %s to a model `pi --list-models` shows", map[bool]string{true: "coordinator_args", false: "args"}[role == "coordinator"])
 	if provider != "" {
 		if _, code, err := run("auth", "check", "--provider", provider); err == nil && code != 0 {

@@ -1,0 +1,21 @@
+{
+  "snapshot": {
+    "provider": "agy",
+    "source": "agy-statusline",
+    "fetched_at_unix": 1795474884,
+    "windows": [
+      {
+        "kind": "five_hour",
+        "used_percent": 5.92,
+        "remaining_percent": 94.08,
+        "resets_at": 1795485226
+      },
+      {
+        "kind": "weekly",
+        "used_percent": 1.48,
+        "remaining_percent": 98.52,
+        "resets_at": 1796072026
+      }
+    ]
+  }
+}

@@ -77,12 +77,13 @@ func TestCheckPiModel(t *testing.T) {
 	}
 }
 
-const piAutoListing = `provider       model             context  max-out  thinking  images
-quartermaster  worker-auto       272K     128K     yes       yes
-quartermaster  coordinator-auto  272K     128K     yes       yes
-anthropic      claude-opus-5-5   1M       128K     yes       yes
-anthropic      claude-fable-5-2  1M       128K     yes       yes
-openai-codex   gpt-6.2-astra     272K     128K     yes       yes
+const piAutoListing = `provider       model                 context  max-out  thinking  images
+quartermaster  worker-auto           272K     65.5K    yes       yes
+quartermaster  coordinator-auto      272K     65.5K    yes       yes
+antigravity    gemini-4-neon-xhigh   1M       65.5K    no        yes
+anthropic      claude-opus-5-5       1M       128K     yes       yes
+anthropic      claude-fable-5-2      1M       128K     yes       yes
+openai-codex   gpt-6.2-astra         272K     128K     yes       yes
 `
 
 func TestCheckPiVirtualModel(t *testing.T) {
@@ -90,10 +91,20 @@ func TestCheckPiVirtualModel(t *testing.T) {
 	var calls []string
 	auto := []string{"--model", piWorkerVirtualModel, "-e", "/x/quartermaster.ts"}
 	if err := cfg.checkPiModel(fakePi(piAutoListing, 0, &calls), auto, "worker"); err != nil {
-		t.Fatalf("virtual model with both physical models listed: %v", err)
+		t.Fatalf("virtual model with full chain listed: %v", err)
 	}
 	if err := cfg.checkPiModel(fakePi(piAutoListing, 0, &calls), []string{"--model", piCoordinatorVirtualModel, "-e", "/x/qm.ts"}, "coordinator"); err != nil {
 		t.Fatalf("coordinator virtual model: %v", err)
+	}
+	// Subset: Claude + OpenAI without Antigravity bridge still passes.
+	noAgy := strings.ReplaceAll(piAutoListing, "antigravity    gemini-4-neon-xhigh   1M       65.5K    no        yes\n", "")
+	if err := cfg.checkPiModel(fakePi(noAgy, 0, &calls), auto, "worker"); err != nil {
+		t.Fatalf("virtual model without Antigravity bridge: %v", err)
+	}
+	// Subset: Antigravity alone (when Claude and OpenAI are unavailable) still passes.
+	onlyAgy := "provider       model                 context  max-out  thinking  images\nquartermaster  worker-auto           272K     65.5K    yes       yes\nantigravity    gemini-4-neon-xhigh   1M       65.5K    no        yes\n"
+	if err := cfg.checkPiModel(fakePi(onlyAgy, 1, &calls), auto, "worker"); err != nil {
+		t.Fatalf("virtual model with only Antigravity listed: %v", err)
 	}
 	// No extension on the command line: a remote start, where the virtual
 	// model is never registered.
@@ -106,24 +117,17 @@ func TestCheckPiVirtualModel(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "doesn't list") {
 		t.Fatalf("virtual model not listed: %v", err)
 	}
-	// The Claude physical model has no credentials: fail at the check, do
-	// not silently start on the fallback.
-	noClaude := strings.ReplaceAll(piAutoListing, "anthropic      claude-opus-5-5   1M       128K     yes       yes\n", "")
-	err = cfg.checkPiModel(fakePi(noClaude, 1, &calls), auto, "worker")
-	if err == nil || !strings.Contains(err.Error(), "routes to anthropic/claude-opus-5-5") || !strings.Contains(err.Error(), "pi auth login anthropic") {
-		t.Fatalf("virtual model without Claude credentials: %v", err)
+	// No physical model in the chain is usable: fail closed with actionable errors.
+	onlyVirtual := "provider       model             context  max-out  thinking  images\nquartermaster  worker-auto       272K     65.5K    yes       yes\n"
+	err = cfg.checkPiModel(fakePi(onlyVirtual, 1, &calls), auto, "worker")
+	if err == nil || !strings.Contains(err.Error(), "no usable physical model") || !strings.Contains(err.Error(), "antigravity/gemini-4-neon-xhigh") || !strings.Contains(err.Error(), "pi auth login anthropic") {
+		t.Fatalf("virtual model with no usable physical model: %v", err)
 	}
-	// The fallback physical model missing fails too.
-	noFallback := strings.ReplaceAll(piAutoListing, "openai-codex   gpt-6.2-astra     272K     128K     yes       yes\n", "")
-	err = cfg.checkPiModel(fakePi(noFallback, 0, &calls), auto, "worker")
-	if err == nil || !strings.Contains(err.Error(), "routes to openai-codex/gpt-6.2-astra") {
-		t.Fatalf("virtual model without its fallback: %v", err)
-	}
-	// A configured router model is the one checked.
-	cfg.Agents = map[string]AgentConfig{"pi": {RouterWorkerModel: "meta/muse-wonder-full-1.0"}}
+	// A configured chain with no usable model fails closed naming it.
+	cfg.Agents = map[string]AgentConfig{"pi": {RouterWorkerModels: []string{"meta/muse-wonder-full-1.0"}}}
 	err = cfg.checkPiModel(fakePi(piAutoListing, 0, &calls), auto, "worker")
-	if err == nil || !strings.Contains(err.Error(), "routes to meta/muse-wonder-full-1.0") {
-		t.Fatalf("configured router model: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "meta/muse-wonder-full-1.0") {
+		t.Fatalf("configured router chain missing: %v", err)
 	}
 }
 
@@ -221,10 +225,10 @@ func TestDispatchPi(t *testing.T) {
 
 func TestDispatchPiWithoutModelLeavesNothing(t *testing.T) {
 	dir := fakeTools(t)
-	fakePiTool(t, dir, "provider model\nquartermaster worker-auto\nopenai-codex gpt-6.2-astra\n", 1)
+	fakePiTool(t, dir, "provider model\nquartermaster worker-auto\n", 1)
 	t.Setenv("FAKE_BEAD", `[{"id":"b-1","title":"Do it","status":"open"}]`)
 	_, err := dispatch(hostsConfig(), newHerdr(), "b-1", DispatchOpts{Kind: "pi"})
-	if err == nil || !strings.Contains(err.Error(), "pi auth login anthropic") {
+	if err == nil || !strings.Contains(err.Error(), "no usable physical model") || !strings.Contains(err.Error(), "pi auth login anthropic") {
 		t.Fatalf("got %v", err)
 	}
 	if hasLine(logLines(t, dir, "herdr"), "worktree create") || hasLine(logLines(t, dir, "bd"), "--claim") {

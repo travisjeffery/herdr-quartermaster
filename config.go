@@ -150,16 +150,21 @@ type AgentConfig struct {
 	// AskTimeout (pi only) is how long a worker waits for that answer before
 	// it blocks the command anyway (default 10m).
 	AskTimeout string `toml:"ask_timeout"`
-	// The pi virtual-model router (pi/router.ts, docs/pi.md): the physical
-	// models quartermaster/worker-auto and quartermaster/coordinator-auto
-	// route between, and the Claude headroom (percent left in the tightest
-	// live window) at or below which new turns switch to the fallback, and
-	// at or above which they switch back. Unset takes piRouterDefaults.
-	RouterWorkerModel      string   `toml:"router_worker_model"`
-	RouterCoordinatorModel string   `toml:"router_coordinator_model"`
-	RouterFallbackModel    string   `toml:"router_fallback_model"`
-	RouterThreshold        *float64 `toml:"router_threshold"`
-	RouterRecover          *float64 `toml:"router_recover"`
+	// The pi virtual-model router (pi/router.ts, docs/pi.md): the ordered
+	// physical model chains quartermaster/worker-auto and
+	// quartermaster/coordinator-auto route through (defaulting to
+	// Antigravity Neon XHigh, then Claude, then OpenAI), and the per-provider
+	// headroom (percent left in the tightest live window) at or below which
+	// new turns switch to the next model, and at or above which they switch
+	// back. router_worker_model, router_coordinator_model and
+	// router_fallback_model remain supported for backward compatibility.
+	RouterWorkerModels      []string `toml:"router_worker_models"`
+	RouterCoordinatorModels []string `toml:"router_coordinator_models"`
+	RouterWorkerModel       string   `toml:"router_worker_model"`
+	RouterCoordinatorModel  string   `toml:"router_coordinator_model"`
+	RouterFallbackModel     string   `toml:"router_fallback_model"`
+	RouterThreshold         *float64 `toml:"router_threshold"`
+	RouterRecover           *float64 `toml:"router_recover"`
 }
 
 // defaultAgentArgs apply to a kind with no [agents.<kind>] table. Muse's
@@ -175,8 +180,8 @@ var defaultAgentArgs = map[string][]string{
 	"muse": {"--disable-sandbox", "--permission-profile", ":auto-review"},
 	// pi: --approve trusts the worktree's own .pi resources, since a fresh
 	// worktree has no saved trust decision to skip the prompt with. The
-	// model is quartermaster's virtual auto model: the role's Claude model
-	// per turn, switching to the OpenAI fallback on low Claude quota
+	// model is quartermaster's virtual auto model: Antigravity Neon XHigh
+	// first, failing over through Claude and OpenAI on low quota or errors
 	// (pi/router.ts). A physical --model in [agents.pi] args opts out.
 	"pi": {"--approve", "--model", piWorkerVirtualModel},
 }
