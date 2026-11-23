@@ -626,8 +626,14 @@ setup in [docs/pi.md](docs/pi.md)): `--agent pi`,
 `worker_agent = "pi"` or `coordinator_agent = "pi"`. Herdr starts it
 (`--kind pi`) and its pi extension reports working, idle and blocked. Without an
 `[agents.pi]` table, workers run `pi --approve --model
-anthropic/claude-opus-5-5` and the coordinator `pi --approve --model
-anthropic/claude-fable-5-2`; set `args` and `coordinator_args` to change either.
+quartermaster/worker-auto` and the coordinator `pi --approve --model
+quartermaster/coordinator-auto`: quartermaster's pi virtual models (needs pi
+1.6), which start each turn on Anthropic (`claude-opus-5-5` workers,
+`claude-fable-5-2` coordinator) and switch the session's physical model to
+`openai-codex/gpt-6.2-astra` while quartermaster's quota snapshot shows Claude
+headroom at or below 20%, switching back at 30% — see
+[quota routing](docs/pi.md#quota-routing-the-auto-models). Set `args` and
+`coordinator_args` to change either; a physical `--model` opts out of routing.
 A worker runs in the pi session named for its bead (`--session-id <bead>`), so
 dispatch and resume reopen that conversation by id.
 
@@ -639,9 +645,11 @@ of blocking. The list starts empty. Without the socket, everything goes
 through the pane as before.
 
 Before it starts pi, quartermaster checks the model is one pi can run (`pi
---list-models`, then `pi auth check --provider`; neither prints a credential)
+--list-models` with quartermaster's extension loaded, so the virtual models
+list, then `pi auth check --provider`; neither prints a credential)
 and refuses with what to do: sign in with `pi auth login anthropic`, or add a
-model pi's catalog lacks. Its catalog has `claude-opus-5-5` but not
+model pi's catalog lacks. An auto model needs both physical models it routes
+between usable. Older catalogs have `claude-opus-5-5` but not
 `claude-fable-5-2`; add that to `~/.pi/agent/models.json`:
 
 ```json
@@ -757,9 +765,11 @@ coordinator_rules = ["Ask before touching the staging cluster."]  # extra bullet
 [agents.muse]             # per-kind args for the agent's own CLI, on dispatch, resume and the coordinator
 args = ["--disable-sandbox", "--permission-profile", ":auto-review"]
 
-[agents.pi]               # pi's defaults: Opus 5.5 workers, a Fable 5.2 coordinator
-args = ["--approve", "--model", "anthropic/claude-opus-5-5"]
-coordinator_args = ["--approve", "--model", "anthropic/claude-fable-5-2"]
+[agents.pi]               # pi's defaults: the virtual auto models (Claude per turn, OpenAI on low quota)
+args = ["--approve", "--model", "quartermaster/worker-auto"]
+coordinator_args = ["--approve", "--model", "quartermaster/coordinator-auto"]
+router_threshold = 20     # percent Claude headroom left: new turns switch to the fallback at or below
+router_recover = 30       # percent: switch back at or above (router_*_model name the physical models)
 ask = []                  # bash commands (JS regexps) a hook would ask about that wait for `quartermaster answer` instead of blocking
 ask_timeout = "10m"       # how long such a command waits before it blocks anyway
 

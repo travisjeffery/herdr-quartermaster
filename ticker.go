@@ -841,10 +841,20 @@ func tickerRun(cfg Config) error {
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	timer := time.NewTicker(cfg.tick())
 	defer timer.Stop()
+	var lastQuota time.Time
 	for {
 		st := loadState()
 		if err := t.once(&st); err != nil {
 			logger.Printf("tick: %v", err)
+		}
+		// Keep the pi quota router's snapshot fresh for sessions already
+		// running; a launch writes it too. A failed write only leaves the
+		// router on older readings, which age out to Claude on their own.
+		if now := time.Now(); now.Sub(lastQuota) >= time.Minute {
+			lastQuota = now
+			if err := writeQuotaSnapshot(now); err != nil {
+				logger.Printf("quota snapshot: %v", err)
+			}
 		}
 		if err := saveState(st); err != nil {
 			logger.Printf("state: %v", err)
