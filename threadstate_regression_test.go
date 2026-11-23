@@ -112,3 +112,60 @@ func TestPromptKeepsPendingCommandVisible(t *testing.T) {
 		t.Fatalf("prompt hid pending command: %+v", s)
 	}
 }
+
+func TestExplicitBlockedOutranksPRAndWorkingAgent(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	cases := []struct {
+		name  string
+		agent *Agent
+		pr    *PR
+	}{
+		{"open PR with idle agent", agent("idle", 1), openPR()},
+		{"ready PR with idle agent", agent("idle", 1), readyPR()},
+		{"failing PR with idle agent", agent("idle", 1), openPR("build")},
+		{"open PR with working agent", agent("working", 1), openPR()},
+		{"working agent without PR", agent("working", 1), nil},
+		{"merged PR", agent("idle", 1), &PR{Number: 7, State: "MERGED"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := Bead{ID: "task-held", Status: StatusBlocked, UpdatedAt: t0, Notes: "BLOCKED until soak ends."}
+			if tc.pr != nil {
+				tc.pr.Number = 7
+				tc.pr.URL = "https://github.com/example/app/pull/7"
+				b.Notes = "PR: " + tc.pr.URL + "\n" + b.Notes
+			}
+			if tc.agent != nil {
+				tc.agent.Name = b.ID
+			}
+			th := thread(b, tc.agent, tc.pr).derive()
+			if s := th.derived(); s.Kind != ThreadBlocked || classify(th) != GroupBlocked || sectionFor(s) != SecBlocked {
+				t.Fatalf("explicit blocked misclassified: state=%+v group=%s", s, classify(th))
+			}
+			in := digestInputs{open: []Bead{b}, agents: map[string]Agent{}, branch: map[string]string{}, prs: map[string]DigestPR{}}
+			st := TickerState{PRs: map[string]PR{}, Threads: map[string]Snapshot{}}
+			if tc.agent != nil {
+				in.agents[b.ID] = *tc.agent
+				st.Threads[b.ID] = Snapshot{AgentStatus: tc.agent.Status, AgentSeq: tc.agent.Seq}
+			}
+			if tc.pr != nil {
+				st.PRs[b.ID] = *tc.pr
+				in.branch[b.ID] = tc.pr.URL
+				in.prs[tc.pr.URL] = digestObservation(*tc.pr)
+			}
+			in.ticker = st
+			d, _ := buildDigest(in, digestState{}, nil, t0)
+			it := item(t, d, b.ID)
+			if it.Section != SecBlocked {
+				t.Fatalf("digest section = %s, want %s", it.Section, SecBlocked)
+			}
+			detail := itemDetail(it)
+			if !strings.Contains(detail, "BLOCKED until soak ends.") {
+				t.Fatalf("digest detail hid hold note: %q", detail)
+			}
+			if tc.pr != nil && !strings.Contains(detail, "example/app#7") {
+				t.Fatalf("digest detail hid PR: %q", detail)
+			}
+		})
+	}
+}

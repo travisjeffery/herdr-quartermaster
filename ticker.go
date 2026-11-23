@@ -445,7 +445,7 @@ func (t Ticker) once(st *TickerState) error {
 			}
 		}
 		th = th.derive()
-		out := transition(th, prev, !seen, now)
+		out := transitionDebounced(th, prev, !seen, now, t.cfg.promptDebounce(), t.cfg.promptFlap())
 		if out.Resume {
 			if err := t.resume(id); err != nil {
 				t.log.Printf("resume %s: %v", id, err)
@@ -456,11 +456,19 @@ func (t Ticker) once(st *TickerState) error {
 			}
 		}
 		threads[i] = th
-		snap := snapshot(th, prev, now)
+		snap := snapshotDebounced(th, prev, now, t.cfg.promptDebounce(), t.cfg.promptFlap(), !seen)
 		t.journalAuto(th, prev, seen, &snap, now)
 		snap.Pending = append(snap.Pending, out.Prompts...)
 		t.relaunch(th, &snap, relaunch[agentName(id)], now)
 		for _, e := range out.Events {
+			// A parsable approval prompt's event carries its tap links, so
+			// what the coordinator relays to TJ is tappable as it stands;
+			// a needs_me OPTIONS question's event carries its own.
+			if e.Kind == EventNeedsYou && th.Prompt != nil {
+				e.Summary += t.tapEventSuffix(th)
+			} else if e.Kind == EventNeedsYou {
+				e.Summary += t.tapQuestionEventSuffix(th)
+			}
 			if err := writeEvent(e); err != nil {
 				t.log.Printf("inbox: %v", err)
 			}
@@ -824,6 +832,15 @@ func tickerRun(cfg Config) error {
 	logger := log.New(f, "", log.LstdFlags)
 	logger.Printf("ticker %s started, every %s, on %s", version, cfg.tick(), cfg.coordSocket())
 	t := newTicker(cfg, logger)
+	if cfg.Tap.Enabled {
+		// The tap endpoint rides the ticker: no new daemon. A bind failure
+		// (no tailnet, port taken) leaves the ticker running and taps off.
+		if ln, err := startTapServer(cfg.Tap, livePromptEnv(cfg, t.herdr), logger.Printf); err != nil {
+			logger.Printf("tap: %v (approval taps unavailable)", err)
+		} else {
+			defer ln.Close()
+		}
+	}
 	done := make(chan struct{})
 	defer close(done)
 	go t.side.run(done)
@@ -831,10 +848,20 @@ func tickerRun(cfg Config) error {
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	timer := time.NewTicker(cfg.tick())
 	defer timer.Stop()
+	var lastQuota time.Time
 	for {
 		st := loadState()
 		if err := t.once(&st); err != nil {
 			logger.Printf("tick: %v", err)
+		}
+		// Keep the pi quota router's snapshot fresh for sessions already
+		// running; a launch writes it too. A failed write only leaves the
+		// router on older readings, which age out to Claude on their own.
+		if now := time.Now(); now.Sub(lastQuota) >= time.Minute {
+			lastQuota = now
+			if err := writeQuotaSnapshot(now); err != nil {
+				logger.Printf("quota snapshot: %v", err)
+			}
 		}
 		if err := saveState(st); err != nil {
 			logger.Printf("state: %v", err)

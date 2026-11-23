@@ -52,13 +52,12 @@ const (
 //  1. blocked agent -> waiting on a prompt
 //  2. needs_me without an active, prompted turn -> waiting on command/user
 //  3. unstarted open bead -> blocked by dependencies, else queued (next/backlog)
-//  4. merged PR -> merged, with the rolling-out facet
-//  5. ready PR -> delivering/ready (readiness is owned by the merge policy)
-//  6. failing open PR -> delivering/failing
-//  7. working agent -> working
-//  8. open PR with a ready agent -> delivering/review
-//  9. explicit blocked status -> blocked
-//
+//  4. explicit blocked status -> blocked
+//  5. merged PR -> merged, with the rolling-out facet
+//  6. ready PR -> delivering/ready (readiness is owned by the merge policy)
+//  7. failing open PR -> delivering/failing
+//  8. working agent -> working
+//  9. open PR with a ready agent -> delivering/review
 // 10. present agent -> idle (unknown is not proof the agent is absent)
 // 11. otherwise -> no agent
 //
@@ -88,6 +87,8 @@ func deriveThreadState(t Thread) ThreadState {
 		if len(s.Blockers) > 0 {
 			s.Kind = ThreadBlocked
 		}
+	case t.Bead.Status == StatusBlocked:
+		s.Kind = ThreadBlocked
 	case t.PR != nil && t.PR.State == "MERGED":
 		s.Kind = ThreadMerged
 	case readyToMerge(t.PR, t.Checks):
@@ -98,8 +99,6 @@ func deriveThreadState(t Thread) ThreadState {
 		s.Kind = ThreadWorking
 	case t.PR != nil && t.PR.State == "OPEN" && agentReady(t.Agent):
 		s.Kind, s.Gate = ThreadDelivering, GateReview
-	case t.Bead.Status == StatusBlocked:
-		s.Kind = ThreadBlocked
 	case t.Agent != nil:
 		s.Kind = ThreadIdle
 	default:

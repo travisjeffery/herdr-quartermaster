@@ -1,0 +1,17 @@
+◆ Running your command with escalated
+  sandbox permissions.
+
+◇ Calling tools (3m 26s · esc to interr
+└ last event 3m 11s ago
+
+───────────────────────────────────────
+Would you like to run the following com
+
+  $ mkdir -p out2 && touch
+    out2/hello.txt
+
+⟩ 1. Yes, proceed (y)
+  2. No, and tell Muse Code what to do
+... approval defaults in /permissions
+───────────────────────────────────────
+  muse-wonder-full-… · Launch overrides
