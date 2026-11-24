@@ -40,9 +40,10 @@ const (
 // tapInboxEnv supplies the read-only live sources rendered on /inbox and
 // /inbox.json. Tests replace it with deterministic fakes.
 type tapInboxEnv struct {
-	active    func() ([]Bead, error)
-	agents    func() ([]Agent, error)
-	loadState func() TickerState
+	active     func() ([]Bead, error)
+	agents     func() ([]Agent, error)
+	loadState  func() TickerState
+	loadSnooze func() SnoozeState
 }
 
 func liveTapInboxEnv(cfg Config, h Herdr) *tapInboxEnv {
@@ -54,7 +55,8 @@ func liveTapInboxEnv(cfg Config, h Herdr) *tapInboxEnv {
 			agents, _, err := hh.observedAgents()
 			return agents, err
 		},
-		loadState: loadState,
+		loadState:  loadState,
+		loadSnooze: loadSnoozeState,
 	}
 }
 
@@ -277,15 +279,18 @@ func parsePlanTapToken(secret []byte, token string, now time.Time) (planTapClaim
 // View/JSON models for GET /inbox and GET /inbox.json.
 
 type inboxSnapshot struct {
-	Version      int             `json:"version"`
-	GeneratedAt  time.Time       `json:"generated_at"`
-	Viewer       inboxViewer     `json:"viewer"`
-	Counts       inboxCounts     `json:"counts"`
-	Warnings     []string        `json:"warnings,omitempty"`
-	Prompts      []inboxPrompt   `json:"prompts"`
-	Questions    []inboxQuestion `json:"questions"`
-	Plans        []inboxPlan     `json:"plans"`
-	ReadyToMerge []inboxReadyPR  `json:"ready_to_merge"`
+	Version         int             `json:"version"`
+	GeneratedAt     time.Time       `json:"generated_at"`
+	Viewer          inboxViewer     `json:"viewer"`
+	Counts          inboxCounts     `json:"counts"`
+	Warnings        []string        `json:"warnings,omitempty"`
+	Prompts         []inboxPrompt   `json:"prompts"`
+	Questions       []inboxQuestion `json:"questions"`
+	ParkedQuestions []inboxQuestion `json:"parked_questions,omitempty"`
+	Plans           []inboxPlan     `json:"plans"`
+	ReadyToMerge    []inboxReadyPR  `json:"ready_to_merge"`
+
+	ParkedSummary string `json:"-"`
 }
 
 type inboxViewer struct {
@@ -295,10 +300,11 @@ type inboxViewer struct {
 }
 
 type inboxCounts struct {
-	Prompts      int `json:"prompts"`
-	Questions    int `json:"questions"`
-	Plans        int `json:"plans"`
-	ReadyToMerge int `json:"ready_to_merge"`
+	Prompts         int `json:"prompts"`
+	Questions       int `json:"questions"`
+	ParkedQuestions int `json:"parked_questions,omitempty"`
+	Plans           int `json:"plans"`
+	ReadyToMerge    int `json:"ready_to_merge"`
 }
 
 func (c inboxCounts) Total() int {
@@ -334,6 +340,9 @@ type inboxQuestion struct {
 	Kind           string                 `json:"kind"` // "structured", "options", "run", "free_text"
 	Tappable       bool                   `json:"tappable"`
 	Critical       bool                   `json:"critical,omitempty"`
+	Parked         bool                   `json:"parked,omitempty"`
+	ParkedReason   string                 `json:"parked_reason,omitempty"`
+	SnoozedUntil   *time.Time             `json:"snoozed_until,omitempty"`
 	Class          *int                   `json:"class,omitempty"`
 	ClassText      string                 `json:"class_text,omitempty"`
 	Question       string                 `json:"question"`
@@ -346,6 +355,8 @@ type inboxQuestion struct {
 	Expires        *time.Time             `json:"expires,omitempty"`
 	Evidence       *inboxEvidence         `json:"evidence,omitempty"`
 	Milestones     []tapMilestoneCard     `json:"milestones,omitempty"`
+
+	parkedKind string `json:"-"`
 }
 
 type inboxFreeTextLink struct {
@@ -665,9 +676,15 @@ func (s *tapServer) buildInbox(ident tapIdentity, now time.Time) inboxSnapshot {
 	var active []Bead
 	byName := map[string]Agent{}
 	var st TickerState
+	var snoozes SnoozeState
 	if s.inbox != nil {
 		if s.inbox.loadState != nil {
 			st = s.inbox.loadState()
+		}
+		if s.inbox.loadSnooze != nil {
+			snoozes = s.inbox.loadSnooze()
+		} else {
+			snoozes = loadSnoozeState()
 		}
 		if s.inbox.active != nil {
 			var err error
@@ -712,6 +729,7 @@ func (s *tapServer) buildInbox(ident tapIdentity, now time.Time) inboxSnapshot {
 	snap.Plans = plans
 
 	children := openChildCounts(active)
+	parkedSnoozed, parkedDormant := 0, 0
 	for _, b := range active {
 		th := threadFor(s.fullCfg, st, b, byName)
 		if n := children[b.ID]; n > 0 {
@@ -726,7 +744,24 @@ func (s *tapServer) buildInbox(ident tapIdentity, now time.Time) inboxSnapshot {
 			}
 		}
 		if b.Status == StatusNeedsMe && !answered(th) {
-			snap.Questions = append(snap.Questions, s.buildQuestionItem(th, pendingPlans, now))
+			qItem := s.buildQuestionItem(th, pendingPlans, now)
+			if parked, kind, until := classifyNeedsYou(s.fullCfg, th, snoozes, now); parked {
+				qItem.Parked = true
+				qItem.parkedKind = kind
+				qItem.ParkedReason = formatParkedReason(kind, until, b.UpdatedAt, now)
+				if !until.IsZero() {
+					u := until
+					qItem.SnoozedUntil = &u
+				}
+				if kind == parkedReasonSnoozed {
+					parkedSnoozed++
+				} else {
+					parkedDormant++
+				}
+				snap.ParkedQuestions = append(snap.ParkedQuestions, qItem)
+			} else {
+				snap.Questions = append(snap.Questions, qItem)
+			}
 		}
 		if classify(th) == GroupReady && th.PR != nil {
 			snap.ReadyToMerge = append(snap.ReadyToMerge, s.buildReadyPRItem(th))
@@ -736,32 +771,40 @@ func (s *tapServer) buildInbox(ident tapIdentity, now time.Time) inboxSnapshot {
 	sort.Slice(snap.Prompts, func(i, j int) bool {
 		return snap.Prompts[i].Bead < snap.Prompts[j].Bead
 	})
-	sort.Slice(snap.Questions, func(i, j int) bool {
-		qi, qj := snap.Questions[i], snap.Questions[j]
-		if qi.Critical != qj.Critical {
-			return qi.Critical
-		}
-		ci, cj := -1, -1
-		if qi.Class != nil {
-			ci = *qi.Class
-		}
-		if qj.Class != nil {
-			cj = *qj.Class
-		}
-		if ci != cj {
-			return ci > cj
-		}
-		return qi.Bead < qj.Bead
-	})
+	sortQuestions := func(qs []inboxQuestion) {
+		sort.Slice(qs, func(i, j int) bool {
+			qi, qj := qs[i], qs[j]
+			if qi.Critical != qj.Critical {
+				return qi.Critical
+			}
+			ci, cj := -1, -1
+			if qi.Class != nil {
+				ci = *qi.Class
+			}
+			if qj.Class != nil {
+				cj = *qj.Class
+			}
+			if ci != cj {
+				return ci > cj
+			}
+			return qi.Bead < qj.Bead
+		})
+	}
+	sortQuestions(snap.Questions)
+	sortQuestions(snap.ParkedQuestions)
 	sort.Slice(snap.ReadyToMerge, func(i, j int) bool {
 		return snap.ReadyToMerge[i].Bead < snap.ReadyToMerge[j].Bead
 	})
 
 	snap.Counts = inboxCounts{
-		Prompts:      len(snap.Prompts),
-		Questions:    len(snap.Questions),
-		Plans:        len(snap.Plans),
-		ReadyToMerge: len(snap.ReadyToMerge),
+		Prompts:         len(snap.Prompts),
+		Questions:       len(snap.Questions),
+		ParkedQuestions: len(snap.ParkedQuestions),
+		Plans:           len(snap.Plans),
+		ReadyToMerge:    len(snap.ReadyToMerge),
+	}
+	if len(snap.ParkedQuestions) > 0 {
+		snap.ParkedSummary = formatParkedBreakdown(parkedSnoozed, parkedDormant)
 	}
 	return snap
 }
@@ -827,15 +870,19 @@ func (s *tapServer) buildQuestionItem(th Thread, pendingPlans map[string]string,
 	if cmd := pendingCommand(b.Notes); cmd != "" {
 		item.Kind = "run"
 		item.RunCommand = cmd
-		notes := noteLines(b.Notes)
+		notes := substantiveWaitingNotes(b.Notes)
 		if n := waitingNotes(notes); n > 0 {
 			item.Lines = notes[len(notes)-n:]
 		}
-		item.Question = "Command waiting for you to run"
-		for _, l := range item.Lines {
-			if !strings.HasPrefix(l, "RUN:") {
-				item.Question = l
-				break
+		if reason := pendingCommandReason(b.Notes); reason != "" {
+			item.Question = reason
+		} else {
+			item.Question = "Command waiting for you to run"
+			for _, l := range item.Lines {
+				if !strings.HasPrefix(l, "RUN:") && !isClassLine(l) {
+					item.Question = l
+					break
+				}
 			}
 		}
 		item.Critical = extractNoteCritical(b.Notes)
@@ -1010,7 +1057,7 @@ func (s *tapServer) buildQuestionItem(th Thread, pendingPlans map[string]string,
 			}
 		}
 	}
-	notes := noteLines(b.Notes)
+	notes := substantiveWaitingNotes(b.Notes)
 	if n := waitingNotes(notes); n > 0 {
 		item.Lines = notes[len(notes)-n:]
 	}
@@ -1258,11 +1305,23 @@ func extractNoteClass(notes string) (string, int) {
 	return "", -1
 }
 
+func substantiveWaitingNotes(notes string) []string {
+	after := linesAfterAnswer(noteLines(notes))
+	var out []string
+	for _, l := range after {
+		if isNonAnswerHousekeepingNote(l) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
 func extractNoteCritical(notes string) bool {
 	if strings.HasPrefix(strings.TrimSpace(activeQuestionText(notes)), "CRITICAL:") {
 		return true
 	}
-	lines := noteLines(notes)
+	lines := substantiveWaitingNotes(notes)
 	start := max(0, len(lines)-waitingNotes(lines)-2)
 	for i := len(lines) - 1; i >= start; i-- {
 		if strings.HasPrefix(lines[i], "CRITICAL:") {
@@ -1626,6 +1685,13 @@ pre{margin:8px 0;padding:10px 12px;background:var(--surface-alt);border:1px soli
 .ms-dot.info{background:var(--accent)}
 .hint{font-size:.78rem;color:var(--muted);margin-top:8px}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.parked-box{margin-top:14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);padding:10px 12px}
+.parked-box summary{cursor:pointer;font-weight:700;font-size:.9rem;color:var(--muted);list-style:none;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.parked-box summary::-webkit-details-marker{display:none}
+.parked-box summary::after{content:"Show";font-size:.78rem;font-weight:600;color:var(--accent)}
+.parked-box[open] summary::after{content:"Hide"}
+.parked-box[open] summary{margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.card.parked{opacity:.92;border-style:dashed}
 footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--border);font-size:.82rem;color:var(--muted);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
 </style>
 </head>
@@ -1642,6 +1708,7 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--border);font-
   <nav class="badges" aria-label="Queue summary">
     <a class="pill{{if gt .Counts.Prompts 0}} has{{end}}" href="#prompts">Prompts <span class="n">{{.Counts.Prompts}}</span></a>
     <a class="pill{{if gt .Counts.Questions 0}} has{{end}}" href="#questions">Questions <span class="n">{{.Counts.Questions}}</span></a>
+    {{if gt .Counts.ParkedQuestions 0}}<a class="pill" href="#parked">Parked <span class="n">{{.Counts.ParkedQuestions}}</span></a>{{end}}
     <a class="pill{{if gt .Counts.Plans 0}} has{{end}}" href="#plans">Plans <span class="n">{{.Counts.Plans}}</span></a>
     <a class="pill{{if gt .Counts.ReadyToMerge 0}} has{{end}}" href="#ready">Ready to Merge <span class="n">{{.Counts.ReadyToMerge}}</span></a>
   </nav>
@@ -1652,7 +1719,7 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--border);font-
 {{end}}
 
 {{if eq .Counts.Total 0}}
-<div class="empty-all">All caught up — no approval prompts, questions, pending plans, or ready-to-merge PRs right now.</div>
+<div class="empty-all">All caught up — no active approval prompts, questions, pending plans, or ready-to-merge PRs right now.{{if gt .Counts.ParkedQuestions 0}} ({{.Counts.ParkedQuestions}} parked / dormant below.){{end}}</div>
 {{end}}
 
 <section id="prompts">
@@ -1684,16 +1751,25 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--border);font-
 </section>
 
 <section id="questions">
-  <div class="sec-head"><h2>Needs-Me Questions &amp; Cards ({{.Counts.Questions}})</h2></div>
+  <div class="sec-head"><h2>Needs-Me Questions &amp; Cards{{if gt .Counts.ParkedQuestions 0}} — Active{{end}} ({{.Counts.Questions}})</h2></div>
   {{if eq (len .Questions) 0}}
-    <div class="sec-empty">No beads waiting on a human decision or command.</div>
+    <div class="sec-empty">No active beads waiting on a human decision or command.</div>
   {{end}}
-  {{range .Questions}}
+  {{range .Questions}}{{template "questionCard" .}}{{end}}
+  {{if gt .Counts.ParkedQuestions 0}}
+  <details id="parked" class="parked-box">
+    <summary>Parked / Dormant ({{.ParkedSummary}})</summary>
+    {{range .ParkedQuestions}}{{template "questionCard" .}}{{end}}
+  </details>
+  {{end}}
+</section>
+{{define "questionCard"}}
   {{$tone := classTone .Class .Critical}}
-  <article class="card{{if eq $tone "crit"}} crit{{else if eq $tone "high"}} high{{end}}">
+  <article class="card{{if eq $tone "crit"}} crit{{else if eq $tone "high"}} high{{end}}{{if .Parked}} parked{{end}}">
     <div class="card-meta">
       <span class="bead">{{.Bead}}</span>
       {{if .Level}}<span class="tag">{{.Level}}</span>{{end}}
+      {{if .Parked}}<span class="tag">{{if .ParkedReason}}{{.ParkedReason}}{{else}}parked{{end}}</span>{{end}}
       {{if .Critical}}<span class="tag crit">CRITICAL</span>{{end}}
       {{if .Class}}<span class="tag {{$tone}}">{{classBadge .Class .ClassText}}</span>{{end}}
       {{if eq .Kind "run"}}<span class="tag warn">RUN</span>
@@ -1820,8 +1896,7 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--border);font-
     </div>
     {{end}}
   </article>
-  {{end}}
-</section>
+{{end}}
 
 <section id="plans">
   <div class="sec-head"><h2>Pending Checked Plans ({{.Counts.Plans}})</h2></div>

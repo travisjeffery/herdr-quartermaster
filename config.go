@@ -54,6 +54,10 @@ type Config struct {
 	VerifyMinutes int `toml:"verify_minutes"`
 	// StaleDays is how long a bead goes untouched before verify checks it.
 	StaleDays int `toml:"stale_days"`
+	// NeedsMeParkedDays is how long an agentless, non-critical needs_me bead
+	// may go untouched before views group it under Parked / Dormant instead of
+	// Active (default 7; 0 disables age-based parking).
+	NeedsMeParkedDays *int `toml:"needs_me_parked_days"`
 	// VerifyMax caps the GitHub calls a verify pass makes beyond its probes.
 	VerifyMax int `toml:"verify_max"`
 	// GHMinRemaining skips a verify pass while fewer GitHub GraphQL points
@@ -594,6 +598,9 @@ func loadConfig() (Config, error) {
 	if cfg.ReviewBumpHours < 0 {
 		return cfg, fmt.Errorf("review_bump_hours %d is negative; use 0 to disable review bump reminders", cfg.ReviewBumpHours)
 	}
+	if cfg.NeedsMeParkedDays != nil && *cfg.NeedsMeParkedDays < 0 {
+		return cfg, fmt.Errorf("needs_me_parked_days %d is negative; use 0 to disable age-based parking", *cfg.NeedsMeParkedDays)
+	}
 	if err := cfg.validateStallRetry(); err != nil {
 		return cfg, err
 	}
@@ -678,7 +685,20 @@ func (c Config) verifyEvery() time.Duration {
 	return time.Duration(max(c.VerifyMinutes, 0)) * time.Minute
 }
 func (c Config) staleAge() time.Duration { return time.Duration(max(c.StaleDays, 0)) * 24 * time.Hour }
-func (c Config) idle() time.Duration     { return time.Duration(c.IdleSeconds) * time.Second }
+
+// needsMeParkedAfter is how long an agentless, non-critical needs_me bead may
+// go untouched before views classify it as Parked / Dormant. Unset defaults to
+// defaultNeedsMeParkedDays (7d); 0 disables age-based parking.
+func (c Config) needsMeParkedAfter() time.Duration {
+	if c.NeedsMeParkedDays == nil {
+		return defaultNeedsMeParkedDays * 24 * time.Hour
+	}
+	if *c.NeedsMeParkedDays <= 0 {
+		return 0
+	}
+	return time.Duration(*c.NeedsMeParkedDays) * 24 * time.Hour
+}
+func (c Config) idle() time.Duration { return time.Duration(c.IdleSeconds) * time.Second }
 
 // promptDebounce is the window a worker prompt must keep showing before it
 // surfaces; 0 (or a zero Config that never went through defaultConfig)

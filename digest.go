@@ -70,15 +70,19 @@ type DigestPR struct {
 
 // DigestItem is one bead's line in the digest.
 type DigestItem struct {
-	State    ThreadState
-	Bead     Bead
-	Section  Section
-	PR       *DigestPR
-	OpenPRs  int
-	Blockers []string // non-closed beads blocking this one, "id (status)"
-	Agent    string   // its herdr agent's status, "" without one
-	Linear   string
-	Stale    bool
+	State        ThreadState
+	Bead         Bead
+	Section      Section
+	PR           *DigestPR
+	OpenPRs      int
+	Blockers     []string // non-closed beads blocking this one, "id (status)"
+	Agent        string   // its herdr agent's status, "" without one
+	Linear       string
+	Stale        bool
+	Parked       bool
+	ParkedReason string
+	parkedKind   string
+	SnoozedUntil time.Time
 }
 
 type Digest struct {
@@ -125,25 +129,27 @@ func saveDigestState(s digestState) error {
 
 // digestInputs is everything a digest is built from, read once per run.
 type digestInputs struct {
-	ticker TickerState
-	cfg    Config
-	open   []Bead // every bead that isn't closed
-	closed []Bead // beads closed since the last digest
-	agents map[string]Agent
-	prs    map[string]DigestPR // by URL
-	branch map[string]string   // bead id → the PR URL the ticker found on its branch
+	ticker  TickerState
+	snoozes SnoozeState
+	cfg     Config
+	open    []Bead // every bead that isn't closed
+	closed  []Bead // beads closed since the last digest
+	agents  map[string]Agent
+	prs     map[string]DigestPR // by URL
+	branch  map[string]string   // bead id → the PR URL the ticker found on its branch
 
 	asked, queries int // PRs looked up on GitHub, and the GraphQL queries that took
 }
 
 // digestEnv is the outside world, so a test can build a digest from fixtures.
 type digestEnv struct {
-	cfg    Config
-	open   func() ([]Bead, error)
-	closed func(since time.Time) ([]Bead, error)
-	agents func() ([]Agent, error)
-	ticker func() TickerState
-	lookup func(urls []string) (map[string]DigestPR, int, error)
+	cfg     Config
+	open    func() ([]Bead, error)
+	closed  func(since time.Time) ([]Bead, error)
+	agents  func() ([]Agent, error)
+	ticker  func() TickerState
+	snoozes func() SnoozeState
+	lookup  func(urls []string) (map[string]DigestPR, int, error)
 }
 
 func liveDigestEnv(cfg Config) digestEnv {
@@ -153,9 +159,10 @@ func liveDigestEnv(cfg Config) digestEnv {
 		closed: func(since time.Time) ([]Bead, error) {
 			return Beads{}.list("--status", StatusClosed, "--closed-after", since.UTC().Format(time.RFC3339))
 		},
-		agents: newHerdr().on(cfg.coordSocket()).Agents,
-		ticker: loadState,
-		lookup: GH{repo: cfg.Repo}.DigestPRs,
+		agents:  newHerdr().on(cfg.coordSocket()).Agents,
+		ticker:  loadState,
+		snoozes: loadSnoozeState,
+		lookup:  GH{repo: cfg.Repo}.DigestPRs,
 	}
 }
 
@@ -177,6 +184,11 @@ func gatherDigest(env digestEnv, prev digestState) (digestInputs, []string, erro
 	wg.Go(func() { st = env.ticker() })
 	wg.Wait()
 	in.ticker, in.cfg = st, env.cfg
+	if env.snoozes != nil {
+		in.snoozes = env.snoozes()
+	} else {
+		in.snoozes = loadSnoozeState()
+	}
 	if openErr != nil {
 		return in, nil, openErr
 	}
@@ -397,13 +409,25 @@ func buildDigest(in digestInputs, prev digestState, prefixes []string, now time.
 		if n := len(autoNotes(b.Notes)); n > 0 {
 			next.Auto[b.ID] = n
 		}
-		d.Sections[s] = append(d.Sections[s], DigestItem{
+		item := DigestItem{
 			State: state, Bead: b, Section: s, PR: pr, OpenPRs: open, Blockers: blockers, Agent: state.Agent,
 			Linear: linearKey(b, prefixes), Stale: state.stale(now),
-		})
+		}
+		if s == SecNeedsYou {
+			if parked, kind, until := classifyNeedsYou(in.cfg, th, in.snoozes, now); parked {
+				item.Parked = true
+				item.parkedKind = kind
+				item.SnoozedUntil = until
+				item.ParkedReason = formatParkedReason(kind, until, b.UpdatedAt, now)
+			}
+		}
+		d.Sections[s] = append(d.Sections[s], item)
 	}
 	for s, items := range d.Sections {
 		sort.SliceStable(items, func(i, j int) bool {
+			if s == SecNeedsYou && items[i].Parked != items[j].Parked {
+				return !items[i].Parked
+			}
 			a, b := items[i].Bead, items[j].Bead
 			if a.Priority != b.Priority {
 				return a.Priority < b.Priority
@@ -562,6 +586,9 @@ func itemLine(it DigestItem, now time.Time) string {
 		age = "STALE since " + ago(b.UpdatedAt, now)
 	}
 	parts = append(parts, age)
+	if it.Parked && it.ParkedReason != "" {
+		parts = append(parts, it.ParkedReason)
+	}
 	if it.Linear != "" {
 		parts = append(parts, it.Linear)
 	}
@@ -580,7 +607,7 @@ func itemDetail(it DigestItem) string {
 		case WaitCommand:
 			parts = append(parts, "RUN: "+shortTitle(it.State.Command, 200))
 		default:
-			parts = append(parts, lastNote(b.Notes, 240))
+			parts = append(parts, needsMeSummaryNote(b.Notes, 240))
 		}
 	case ThreadBlocked:
 		if len(it.Blockers) > 0 {
@@ -613,6 +640,22 @@ func itemDetail(it DigestItem) string {
 
 func (d Digest) count(s Section) int { return len(d.Sections[s]) }
 
+func (d Digest) needsYouSplit() (active, parked []DigestItem, snoozed, dormant int) {
+	for _, it := range d.Sections[SecNeedsYou] {
+		if it.Parked {
+			parked = append(parked, it)
+			if it.parkedKind == parkedReasonSnoozed {
+				snoozed++
+			} else {
+				dormant++
+			}
+		} else {
+			active = append(active, it)
+		}
+	}
+	return active, parked, snoozed, dormant
+}
+
 func (d Digest) stale() int {
 	n := 0
 	for _, items := range d.Sections {
@@ -627,8 +670,13 @@ func (d Digest) stale() int {
 
 // headline is the digest in one line of counts.
 func (d Digest) headline() string {
+	active, parked, _, _ := d.needsYouSplit()
+	needPart := fmt.Sprintf("%d need you", len(active))
+	if len(parked) > 0 {
+		needPart = fmt.Sprintf("%d need you (%d parked)", len(active), len(parked))
+	}
 	parts := []string{
-		fmt.Sprintf("%d need you", d.count(SecNeedsYou)),
+		needPart,
 		fmt.Sprintf("%d waiting", d.count(SecWaiting)),
 		fmt.Sprintf("%d blocked", d.count(SecBlocked)),
 		fmt.Sprintf("%d in progress", d.count(SecInProgress)),
@@ -646,9 +694,15 @@ func (d Digest) headline() string {
 // quiet is the line that tells a quiet digest from a broken one: whether
 // anything needed TJ, and how much ran without them.
 func (d Digest) quiet() string {
+	active, parked, _, _ := d.needsYouSplit()
 	s := "nothing needed you"
-	if n := d.count(SecNeedsYou); n > 0 {
-		s = fmt.Sprintf("%d need you", n)
+	switch {
+	case len(active) > 0 && len(parked) > 0:
+		s = fmt.Sprintf("%d need you (%d parked)", len(active), len(parked))
+	case len(active) > 0:
+		s = fmt.Sprintf("%d need you", len(active))
+	case len(parked) > 0:
+		s = fmt.Sprintf("nothing active needed you (%d parked)", len(parked))
 	}
 	if len(d.Auto) == 0 {
 		return s + "; no steps without you"
@@ -673,8 +727,31 @@ func renderDigest(d Digest) string {
 	for _, c := range d.Changes {
 		fmt.Fprintf(&s, "- %s\n", c)
 	}
+	writeItem := func(it DigestItem) {
+		fmt.Fprintf(&s, "- %s\n", itemLine(it, d.At))
+		if detail := itemDetail(it); detail != "" {
+			fmt.Fprintf(&s, "  - %s\n", detail)
+		}
+	}
 	for _, sec := range []Section{SecNeedsYou, SecWaiting, SecMerged, SecRollingOut, SecBlocked, SecInProgress, SecReady, SecBacklog} {
 		items := d.Sections[sec]
+		if sec == SecNeedsYou {
+			active, parked, snoozed, dormant := d.needsYouSplit()
+			if len(parked) > 0 {
+				fmt.Fprintf(&s, "\n## Needs you — Active (%d)\n\n", len(active))
+				if len(active) == 0 {
+					s.WriteString("_None._\n")
+				}
+				for _, it := range active {
+					writeItem(it)
+				}
+				fmt.Fprintf(&s, "\n### Parked / Dormant (%s)\n\n", formatParkedBreakdown(snoozed, dormant))
+				for _, it := range parked {
+					writeItem(it)
+				}
+				continue
+			}
+		}
 		fmt.Fprintf(&s, "\n## %s (%d)\n\n", sec, len(items))
 		if len(items) == 0 {
 			s.WriteString("_None._\n")
@@ -685,10 +762,7 @@ func renderDigest(d Digest) string {
 			shown = shown[:backlogTop]
 		}
 		for _, it := range shown {
-			fmt.Fprintf(&s, "- %s\n", itemLine(it, d.At))
-			if detail := itemDetail(it); detail != "" {
-				fmt.Fprintf(&s, "  - %s\n", detail)
-			}
+			writeItem(it)
 		}
 		if len(shown) < len(items) {
 			fmt.Fprintf(&s, "- _and %d more; `bd list --status open` for all of them_\n", len(items)-len(shown))
@@ -698,75 +772,92 @@ func renderDigest(d Digest) string {
 }
 
 type digestSummaryJSON struct {
-	Total      int    `json:"total"`
-	Stale      int    `json:"stale"`
-	NeedsYou   int    `json:"needs_you"`
-	Waiting    int    `json:"waiting"`
-	Merged     int    `json:"merged"`
-	RollingOut int    `json:"rolling_out"`
-	Blocked    int    `json:"blocked"`
-	InProgress int    `json:"in_progress"`
-	Ready      int    `json:"ready"`
-	Backlog    int    `json:"backlog"`
-	Headline   string `json:"headline"`
-	Quiet      string `json:"quiet"`
+	Total          int    `json:"total"`
+	Stale          int    `json:"stale"`
+	NeedsYou       int    `json:"needs_you"`
+	NeedsYouActive int    `json:"needs_you_active"`
+	NeedsYouParked int    `json:"needs_you_parked"`
+	Waiting        int    `json:"waiting"`
+	Merged         int    `json:"merged"`
+	RollingOut     int    `json:"rolling_out"`
+	Blocked        int    `json:"blocked"`
+	InProgress     int    `json:"in_progress"`
+	Ready          int    `json:"ready"`
+	Backlog        int    `json:"backlog"`
+	Headline       string `json:"headline"`
+	Quiet          string `json:"quiet"`
 }
 
 type digestItemJSON struct {
-	Bead      string    `json:"bead"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`
-	Priority  int       `json:"priority"`
-	Assignee  string    `json:"assignee,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitzero"`
-	Agent     string    `json:"agent,omitempty"`
-	Linear    string    `json:"linear,omitempty"`
-	Stale     bool      `json:"stale,omitempty"`
-	Detail    string    `json:"detail,omitempty"`
-	Blockers  []string  `json:"blockers,omitempty"`
-	PR        *DigestPR `json:"pr"`
-	OpenPRs   int       `json:"open_prs,omitempty"`
+	Bead         string     `json:"bead"`
+	Title        string     `json:"title"`
+	Status       string     `json:"status"`
+	Priority     int        `json:"priority"`
+	Assignee     string     `json:"assignee,omitempty"`
+	UpdatedAt    time.Time  `json:"updated_at,omitzero"`
+	Agent        string     `json:"agent,omitempty"`
+	Linear       string     `json:"linear,omitempty"`
+	Stale        bool       `json:"stale,omitempty"`
+	Parked       bool       `json:"parked,omitempty"`
+	ParkedReason string     `json:"parked_reason,omitempty"`
+	SnoozedUntil *time.Time `json:"snoozed_until,omitempty"`
+	Detail       string     `json:"detail,omitempty"`
+	Blockers     []string   `json:"blockers,omitempty"`
+	PR           *DigestPR  `json:"pr"`
+	OpenPRs      int        `json:"open_prs,omitempty"`
 }
 
 type digestJSON struct {
-	At         time.Time         `json:"at"`
-	Summary    digestSummaryJSON `json:"summary"`
-	Warnings   []string          `json:"warnings,omitempty"`
-	Changes    []string          `json:"changes"`
-	NeedsYou   []digestItemJSON  `json:"needs_you"`
-	Waiting    []digestItemJSON  `json:"waiting"`
-	Merged     []digestItemJSON  `json:"merged"`
-	RollingOut []digestItemJSON  `json:"rolling_out"`
-	Blocked    []digestItemJSON  `json:"blocked"`
-	InProgress []digestItemJSON  `json:"in_progress"`
-	Ready      []digestItemJSON  `json:"ready"`
-	Backlog    []digestItemJSON  `json:"backlog"`
+	At             time.Time         `json:"at"`
+	Summary        digestSummaryJSON `json:"summary"`
+	Warnings       []string          `json:"warnings,omitempty"`
+	Changes        []string          `json:"changes"`
+	NeedsYou       []digestItemJSON  `json:"needs_you"`
+	NeedsYouParked []digestItemJSON  `json:"needs_you_parked"`
+	Waiting        []digestItemJSON  `json:"waiting"`
+	Merged         []digestItemJSON  `json:"merged"`
+	RollingOut     []digestItemJSON  `json:"rolling_out"`
+	Blocked        []digestItemJSON  `json:"blocked"`
+	InProgress     []digestItemJSON  `json:"in_progress"`
+	Ready          []digestItemJSON  `json:"ready"`
+	Backlog        []digestItemJSON  `json:"backlog"`
 }
 
 // renderDigestJSON encodes the digest sections as JSON, keyed by section name.
 func renderDigestJSON(d Digest) ([]byte, error) {
-	items := func(sec Section) []digestItemJSON {
-		src := d.Sections[sec]
+	encodeItems := func(src []DigestItem) []digestItemJSON {
 		out := make([]digestItemJSON, 0, len(src))
 		for _, it := range src {
+			var snoozed *time.Time
+			if !it.SnoozedUntil.IsZero() {
+				u := it.SnoozedUntil
+				snoozed = &u
+			}
 			out = append(out, digestItemJSON{
-				Bead:      it.Bead.ID,
-				Title:     it.Bead.Title,
-				Status:    it.Bead.Status,
-				Priority:  it.Bead.Priority,
-				Assignee:  it.Bead.Assignee,
-				UpdatedAt: it.Bead.UpdatedAt,
-				Agent:     it.Agent,
-				Linear:    it.Linear,
-				Stale:     it.Stale,
-				Detail:    itemDetail(it),
-				Blockers:  it.Blockers,
-				PR:        it.PR,
-				OpenPRs:   it.OpenPRs,
+				Bead:         it.Bead.ID,
+				Title:        it.Bead.Title,
+				Status:       it.Bead.Status,
+				Priority:     it.Bead.Priority,
+				Assignee:     it.Bead.Assignee,
+				UpdatedAt:    it.Bead.UpdatedAt,
+				Agent:        it.Agent,
+				Linear:       it.Linear,
+				Stale:        it.Stale,
+				Parked:       it.Parked,
+				ParkedReason: it.ParkedReason,
+				SnoozedUntil: snoozed,
+				Detail:       itemDetail(it),
+				Blockers:     it.Blockers,
+				PR:           it.PR,
+				OpenPRs:      it.OpenPRs,
 			})
 		}
 		return out
 	}
+	items := func(sec Section) []digestItemJSON {
+		return encodeItems(d.Sections[sec])
+	}
+	activeNeeds, parkedNeeds, _, _ := d.needsYouSplit()
 	changes := d.Changes
 	if changes == nil {
 		changes = []string{}
@@ -774,29 +865,32 @@ func renderDigestJSON(d Digest) ([]byte, error) {
 	doc := digestJSON{
 		At: d.At,
 		Summary: digestSummaryJSON{
-			Total:      d.Total,
-			Stale:      d.stale(),
-			NeedsYou:   d.count(SecNeedsYou),
-			Waiting:    d.count(SecWaiting),
-			Merged:     d.count(SecMerged),
-			RollingOut: d.count(SecRollingOut),
-			Blocked:    d.count(SecBlocked),
-			InProgress: d.count(SecInProgress),
-			Ready:      d.count(SecReady),
-			Backlog:    d.count(SecBacklog),
-			Headline:   d.headline(),
-			Quiet:      d.quiet(),
+			Total:          d.Total,
+			Stale:          d.stale(),
+			NeedsYou:       d.count(SecNeedsYou),
+			NeedsYouActive: len(activeNeeds),
+			NeedsYouParked: len(parkedNeeds),
+			Waiting:        d.count(SecWaiting),
+			Merged:         d.count(SecMerged),
+			RollingOut:     d.count(SecRollingOut),
+			Blocked:        d.count(SecBlocked),
+			InProgress:     d.count(SecInProgress),
+			Ready:          d.count(SecReady),
+			Backlog:        d.count(SecBacklog),
+			Headline:       d.headline(),
+			Quiet:          d.quiet(),
 		},
-		Warnings:   d.Warnings,
-		Changes:    changes,
-		NeedsYou:   items(SecNeedsYou),
-		Waiting:    items(SecWaiting),
-		Merged:     items(SecMerged),
-		RollingOut: items(SecRollingOut),
-		Blocked:    items(SecBlocked),
-		InProgress: items(SecInProgress),
-		Ready:      items(SecReady),
-		Backlog:    items(SecBacklog),
+		Warnings:       d.Warnings,
+		Changes:        changes,
+		NeedsYou:       encodeItems(activeNeeds),
+		NeedsYouParked: encodeItems(parkedNeeds),
+		Waiting:        items(SecWaiting),
+		Merged:         items(SecMerged),
+		RollingOut:     items(SecRollingOut),
+		Blocked:        items(SecBlocked),
+		InProgress:     items(SecInProgress),
+		Ready:          items(SecReady),
+		Backlog:        items(SecBacklog),
 	}
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -806,7 +900,8 @@ func renderDigestJSON(d Digest) ([]byte, error) {
 }
 
 // summary is the notification: the counts as its title, then what changed
-// and the top of needs-you. top caps both lists.
+// and the top of active needs-you (with a summary count for parked items).
+// top caps both lists.
 func (d Digest) summary(top int) (string, string) {
 	title := "Beads: " + d.headline()
 	body := []string{d.quiet()}
@@ -817,7 +912,7 @@ func (d Digest) summary(top int) (string, string) {
 		}
 		body = append(body, c)
 	}
-	needs := d.Sections[SecNeedsYou]
+	needs, parked, _, _ := d.needsYouSplit()
 	if len(needs) > 0 {
 		body = append(body, "", "Needs you:")
 		for i, it := range needs {
@@ -832,13 +927,17 @@ func (d Digest) summary(top int) (string, string) {
 			body = append(body, line)
 		}
 	}
+	if len(parked) > 0 {
+		body = append(body, fmt.Sprintf("(%d parked / dormant)", len(parked)))
+	}
 	return title, strings.Join(body, "\n")
 }
 
 // worthNotifying is whether a digest should interrupt: something changed or
-// something is waiting on the user.
+// an active (non-parked) thread is waiting on the user.
 func (d Digest) worthNotifying() bool {
-	return len(d.Changes) > 0 || d.count(SecNeedsYou) > 0
+	active, _, _, _ := d.needsYouSplit()
+	return len(d.Changes) > 0 || len(active) > 0
 }
 
 // DigestPRs looks up each PR's state, review decision and check rollup, keyed

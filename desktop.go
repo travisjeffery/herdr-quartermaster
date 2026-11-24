@@ -334,12 +334,12 @@ func desktopNeedsMeSummary(th Thread) string {
 		return "RUN command requested"
 	}
 	if q, ok := parseNeedsMeQuestion(notes); ok && len(q.Lines) > 0 {
-		if s := sanitizeDesktopLine(strings.Join(q.Lines, " "), desktopMaxSummaryRunes); s != "" && !isOnlyRedacted(s) {
+		if s := sanitizeDesktopLine(strings.Join(q.Lines, "\n"), desktopMaxSummaryRunes); s != "" && !isOnlyRedacted(s) {
 			return s
 		}
 	}
 	if q, ok := parseFreeTextNeedsMeQuestion(notes); ok && len(q.Lines) > 0 {
-		if s := sanitizeDesktopLine(strings.Join(q.Lines, " "), desktopMaxSummaryRunes); s != "" && !isOnlyRedacted(s) {
+		if s := sanitizeDesktopLine(strings.Join(q.Lines, "\n"), desktopMaxSummaryRunes); s != "" && !isOnlyRedacted(s) {
 			return s
 		}
 	}
@@ -358,10 +358,15 @@ func desktopNeedsMeSummary(th Thread) string {
 // RUN: note when present (the non-bookkeeping note immediately following RUN:).
 func pendingCommandReason(notes string) string {
 	lines := noteLines(notes)
+	end := len(lines)
+	for end > 0 && (isNonAnswerHousekeepingNote(lines[end-1]) || isClassLine(lines[end-1])) {
+		end--
+	}
+	lines = lines[:end]
 	runIdx := -1
 	for i := len(lines) - 1; i >= 0 && i >= len(lines)-2; i-- {
 		l := lines[i]
-		if strings.HasPrefix(l, "RAN:") || strings.HasPrefix(l, "DONE:") {
+		if isAnswerBoundaryLine(l) {
 			return ""
 		}
 		if strings.HasPrefix(l, "RUN:") {
@@ -373,7 +378,7 @@ func pendingCommandReason(notes string) string {
 		return ""
 	}
 	next := lines[runIdx+1]
-	if isBookkeepingNote(next) || strings.HasPrefix(next, "RUN:") || strings.HasPrefix(next, "CLASS:") {
+	if isBookkeepingNote(next) || strings.HasPrefix(next, "RUN:") || isClassLine(next) {
 		return ""
 	}
 	return next

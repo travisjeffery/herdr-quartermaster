@@ -68,9 +68,27 @@ func normalizeTapFreeText(raw string) string {
 }
 
 func isAnswerBoundaryLine(l string) bool {
-	return strings.HasPrefix(l, "NEEDS_ME ANSWERED:") ||
-		strings.HasPrefix(l, "the tap answer above was recorded") ||
-		l == resumeNote
+	for _, prefix := range []string{
+		"NEEDS_ME ANSWERED:",
+		"PROMPT ANSWERED:",
+		"the tap answer above was recorded",
+		"RAN:",
+		"DONE:",
+		"JOB CANCELED",
+		"WORKFLOW CANCELED",
+		"WORKFLOW APPROVED",
+	} {
+		if strings.HasPrefix(l, prefix) {
+			return true
+		}
+	}
+	if l == resumeNote {
+		return true
+	}
+	if strings.HasPrefix(l, "AUTO:") && strings.Contains(l, "] answered ") {
+		return true
+	}
+	return false
 }
 
 // parseFreeTextNeedsMeQuestion reads a needs_me bead's live free-text question
@@ -214,7 +232,8 @@ func parseNeedsMeQuestion(notes string) (NeedsMeQuestion, bool) {
 	if len(q.Options) < 2 || len(q.Options) > maxQuestionOptions {
 		return NeedsMeQuestion{}, false
 	}
-	// After the options: at most a CLASS line.
+	// After the options: at most a CLASS line, plus trailing non-answer
+	// housekeeping notes (e.g. AUTO: handoff, likely_stale rejected).
 	for ; i < len(lines); i++ {
 		l := lines[i]
 		if l == "" {
@@ -222,6 +241,9 @@ func parseNeedsMeQuestion(notes string) (NeedsMeQuestion, bool) {
 		}
 		if class, n, ok := parseClassLine(l); ok && q.Class == "" {
 			q.Class, q.ClassN = class, n
+			continue
+		}
+		if isNonAnswerHousekeepingNote(l) {
 			continue
 		}
 		return NeedsMeQuestion{}, false

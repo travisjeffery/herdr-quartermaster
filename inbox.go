@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // InboxCondition identifies the observation that keeps an item actionable.
@@ -253,16 +254,20 @@ type InboxQuestionOption struct {
 }
 
 type inboxQuestionsEnv struct {
-	active func() ([]Bead, error)
-	agents func(host string) ([]Agent, error)
-	prompt promptEnv
-	state  func() TickerState
-	warnf  func(format string, args ...any)
+	cfg     Config
+	active  func() ([]Bead, error)
+	agents  func(host string) ([]Agent, error)
+	prompt  promptEnv
+	state   func() TickerState
+	snoozes func() SnoozeState
+	now     func() time.Time
+	warnf   func(format string, args ...any)
 }
 
 func liveInboxQuestionsEnv(cfg Config, h Herdr, errOut io.Writer) inboxQuestionsEnv {
 	hh := h.on(cfg.coordSocket())
 	return inboxQuestionsEnv{
+		cfg:    cfg,
 		active: Beads{}.Active,
 		agents: func(host string) ([]Agent, error) {
 			if host != localHost {
@@ -273,8 +278,10 @@ func liveInboxQuestionsEnv(cfg Config, h Herdr, errOut io.Writer) inboxQuestions
 			}
 			return cfg.herdrOn(hh, host).Agents()
 		},
-		prompt: livePromptEnv(cfg, hh),
-		state:  loadState,
+		prompt:  livePromptEnv(cfg, hh),
+		state:   loadState,
+		snoozes: loadSnoozeState,
+		now:     time.Now,
 		warnf: func(format string, args ...any) {
 			if errOut != nil {
 				fmt.Fprintf(errOut, format+"\n", args...)
@@ -299,6 +306,16 @@ func inboxQuestions(env inboxQuestionsEnv) ([]InboxQuestion, error) {
 	var st TickerState
 	if env.state != nil {
 		st = env.state()
+	}
+	var snoozes SnoozeState
+	if env.snoozes != nil {
+		snoozes = env.snoozes()
+	} else {
+		snoozes = loadSnoozeState()
+	}
+	now := time.Now()
+	if env.now != nil {
+		now = env.now()
 	}
 	hostSeen := map[string]bool{}
 	var hosts []string
@@ -353,6 +370,9 @@ func inboxQuestions(env inboxQuestionsEnv) ([]InboxQuestion, error) {
 			}
 		}
 		if q, ok := liveQuestion(th); ok {
+			if parked, _, _ := classifyNeedsYou(env.cfg, th, snoozes, now); parked {
+				continue
+			}
 			out = append(out, needsMeInboxQuestion(b, q))
 		}
 	}

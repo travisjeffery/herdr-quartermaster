@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -88,7 +89,9 @@ func answered(t Thread) bool {
 func classify(t Thread) Group { return t.derived().group() }
 
 // pendingCommand is the command a worker asked the user to run, from its
-// latest "RUN:" note, until a later "RAN:" or "DONE:" note answers it.
+// latest "RUN:" note, until a later answer boundary or non-housekeeping note
+// moves the thread on. Trailing housekeeping notes (such as AUTO: handoff or
+// likely_stale rejected) and CLASS: lines do not hide a live RUN: command.
 func pendingCommand(notes string) string {
 	var lines []string
 	for _, l := range strings.Split(notes, "\n") {
@@ -96,12 +99,18 @@ func pendingCommand(notes string) string {
 			lines = append(lines, l)
 		}
 	}
-	// A RUN: is only live while it is one of the last two notes (the command
-	// and its one line of why). Anything later means the thread moved on, so
-	// an answered command is never offered again even without a RAN: line.
+	end := len(lines)
+	for end > 0 && (isNonAnswerHousekeepingNote(lines[end-1]) || isClassLine(lines[end-1])) {
+		end--
+	}
+	lines = lines[:end]
+	// A RUN: is only live while it is one of the last two substantive notes
+	// (the command and its one line of why). Anything later means the thread
+	// moved on, so an answered command is never offered again even without a
+	// RAN: line.
 	for i := len(lines) - 1; i >= 0 && i >= len(lines)-2; i-- {
 		l := lines[i]
-		if strings.HasPrefix(l, "RAN:") || strings.HasPrefix(l, "DONE:") {
+		if isAnswerBoundaryLine(l) {
 			return ""
 		}
 		if cmd, ok := strings.CutPrefix(l, "RUN:"); ok {
@@ -309,17 +318,27 @@ func asked(b Bead) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(activeQuestionText(b.Notes))))[:16]
 }
 
-func isBookkeepingNote(line string) bool {
+var housekeepingNoteRe = regexp.MustCompile(`(?i)\blikely[_ -]stale\b|^keep open\b|^(?:\d{4}-\d{2}-\d{2}(?:[T ]\S+)?\s+)?coordinator(?:\s*\([^)]*\))?:\s*(?:agent session closed|handoff|likely[_ -]stale|parked|snoozed|inbox triage)\b`)
+
+func isHousekeepingNote(line string) bool {
 	for _, prefix := range []string{
-		"AUTO:", "auto:", "VERIFY:", "PR:", "Linear:",
-		"PROMPT ANSWERED:", "NEEDS_ME ANSWERED:", "RAN:", "DONE:",
+		"AUTO:", "auto:", "VERIFY:", "PR:", "Linear:", "MILESTONE:",
 		"WATCH TRIGGERED", "WATCH EXPIRED",
+		"SNOOZE:", "SNOOZED:",
+		"quartermaster relaunched the worker ",
+		"quartermaster could not relaunch the worker ",
+		"pi-rpc fork prepared,",
+		"released by quartermaster ",
 	} {
 		if strings.HasPrefix(line, prefix) {
 			return true
 		}
 	}
-	return false
+	return housekeepingNoteRe.MatchString(line)
+}
+
+func isBookkeepingNote(line string) bool {
+	return isAnswerBoundaryLine(line) || isNonAnswerHousekeepingNote(line)
 }
 
 // structuredQuestionBlock returns the canonical QUESTION/OPTIONS/CLASS block
@@ -367,26 +386,62 @@ func structuredQuestionBlock(lines []string, idx int) (string, bool) {
 }
 
 // activeQuestionText extracts the question a needs_me bead is currently asking.
-// Trailing bookkeeping or non-question notes leave the active question intact.
+// Only notes after the last answer boundary count; trailing housekeeping notes
+// (AUTO: handoff, likely_stale rejected, etc.) leave the active question intact,
+// and explicit CRITICAL:/QUESTION:/RUN:/OPTIONS: directives take precedence
+// over non-directive notes.
 func activeQuestionText(notes string) string {
-	lines := noteLines(notes)
-	lastNonBookkeeping := ""
-	for i := len(lines) - 1; i >= 0; i-- {
-		l := lines[i]
-		if isBookkeepingNote(l) {
+	after := linesAfterAnswer(noteLines(notes))
+	if len(after) == 0 {
+		return ""
+	}
+	var latestAsks, latestNonBookkeeping string
+	for i := len(after) - 1; i >= 0; i-- {
+		l := after[i]
+		if isBookkeepingNote(l) || isClassLine(l) {
 			continue
 		}
-		if lastNonBookkeeping == "" {
-			lastNonBookkeeping = l
+		if latestNonBookkeeping == "" {
+			latestNonBookkeeping = l
 		}
-		if block, ok := structuredQuestionBlock(lines, i); ok {
+		if block, ok := structuredQuestionBlock(after, i); ok {
 			return block
 		}
-		if asks(l) {
+		if l == "OPTIONS:" && i > 0 && !isBookkeepingNote(after[i-1]) && !isClassLine(after[i-1]) {
+			start := i - 1
+			if start > 0 && strings.HasPrefix(after[start-1], "CRITICAL:") {
+				start--
+			}
+			end := i + 1
+			for end < len(after) && questionOptionRe.MatchString(after[end]) {
+				end++
+			}
+			return strings.Join(after[start:end], "\n")
+		}
+		if isExplicitQuestionDirective(l) {
+			if strings.HasPrefix(l, "CRITICAL:") {
+				if strings.HasPrefix(latestAsks, l+"\n") {
+					return latestAsks
+				}
+				return l
+			}
+			if i > 0 && strings.HasPrefix(after[i-1], "CRITICAL:") {
+				return after[i-1] + "\n" + l
+			}
 			return l
 		}
+		if latestAsks == "" && asks(l) {
+			if i > 0 && strings.HasPrefix(after[i-1], "CRITICAL:") {
+				latestAsks = after[i-1] + "\n" + l
+			} else {
+				latestAsks = l
+			}
+		}
 	}
-	return lastNonBookkeeping
+	if latestAsks != "" {
+		return latestAsks
+	}
+	return latestNonBookkeeping
 }
 
 // resumeNote is the note left on a bead the ticker resumed; the question
