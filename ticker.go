@@ -406,7 +406,7 @@ func (t Ticker) once(st *TickerState) error {
 	threads, agents, err := t.gather(st, now)
 	if err != nil {
 		if threads != nil { // canonical Beads read succeeded; agents are unknown
-			if notifyErr := reconcileDesktop(threads, now, submitDesktop); notifyErr != nil {
+			if notifyErr := reconcileDesktopWith(threads, nil, t.cfg.Desktop, now, submitDesktopMessage); notifyErr != nil {
 				t.log.Printf("desktop notifications: %v", notifyErr)
 			}
 		}
@@ -456,6 +456,7 @@ func (t Ticker) once(st *TickerState) error {
 	}
 	var rows []sidebarRow
 	var alertThreads []Thread
+	var desktopMilestones []desktopMilestone
 	current := map[string]bool{}
 	for i, th := range threads {
 		id := th.Bead.ID
@@ -508,6 +509,7 @@ func (t Ticker) once(st *TickerState) error {
 			}
 		}
 		alertThreads = append(alertThreads, th)
+		desktopMilestones = append(desktopMilestones, desktopMilestonesForTransition(th, prev, !seen, t.cfg.Desktop)...)
 		if out.Notify && desktopReason(th) == "" && classify(th) != GroupNeedsYou {
 			if err := t.herdr.Notify(fmt.Sprintf("%s: %s", id, classify(th)), shortTitle(th.Bead.Title, 60)); err != nil {
 				t.log.Printf("desktop notification submission failed: %v", err)
@@ -535,7 +537,7 @@ func (t Ticker) once(st *TickerState) error {
 	if err := reconcileInbox(alertThreads, t.beads.Show); err != nil {
 		t.log.Printf("inbox reconciliation: %v", err)
 	}
-	if err := reconcileDesktop(alertThreads, now, submitDesktop); err != nil {
+	if err := reconcileDesktopWith(alertThreads, desktopMilestones, t.cfg.Desktop, now, submitDesktopMessage); err != nil {
 		t.log.Printf("desktop notifications: %v", err)
 	}
 	t.checkWatches(threads, agents, now)
