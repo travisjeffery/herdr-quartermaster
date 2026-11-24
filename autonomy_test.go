@@ -61,6 +61,8 @@ func TestBriefDial(t *testing.T) {
 		"--match-head-commit",
 		"AUTO: [worker L<level> C<class>] <what> — <evidence>",
 		"4 main: merging your own PR with the required review and checks green; spending up to $500 (one charge, or per month for a recurring cost)",
+		"5 internal messages (team channels, others' PRs or issues), and configured dev targets (`[autonomy] dev`, when `prod` is set and does not match) that pass `gate plan`",
+		"6 other non-prod infrastructure: an apply or deploy that passes `gate plan`",
 		"7 production, additive or in place",
 		"spending more than $500 (one charge, or per month for a recurring cost), or an amount you can't estimate",
 		"quartermaster autonomy check backend-ab12 --action spend --amount <USD>",
@@ -264,10 +266,19 @@ func TestMigrateAutonomy(t *testing.T) {
 			t.Errorf("%s: level %d max %d, want %d %d", c.name, c.a.Level, c.a.Max, c.level, c.max)
 		}
 	}
-	for _, bad := range []AutonomyConfig{{Level: 8, Max: 7}, {Level: 4, Max: 9}, {Level: -1, Max: 7}, {Level: 4, Max: 7, Prod: []string{"["}}} {
+	for _, bad := range []AutonomyConfig{
+		{Level: 8, Max: 7},
+		{Level: 4, Max: 9},
+		{Level: -1, Max: 7},
+		{Level: 4, Max: 7, Prod: []string{"["}},
+		{Level: 4, Max: 7, Prod: []string{"*prod*"}, Dev: []string{"["}},
+	} {
 		if bad.validate() == nil {
 			t.Errorf("%+v validated", bad)
 		}
+	}
+	if err := (AutonomyConfig{Level: 4, Max: 7, Prod: []string{"*prod*"}, Dev: []string{"["}}).validate(); err == nil || !strings.Contains(err.Error(), "[autonomy] dev") {
+		t.Errorf("invalid dev glob error = %v, want [autonomy] dev", err)
 	}
 }
 
@@ -299,6 +310,14 @@ func TestLoadConfigMigratesAutonomy(t *testing.T) {
 	write("")
 	if cfg, err = loadConfig(); err != nil || cfg.Autonomy.Level != 4 || cfg.Autonomy.Max != 7 {
 		t.Errorf("no [autonomy]: %+v, %v", cfg.Autonomy, err)
+	}
+	write("[autonomy]\nprod = [\"*prod*\"]\ndev = [\"dev\", \"*-dev\"]\n")
+	if cfg, err = loadConfig(); err != nil || !slices.Equal(cfg.Autonomy.Dev, []string{"dev", "*-dev"}) {
+		t.Errorf("valid [autonomy] dev: %+v, %v", cfg.Autonomy.Dev, err)
+	}
+	write("[autonomy]\nprod = [\"*prod*\"]\ndev = [\"[\"]\n")
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "[autonomy] dev") {
+		t.Errorf("invalid [autonomy] dev: %v", err)
 	}
 }
 
@@ -352,6 +371,126 @@ func TestActionClass(t *testing.T) {
 	cfg.Autonomy.Prod = nil
 	if got := cfg.Autonomy.targetClass("dev-east"); got != 7 {
 		t.Errorf("no prod patterns: dev-east is %d, want 7", got)
+	}
+}
+
+func TestTargetClassDevPrecedence(t *testing.T) {
+	cases := []struct {
+		name   string
+		a      AutonomyConfig
+		target string
+		want   int
+	}{
+		{
+			name:   "empty prod fails closed even when dev matches",
+			a:      AutonomyConfig{Dev: []string{"dev", "*dev*", "*"}},
+			target: "acme/app/dev",
+			want:   7,
+		},
+		{
+			name:   "empty target fails closed even when prod and dev set",
+			a:      AutonomyConfig{Prod: []string{"*prod*"}, Dev: []string{"*"}},
+			target: "",
+			want:   7,
+		},
+		{
+			name:   "prod wins over dev on same segment",
+			a:      AutonomyConfig{Prod: []string{"*prod*"}, Dev: []string{"*dev*", "*"}},
+			target: "dev-prod",
+			want:   7,
+		},
+		{
+			name:   "prod wins over dev across path segments",
+			a:      AutonomyConfig{Prod: []string{"*prod*"}, Dev: []string{"dev"}},
+			target: "acme/dev/prod",
+			want:   7,
+		},
+		{
+			name:   "matching dev segment returns 5",
+			a:      AutonomyConfig{Prod: []string{"*prod*"}, Dev: []string{"dev", "*-dev"}},
+			target: "acme/app/dev",
+			want:   5,
+		},
+		{
+			name:   "matching dev glob segment returns 5",
+			a:      AutonomyConfig{Prod: []string{"*prod*"}, Dev: []string{"dev-*", "*-dev"}},
+			target: "acme/app/dev-east",
+			want:   5,
+		},
+		{
+			name:   "matching whole dev target returns 5",
+			a:      AutonomyConfig{Prod: []string{"*prod*"}, Dev: []string{"acme/app/sandbox"}},
+			target: "acme/app/sandbox",
+			want:   5,
+		},
+		{
+			name:   "unmatched non-prod target returns 6",
+			a:      AutonomyConfig{Prod: []string{"*prod*"}, Dev: []string{"dev", "*-dev"}},
+			target: "acme/app/staging",
+			want:   6,
+		},
+		{
+			name:   "empty dev leaves non-prod at 6",
+			a:      AutonomyConfig{Prod: []string{"*prod*"}},
+			target: "acme/app/dev",
+			want:   6,
+		},
+		{
+			name:   "empty pattern entry does not match empty slash segment",
+			a:      AutonomyConfig{Prod: []string{"*prod*"}, Dev: []string{""}},
+			target: "/staging",
+			want:   6,
+		},
+	}
+	for _, c := range cases {
+		if got := c.a.targetClass(c.target); got != c.want {
+			t.Errorf("%s: targetClass(%q) = %d, want %d", c.name, c.target, got, c.want)
+		}
+	}
+}
+
+func TestAutonomyCheckDevTargets(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Autonomy.Prod = []string{"*prod*", "*-production"}
+	cfg.Autonomy.Dev = []string{"dev", "*-dev", "dev-*"}
+	f := &fakeAutonomy{bead: Bead{ID: "b-1", Status: StatusInProgress}}
+
+	check := func(aCfg AutonomyConfig, level int, action, target string) error {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		c := cfg
+		c.Autonomy = aCfg
+		f.bead.Labels = []string{levelLabel + strconv.Itoa(level)}
+		var out strings.Builder
+		return autonomyCmd(c, f.env(), []string{"check", "b-1"}, autonomyOpts{Class: -1, Action: action, Target: target}, &out)
+	}
+
+	for _, action := range []string{"deploy", "apply", "rollout"} {
+		if err := check(cfg.Autonomy, 5, action, "acme/app/dev"); err != nil {
+			t.Errorf("%s dev target at L5: %v", action, err)
+		}
+		if err := check(cfg.Autonomy, 4, action, "acme/app/dev"); !errors.Is(err, errNotAutonomous) || !strings.Contains(err.Error(), "class 5") {
+			t.Errorf("%s dev target at L4: %v, want class 5 not autonomous", action, err)
+		}
+		if err := check(cfg.Autonomy, 5, action, "acme/app/staging"); !errors.Is(err, errNotAutonomous) || !strings.Contains(err.Error(), "class 6") {
+			t.Errorf("%s staging target at L5: %v, want class 6 not autonomous", action, err)
+		}
+		if err := check(cfg.Autonomy, 6, action, "acme/app/staging"); err != nil {
+			t.Errorf("%s staging target at L6: %v", action, err)
+		}
+		if err := check(cfg.Autonomy, 5, action, "acme/dev/prod"); !errors.Is(err, errNotAutonomous) || !strings.Contains(err.Error(), "class 7") {
+			t.Errorf("%s prod+dev overlap at L5: %v, want class 7 not autonomous", action, err)
+		}
+		if err := check(cfg.Autonomy, 6, action, "acme/dev/prod"); !errors.Is(err, errNotAutonomous) || !strings.Contains(err.Error(), "class 7") {
+			t.Errorf("%s prod+dev overlap at L6: %v, want class 7 not autonomous", action, err)
+		}
+		if err := check(cfg.Autonomy, 7, action, "acme/dev/prod"); err != nil {
+			t.Errorf("%s prod+dev overlap at L7: %v", action, err)
+		}
+		noProd := cfg.Autonomy
+		noProd.Prod = nil
+		if err := check(noProd, 5, action, "acme/app/dev"); !errors.Is(err, errNotAutonomous) || !strings.Contains(err.Error(), "class 7") {
+			t.Errorf("%s dev target with empty prod at L5: %v, want class 7 not autonomous", action, err)
+		}
 	}
 }
 

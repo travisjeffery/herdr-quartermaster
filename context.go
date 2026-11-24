@@ -78,8 +78,10 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   branch and PR, 3 TJ's machine and bead state (dispatching a `+"`next`"+` bead,
   resuming, releasing a stale claim, closing a verified-done bead), 4 main
   (merging an approved, green PR) and spending up to `+spendLimitText+`,
-  5 internal messages, 6 non-prod infra and dispatching a bead TJ didn't
-  select, 7 production additive or in place and spending more, or an amount
+  5 internal messages and configured dev targets (`+"`[autonomy] dev`"+`, when
+  `+"`prod`"+` is set and does not match), 6 other non-prod infra and
+  dispatching a bead TJ didn't select,
+  7 production additive or in place and spending more, or an amount
   no one can estimate (`+"`--action spend --amount <USD>[/month]`"+`), 8 a
   scoped prod deletion, secrets, outside messages or approving a PR, 9
   widespread or irreversible, a classifier denial, loosening agent settings, or

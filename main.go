@@ -105,7 +105,7 @@ Usage:
   quartermaster tap serve                              run the tap endpoint in the foreground (the ticker
                                                        runs it too when [tap] is on)
   quartermaster gate plan <file|-> [--expect op=N,...] print a pulumi preview --json or tofu show -json
-                [--target T]                           plan's class on target T (6/7 by [autonomy] prod, 8
+                [--target T]                           plan's class on target T (5/6/7 by [autonomy] prod/dev, 8
                                                        delete/replace in prod or stateful, 9 widespread or
                                                        unknown op); exit 0 only for no delete, replace or
                                                        unknown op (and, with --expect, exactly those changes)

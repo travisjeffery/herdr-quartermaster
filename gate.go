@@ -59,9 +59,10 @@ type PlanCheck struct {
 	// Problems are reasons the plan fails that are not a single change: it
 	// errored, or it differs from what was expected.
 	Problems []string
-	// Target, Prod and Class are set by classify.
+	// Target, Prod, Dev and Class are set by classify.
 	Target string
 	Prod   bool
+	Dev    bool
 	Class  int
 }
 
@@ -74,7 +75,7 @@ func (c *PlanCheck) add(op, typ, name string) {
 	}
 }
 
-// classify sets the plan's impact class on target: 6 or 7 by target; 8 for a
+// classify sets the plan's impact class on target: 5, 6 or 7 by target; 8 for a
 // delete or replace in production, or of a stateful (or untyped) resource
 // anywhere; 7 for one elsewhere; 9 past a.Widespread deletes or for an
 // operation it doesn't know. One plan is one stack, so deletes across stacks
@@ -82,6 +83,7 @@ func (c *PlanCheck) add(op, typ, name string) {
 func (c *PlanCheck) classify(a AutonomyConfig, target string) {
 	c.Target, c.Class = target, a.targetClass(target)
 	c.Prod = c.Class == 7
+	c.Dev = c.Class == 5
 	deletes := 0
 	for _, b := range c.Blocked {
 		switch {
@@ -306,6 +308,8 @@ func targetWord(c PlanCheck) string {
 		return "no --target, so production"
 	case c.Prod:
 		return c.Target + ": production"
+	case c.Dev:
+		return c.Target + ": dev"
 	}
 	return c.Target + ": not production"
 }
