@@ -153,6 +153,17 @@ func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thre
 	// not promote a light Noted lookup after a failed detail fetch: it would
 	// establish a false zero-review baseline for the next successful pass.
 	if pr, ok := st.PRs[b.ID]; ok {
+		// The ticker reloads its state every tick. Preserve a successful
+		// observation between polls, but never indefinitely (or after a
+		// failed refresh, which clears the gate in gatePRs).
+		if pr.Gate != nil {
+			age := time.Since(pr.Gate.At)
+			if age < 0 || age > 2*cfg.ghEvery() {
+				pr.Gate, pr.DetailsFresh = nil, false
+			}
+		}
+		policy := tickerMergePolicy(cfg, b, pr)
+		pr.Policy = &policy
 		th.PR = &pr
 		th.Checks = summarizeChecks(pr.Checks)
 		th.Reviews = reviewsNotBy(pr.Reviews, st.Login)
@@ -213,7 +224,7 @@ func (t Ticker) refreshPRs(st *TickerState, active []Bead) {
 			st.MergedPRs[b.ID] = merged[i]
 		}
 	}
-	t.gatePRs(st.PRs, prs)
+	t.gatePRs(prs)
 	st.PRs = prs
 }
 
@@ -224,6 +235,7 @@ func (t Ticker) beadPR(st *TickerState, b Bead, mine map[string][]PR, inList, no
 	own, listed := repoPRs(t.cfg, b, mine)
 	if !listed {
 		old, ok := st.PRs[b.ID]
+		old.Gate, old.DetailsFresh = nil, false // cached details are not merge evidence
 		return old, st.MergedPRs[b.ID], ok
 	}
 	byURL := map[string]PR{}
@@ -243,6 +255,7 @@ func (t Ticker) beadPR(st *TickerState, b Bead, mine map[string][]PR, inList, no
 		err = t.gh.MarkBotReviews(&full)
 	}
 	if err == nil {
+		full.DetailsFresh = true
 		return full, merged, true
 	}
 	t.log.Printf("gh pr view %d: %v", pr.Number, err)
@@ -252,6 +265,7 @@ func (t Ticker) beadPR(st *TickerState, b Bead, mine map[string][]PR, inList, no
 		// the next good pass see every existing review as new.
 		return PR{}, merged, false
 	}
+	old.Gate, old.DetailsFresh = nil, false
 	return old, merged, true
 }
 
@@ -325,17 +339,17 @@ func eachLimit(n, limit int, f func(int)) {
 }
 
 // gatePRs fetches, in one query, the merge gate of every PR that is otherwise
-// mergeable. When the query fails a PR keeps the threads it had at the same
-// head, its approvals still aged against now; without a gate it is not ready
-// to merge.
-func (t Ticker) gatePRs(old, prs map[string]PR) {
+// mergeable. A failed query clears the gate; cached approvals or thread
+// counts are not evidence that the current PR is still safe to merge.
+func (t Ticker) gatePRs(prs map[string]PR) {
 	var want []PR
 	for _, pr := range prs {
-		if mergeable(&pr, summarizeChecks(pr.Checks)) {
+		if pr.DetailsFresh && mergeable(&pr, summarizeChecks(pr.Checks)) {
 			want = append(want, pr)
 		}
 	}
 	if len(want) == 0 {
+		applyGates(prs, nil)
 		return
 	}
 	now := time.Now()
@@ -343,16 +357,12 @@ func (t Ticker) gatePRs(old, prs map[string]PR) {
 	if err != nil {
 		t.log.Printf("gh merge gates: %v", err)
 	}
-	applyGates(old, prs, gates, err != nil, now)
+	applyGates(prs, gates)
 }
 
-func applyGates(old, prs map[string]PR, gates map[string]MergeGate, failed bool, now time.Time) {
+func applyGates(prs map[string]PR, gates map[string]MergeGate) {
 	for id, pr := range prs {
-		if g, ok := gates[pr.URL]; ok {
-			pr.Gate = &g
-		} else if failed && old[id].Gate != nil && old[id].Gate.Head == pr.HeadSHA {
-			g := *old[id].Gate
-			g.At = now
+		if g, ok := gates[pr.URL]; ok && pr.DetailsFresh {
 			pr.Gate = &g
 		} else {
 			pr.Gate = nil

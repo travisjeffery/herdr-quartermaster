@@ -34,6 +34,8 @@ func defaultInboxCondition(e Event) *InboxCondition {
 		kind = "checks_failing"
 	case EventReady:
 		kind = "ready_to_merge"
+	case EventUnsafeAutoMerge:
+		kind = "unsafe_auto_merge"
 	}
 	if e.Bead == "" {
 		kind = "manual" // e.g. the global lease-expired notice
@@ -53,7 +55,7 @@ func eventCondition(t Thread, kind EventKind) *InboxCondition {
 		default:
 			c.Kind, c.Key = "needs_me", asked(t.Bead)
 		}
-	case EventFailing, EventReady:
+	case EventFailing, EventReady, EventUnsafeAutoMerge:
 		c.Key = inboxPRKey(t)
 	}
 	return c
@@ -113,6 +115,14 @@ func inboxObsolete(it InboxItem, active map[string]Thread) bool {
 		// ticker announces it once per head, so retain that observation
 		// until its resource changes or a human decision supersedes it.
 		return t.Bead.Status == StatusNeedsMe
+	case "unsafe_auto_merge":
+		if t.PR == nil {
+			return false
+		}
+		if t.PR.State != "OPEN" || (c.Key != "" && c.Key != inboxPRKey(t)) {
+			return true
+		}
+		return unsafeAutoKey(t) == ""
 	}
 	return false
 }

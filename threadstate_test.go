@@ -23,7 +23,7 @@ func TestThreadStateMatrixAndViews(t *testing.T) {
 		{StatusInProgress, "unknown", "I I R F M I"},
 		{StatusInProgress, "background", "W W R F M W"},
 		{StatusNeedsMe, "", "U U U U U U"},
-		{StatusNeedsMe, "working", "W W R F M W"},
+		{StatusNeedsMe, "working", "W W W F M W"},
 		{StatusNeedsMe, "idle", "U U U U U U"},
 		{StatusNeedsMe, "done", "U U U U U U"},
 		{StatusNeedsMe, "blocked", "P P P P P P"},
@@ -37,12 +37,12 @@ func TestThreadStateMatrixAndViews(t *testing.T) {
 		{StatusBlocked, "unknown", "B B B B B B"},
 		{StatusBlocked, "background", "B B B B B B"},
 		{StatusOpen, "", "Q Q Q Q Q Q"},
-		{StatusOpen, "working", "W W R F M W"},
+		{StatusOpen, "working", "W W W F M W"},
 		{StatusOpen, "idle", "Q Q Q Q Q Q"},
 		{StatusOpen, "done", "Q Q Q Q Q Q"},
 		{StatusOpen, "blocked", "P P P P P P"},
 		{StatusOpen, "unknown", "Q Q Q Q Q Q"},
-		{StatusOpen, "background", "W W R F M W"},
+		{StatusOpen, "background", "W W W F M W"},
 	}
 	types := map[string]struct {
 		kind    ThreadKind
@@ -63,6 +63,8 @@ func TestThreadStateMatrixAndViews(t *testing.T) {
 		"P": {kind: ThreadWaiting, waiting: WaitPrompt, group: GroupNeedsYou, section: SecNeedsYou},
 		"U": {kind: ThreadWaiting, waiting: WaitUser, group: GroupNeedsYou, section: SecNeedsYou},
 	}
+	cfg := defaultConfig()
+	cfg.Autonomy.Level = 4
 	for _, row := range rows {
 		for col, code := range strings.Fields(row.want) {
 			for _, rolling := range []bool{false, true} {
@@ -76,6 +78,15 @@ func TestThreadStateMatrixAndViews(t *testing.T) {
 					if p != nil {
 						p.Number, p.URL = 7, "https://github.com/example/app/pull/7"
 						b.Notes = "PR: " + p.URL
+						if p.Gate != nil {
+							now := time.Now()
+							p.Gate.At = now
+							for i := range p.Gate.Reviews {
+								p.Gate.Reviews[i].SubmittedAt = now.Add(-time.Hour)
+							}
+						}
+						policy := tickerMergePolicy(cfg, b, *p)
+						p.Policy = &policy
 					}
 					var a *Agent
 					if row.agent != "" {
@@ -98,14 +109,14 @@ func TestThreadStateMatrixAndViews(t *testing.T) {
 					if classify(th) != want.group || sectionFor(s) != want.section {
 						t.Fatalf("adapters: group=%v section=%v; want %+v", classify(th), sectionFor(s), want)
 					}
-					assertThreadViews(t, th, want.group, want.section)
+					assertThreadViews(t, cfg, th, want.group, want.section)
 				})
 			}
 		}
 	}
 }
 
-func assertThreadViews(t *testing.T, th Thread, group Group, section Section) {
+func assertThreadViews(t *testing.T, cfg Config, th Thread, group Group, section Section) {
 	t.Helper()
 	b := th.Bead
 	st := TickerState{PRs: map[string]PR{}, Threads: map[string]Snapshot{}}
@@ -118,13 +129,13 @@ func assertThreadViews(t *testing.T, th Thread, group Group, section Section) {
 		snap.AgentStatus, snap.AgentSeq = th.Agent.Status, th.Agent.Seq
 	}
 	st.Threads[b.ID] = snap
-	in := digestInputs{open: []Bead{b}, agents: byName, branch: map[string]string{}, prs: map[string]DigestPR{}}
+	in := digestInputs{cfg: cfg, open: []Bead{b}, agents: byName, branch: map[string]string{}, prs: map[string]DigestPR{}}
 	if th.PR != nil {
 		st.PRs[b.ID] = *th.PR
 		in.branch[b.ID], in.prs[th.PR.URL] = th.PR.URL, digestObservation(*th.PR)
 	}
 	in.ticker = st
-	rows := buildRows(Config{}, boardData{Beads: []Bead{b}, Agents: agents, State: st}, sortPriority)
+	rows := buildRows(cfg, boardData{Beads: []Bead{b}, Agents: agents, State: st}, sortPriority)
 	if len(rows) != 2 || rows[1].group != group || rows[1].state.Kind != th.derived().Kind {
 		t.Fatalf("board disagrees: %+v, want %s", rows, group)
 	}
@@ -140,7 +151,7 @@ func assertThreadViews(t *testing.T, th Thread, group Group, section Section) {
 	if it.Section != section || it.State.Kind != th.derived().Kind || it.State.Waiting != th.derived().Waiting {
 		t.Fatalf("digest disagrees: %+v, want %+v", it, th.derived())
 	}
-	r := buildReport(t0, nil, []Bead{b}, nil, st, "topic/")
+	r := buildReportFor(cfg, t0, nil, []Bead{b}, nil, st)
 	if (len(r.NeedsYou) == 1) != (group == GroupNeedsYou) {
 		t.Fatalf("report needs-you disagrees: %+v", r)
 	}
@@ -150,7 +161,7 @@ func assertThreadViews(t *testing.T, th Thread, group Group, section Section) {
 		}
 	}
 	if th.derived().Kind != ThreadQueued {
-		out := renderContext(Config{}, []Thread{th}, nil, nil, nil, st, nil, t0)
+		out := renderContext(cfg, []Thread{th}, nil, nil, nil, st, nil, t0)
 		if group == GroupNoAgent {
 			if !strings.Contains(out, "1 no agent") || !strings.Contains(out, "claimed, no agent (1)") {
 				t.Fatalf("context summary disagrees: %s", out)
@@ -218,8 +229,11 @@ func TestBackgroundWakeSurvivesViewsUntilObservationChanges(t *testing.T) {
 
 func TestOnePRSelectorAcrossAdapters(t *testing.T) {
 	b := Bead{ID: "task-1", Status: StatusInProgress, Notes: "PR: https://github.com/example/app/pull/2\nPR: https://github.com/example/app/pull/3"}
+	now := time.Now()
 	own := *readyPR()
 	own.Number, own.URL, own.Head = 1, "https://github.com/example/app/pull/1", "topic/task-1-work"
+	own.Gate.At = now
+	own.Gate.Reviews[0].SubmittedAt = now.Add(-time.Hour)
 	older := PR{Number: 2, URL: "https://github.com/example/app/pull/2", State: "MERGED", MergedAt: t0.Add(-time.Hour)}
 	newer := PR{Number: 3, URL: "https://github.com/example/app/pull/3", State: "MERGED", MergedAt: t0}
 	for _, tc := range []struct {
@@ -234,10 +248,14 @@ func TestOnePRSelectorAcrossAdapters(t *testing.T) {
 			if !ok || selected.Number != tc.want {
 				t.Fatalf("ticker pick %+v", selected)
 			}
+			cfg := Config{BranchPrefix: "topic/"}
 			st := TickerState{PRs: map[string]PR{b.ID: selected}, MergedPRs: map[string][]PR{b.ID: merged}, Noted: byURL}
-			cached := threadFor(Config{}, st, b, nil)
-			if !reflect.DeepEqual(cached.PR, &selected) || !reflect.DeepEqual(cached.Merged, merged) {
-				t.Fatalf("cached picker lost metadata/order: %+v vs %+v", cached, selected)
+			cached := threadFor(cfg, st, b, nil)
+			wantPR := selected
+			policy := tickerMergePolicy(cfg, b, wantPR)
+			wantPR.Policy = &policy
+			if !reflect.DeepEqual(cached.PR, &wantPR) || !reflect.DeepEqual(cached.Merged, merged) {
+				t.Fatalf("cached picker lost metadata/order: %+v vs %+v", cached.PR, &wantPR)
 			}
 			light := map[string]DigestPR{}
 			for _, p := range []PR{own, older, newer} {

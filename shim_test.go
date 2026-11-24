@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // fakeLookup resolves every PR to acme/app with head sha, and the current
@@ -50,7 +51,7 @@ func TestLowerGH(t *testing.T) {
 		{argv: "pr merge --merge --match-head-commit=0123456 -d --subject=Ship -R acme/app", op: "github.pr.merge", target: "github:acme/app#55", head: sha, args: map[string]string{"method": "merge", "delete_branch": "true", "subject": "Ship"}},
 		{argv: "pr merge 55 -s --body-file -", op: "github.pr.merge", head: sha, args: map[string]string{"method": "squash", "body": "from stdin"}},
 		{argv: "pr merge 55 -s -F msg.txt", op: "github.pr.merge", head: sha, args: map[string]string{"method": "squash", "body": "from /work/msg.txt"}},
-		{argv: "pr merge 55 --squash --admin", op: opOpaque},
+		{argv: "pr merge 55 --squash --admin", wantErr: "--admin is not allowed"},
 		{argv: "pr merge 55 56 --squash", op: opOpaque},
 		{argv: "pr merge 55 --disable-auto"},
 		{argv: "pr merge 55 --squash --rebase", wantErr: "only one of"},
@@ -219,9 +220,9 @@ func newRunFixture(t *testing.T, sock string) *runFixture {
 func TestRunCmd(t *testing.T) {
 	merge := []string{"--", "gh", "pr", "merge", "55", "--squash"}
 
-	// No socket: not a routed worker, so the real gh runs.
+	// No socket: never let a merge escape the executor policy.
 	f := newRunFixture(t, "")
-	if err := runCmd(merge, f.r); err != nil || len(f.sent) != 0 || len(f.replaced) == 0 || !strings.HasSuffix(f.replaced[0], "/gh") || strings.Join(f.replaced[1:], " ") != "gh pr merge 55 --squash" {
+	if err := runCmd(merge, f.r); err == nil || len(f.sent) != 0 || len(f.replaced) != 0 {
 		t.Errorf("no socket: err %v, sent %d, replaced %v", err, len(f.sent), f.replaced)
 	}
 
@@ -254,10 +255,10 @@ func TestRunCmd(t *testing.T) {
 		t.Errorf("waiting: err %v, out %q", err, f.out.String())
 	}
 
-	// No executor on the socket: advisory, so the real gh runs, with a warning.
+	// No executor on the socket: fail closed, without a raw gh fallback.
 	f = newRunFixture(t, "/run/b-1.sock")
 	f.callErr = fmt.Errorf("dial: %w", syscall.ECONNREFUSED)
-	if err := runCmd(merge, f.r); err != nil || len(f.replaced) == 0 || !strings.Contains(f.err.String(), "no executor") {
+	if err := runCmd(merge, f.r); err == nil || len(f.replaced) != 0 || !strings.Contains(err.Error(), "no executor") {
 		t.Errorf("no executor: err %v, replaced %v, stderr %q", err, f.replaced, f.err.String())
 	}
 
@@ -279,6 +280,9 @@ func (g *fakeGH) run(_ context.Context, dir string, args ...string) ([]byte, err
 	if len(args) > 1 && args[0] == "pr" && args[1] == "view" {
 		return json.Marshal(g.pr)
 	}
+	if len(args) > 1 && args[0] == "api" && args[1] == "graphql" {
+		return gateJSON(g.pr.Gate), g.err
+	}
 	g.calls = append(g.calls, append([]string{"dir=" + dir}, args...))
 	return []byte("ok"), g.err
 }
@@ -288,13 +292,17 @@ func mergeStep(op string) Step {
 }
 
 func greenPR() PR {
-	return PR{State: "OPEN", HeadSHA: sha, ReviewDecision: "APPROVED", MergeState: "CLEAN", Checks: []Check{{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"}}}
+	pr := *readyPR()
+	pr.HeadSHA, pr.Gate.Head, pr.Gate.Reviews[0].Commit.OID = sha, sha, sha
+	pr.Gate.At = time.Now()
+	pr.Gate.Reviews[0].SubmittedAt = time.Now().Add(-time.Hour)
+	return pr
 }
 
 func TestMergeRunner(t *testing.T) {
 	ctx := context.Background()
 	g := &fakeGH{pr: greenPR()}
-	m := mergeRunner{gh: g.run}
+	m := mergeRunner{gh: g.run, policy: func(PR) MergePolicy { return MergePolicy{Allowed: true} }}
 	s := mergeStep("github.pr.merge")
 	if err := m.pre(ctx, s); err != nil {
 		t.Fatalf("green PR: %v", err)
@@ -352,16 +360,22 @@ func TestMergeRunner(t *testing.T) {
 		t.Error("merged at another head counted")
 	}
 
-	// Auto-merge: no review or checks needed yet; on at the head is done.
-	a := mergeRunner{auto: true, gh: g.run}
+	// Policy B auto-merge: kept where GitHub requires an approving review,
+	// refused where the base branch requires no review.
+	a := mergeRunner{auto: true, gh: g.run, policy: m.policy}
 	as := mergeStep("github.pr.automerge")
 	g.pr = greenPR()
-	g.pr.ReviewDecision, g.pr.MergeState = "REVIEW_REQUIRED", "BLOCKED"
+	g.pr.ReviewDecision, g.pr.MergeState, g.pr.Gate.Reviews = "", "CLEAN", nil
+	if err := a.pre(ctx, as); !errors.Is(err, errUnmet) {
+		t.Errorf("unprotected auto-merge pre: %v", err)
+	}
+	g.pr = greenPR()
+	g.pr.ReviewDecision, g.pr.MergeState, g.pr.Gate.Reviews = "REVIEW_REQUIRED", "BLOCKED", nil
 	if err := a.pre(ctx, as); err != nil {
-		t.Errorf("auto-merge pre: %v", err)
+		t.Errorf("review-required auto-merge pre: %v", err)
 	}
 	g.calls = nil
-	if _, err := a.do(ctx, as, ""); err != nil || !strings.Contains(strings.Join(g.calls[0], " "), "--squash --auto") {
+	if _, err := a.do(ctx, as, ""); err != nil || len(g.calls) != 1 || !strings.Contains(strings.Join(g.calls[0], " "), "--squash --auto") {
 		t.Errorf("auto-merge do: %v %v", err, g.calls)
 	}
 	g.pr.AutoMerge = &AutoMerge{Method: "SQUASH"}
@@ -378,11 +392,11 @@ func TestOpaqueRunner(t *testing.T) {
 	g := &fakeGH{}
 	o := opaqueRunner{run: g.run}
 	l, _ := fakeLookup()
-	s, _, _ := opaqueGH([]string{"pr", "merge", "55", "--admin", "--squash"}, l, "test")
+	s, _, _ := opaqueGH([]string{"pr", "merge", "55", "--future", "--squash"}, l, "test")
 	if err := o.pre(ctx, s); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := o.do(ctx, s, ""); err != nil || strings.Join(g.calls[0], " ") != "dir=/work pr merge 55 --admin --squash" {
+	if _, err := o.do(ctx, s, ""); err != nil || strings.Join(g.calls[0], " ") != "dir=/work pr merge 55 --future --squash" {
 		t.Errorf("ran %v, %v", g.calls, err)
 	}
 	if o.retrySafe() {

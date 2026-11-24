@@ -314,9 +314,9 @@ func (f *flagArgs) value() (string, bool) {
 
 var mergeMethods = map[string]string{"--squash": "squash", "-s": "squash", "--merge": "merge", "-m": "merge", "--rebase": "rebase", "-r": "rebase"}
 
-// lowerPRMerge lowers gh pr merge. A flag it doesn't know, such as --admin,
-// makes the step opaque; --disable-auto, which only turns auto-merge off,
-// runs unchanged.
+// lowerPRMerge lowers gh pr merge. Unknown flags are opaque; --admin is
+// refused, not an approval escape hatch. --disable-auto only turns it off
+// and runs unchanged.
 func lowerPRMerge(args []string, l ghLookup) (Step, bool, error) {
 	s := Step{Op: "github.pr.merge", Args: map[string]string{}, Pre: map[string]string{}}
 	var sel, repo, head string
@@ -344,6 +344,8 @@ func lowerPRMerge(args []string, l ghLookup) (Step, bool, error) {
 			continue
 		}
 		switch name {
+		case "--admin":
+			return Step{}, false, errors.New("gh pr merge: --admin is not allowed")
 		case "--auto":
 			s.Op = "github.pr.automerge"
 			continue
@@ -556,8 +558,8 @@ func liveShimRun() shimRun {
 
 // runCmd is `quartermaster run -- <tool> <argv>`, what a shim runs: lower the
 // argv and send it to the executor on the bead's socket, or run the real tool
-// when the argv is outside the table, the worker has no socket, or no
-// executor answers.
+// when the argv is outside the table. Recognized GitHub mutations fail
+// closed without an executor; other tools retain their advisory fallback.
 func runCmd(args []string, r shimRun) error {
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
@@ -574,7 +576,7 @@ func runCmd(args []string, r shimRun) error {
 		return r.replace(bin, args)
 	}
 	sock := r.getenv("QUARTERMASTER_EXEC_SOCKET")
-	if sock == "" || !slices.Contains(shimTools, tool) {
+	if !slices.Contains(shimTools, tool) || (sock == "" && tool != "gh") {
 		return passThrough()
 	}
 	var s Step
@@ -594,6 +596,9 @@ func runCmd(args []string, r shimRun) error {
 	if !ok {
 		return passThrough()
 	}
+	if sock == "" {
+		return errors.New("no executor socket: refusing GitHub mutation without its merge policy")
+	}
 	p := Plan{Actor: strings.TrimSpace("worker " + r.getenv("HERDR_PANE_ID")), Source: "shim", Steps: []Step{s}}
 	data, err := json.Marshal(p)
 	if err != nil {
@@ -601,6 +606,9 @@ func runCmd(args []string, r shimRun) error {
 	}
 	resp, err := r.call(sock, execRequest{Run: data})
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
+		if tool == "gh" {
+			return fmt.Errorf("no executor on %s: refusing GitHub mutation without its merge policy: %w", sock, err)
+		}
 		fmt.Fprintf(r.stderr, "quartermaster: no executor on %s; running %s directly (advisory)\n", sock, tool)
 		return passThrough()
 	}

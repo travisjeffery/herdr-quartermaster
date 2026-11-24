@@ -8,9 +8,15 @@ import (
 
 func TestInboxReadyAfterTickerResumesAnsweredWorker(t *testing.T) {
 	tk, st, _ := inboxTickerFixture(t)
-	t.Setenv("FIXTURE_ACTIVE", `[{"id":"task-one","status":"needs_me"}]`)
+	now := time.Now()
+	pr := readyPR()
+	pr.URL = "https://github.com/example/app/pull/7"
+	pr.Head = "tj/task-one-work"
+	pr.Gate.At = now
+	pr.Gate.Reviews[0].SubmittedAt = now.Add(-time.Hour)
+	t.Setenv("FIXTURE_ACTIVE", `[{"id":"task-one","status":"needs_me","notes":"PR: https://github.com/example/app/pull/7"}]`)
 	t.Setenv("FAKE_LOCAL_AGENTS", `[{"name":"task-one","agent_status":"working","pane_id":"w1:p1","state_change_seq":2}]`)
-	th := thread(Bead{ID: "task-one", Status: StatusNeedsMe}, &Agent{Status: "idle", Seq: 1}, readyPR())
+	th := thread(Bead{ID: "task-one", Status: StatusNeedsMe, Notes: "PR: " + pr.URL}, &Agent{Status: "idle", Seq: 1}, pr)
 	st.PRs[th.Bead.ID] = *th.PR
 	st.Threads[th.Bead.ID] = snapshot(th, Snapshot{}, t0)
 	if err := tk.once(st); err != nil {
@@ -20,7 +26,7 @@ func TestInboxReadyAfterTickerResumesAnsweredWorker(t *testing.T) {
 		t.Fatalf("ticker resume prematurely baselined ready notice: %+v", snap)
 	}
 	// The first pass persisted in_progress; the next observation returns it.
-	t.Setenv("FIXTURE_ACTIVE", `[{"id":"task-one","status":"in_progress"}]`)
+	t.Setenv("FIXTURE_ACTIVE", `[{"id":"task-one","status":"in_progress","notes":"PR: https://github.com/example/app/pull/7"}]`)
 	if err := tk.once(st); err != nil {
 		t.Fatal(err)
 	}

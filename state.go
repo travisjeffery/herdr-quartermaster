@@ -185,6 +185,8 @@ type Snapshot struct {
 	// AutoMerge is the URL of the open PR last seen with auto-merge on, so the
 	// worker hears once when GitHub turns it off.
 	AutoMerge string `json:"auto_merge,omitempty"`
+	// UnsafeAutoKey deduplicates warnings for native auto on an ineligible head.
+	UnsafeAutoKey string `json:"unsafe_auto_key,omitempty"`
 	// PromptHash is the approval prompt last announced, so each prompt a
 	// blocked agent shows reaches the inbox once. For a blocked agent whose
 	// prompt cannot be parsed it holds promptUnparsedKey once that prompt
@@ -215,21 +217,22 @@ type Snapshot struct {
 type EventKind string
 
 const (
-	EventNeedsYou     EventKind = "needs_you"
-	EventFailing      EventKind = "checks_failing"
-	EventReview       EventKind = "new_review"
-	EventMerged       EventKind = "merged"
-	EventReady        EventKind = "ready_to_merge"
-	EventFinished     EventKind = "finished"
-	EventAgentGone    EventKind = "agent_gone"
-	EventResumed      EventKind = "resumed"
-	EventRunSucceeded EventKind = "run_succeeded"
-	EventRunFailed    EventKind = "run_failed"
-	EventLikelyStale  EventKind = "likely_stale"
-	EventAutoClosed   EventKind = "auto_closed"
-	EventAutoMergeOff EventKind = "auto_merge_off"
-	EventLeaseExpired EventKind = "lease_expired"
-	EventBreaker      EventKind = "breaker_tripped"
+	EventNeedsYou        EventKind = "needs_you"
+	EventFailing         EventKind = "checks_failing"
+	EventReview          EventKind = "new_review"
+	EventMerged          EventKind = "merged"
+	EventReady           EventKind = "ready_to_merge"
+	EventFinished        EventKind = "finished"
+	EventAgentGone       EventKind = "agent_gone"
+	EventResumed         EventKind = "resumed"
+	EventRunSucceeded    EventKind = "run_succeeded"
+	EventRunFailed       EventKind = "run_failed"
+	EventLikelyStale     EventKind = "likely_stale"
+	EventAutoClosed      EventKind = "auto_closed"
+	EventAutoMergeOff    EventKind = "auto_merge_off"
+	EventUnsafeAutoMerge EventKind = "unsafe_auto_merge"
+	EventLeaseExpired    EventKind = "lease_expired"
+	EventBreaker         EventKind = "breaker_tripped"
 )
 
 type Event struct {
@@ -490,6 +493,7 @@ func snapshotDebounced(t Thread, prev Snapshot, now time.Time, debounce, flap ti
 	case s.NeedsMe:
 		s.Asked = prev.Asked
 	}
+	s.UnsafeAutoKey = unsafeAutoKey(t)
 	s.Merged, s.MergedTracked = slices.Clone(prev.Merged), true
 	for _, pr := range mergedPRs(t) {
 		if !slices.Contains(s.Merged, pr.URL) {
@@ -532,6 +536,14 @@ func transitionDebounced(t Thread, prev Snapshot, first bool, now time.Time, deb
 	g := classify(t)
 	ev := func(k EventKind, format string, a ...any) {
 		o.Events = append(o.Events, Event{Bead: id, Kind: k, Summary: fmt.Sprintf(format, a...), At: now, Clears: eventCondition(t, k)})
+	}
+	// Warn only when native auto-merge is newly armed on a base branch that
+	// requires no approving review (never on first sight or for PRs already
+	// armed before this check).
+	if k := unsafeAutoKey(t); k != "" && k != prev.UnsafeAutoKey && prev.AutoMerge != t.PR.URL {
+		o.Notify = true
+		ev(EventUnsafeAutoMerge, "PR #%d has unsafe native auto-merge enabled", t.PR.Number)
+		o.Prompts = append(o.Prompts, fmt.Sprintf(unsafeAutoPrompt+"%s: the base branch requires no approving review and the current head is not authorized and ready. Disable it with `gh pr merge %s --disable-auto`. This warning grants no merge permission.", k, t.PR.URL))
 	}
 	// Only a needs_me that was already settled, with the agent at rest, counts:
 	// the turn that asked the question is itself still working.
@@ -613,12 +625,13 @@ func transitionDebounced(t Thread, prev Snapshot, first bool, now time.Time, deb
 			}
 		}
 		// GitHub turns auto-merge off when the base branch changes or someone
-		// without write access pushes. A draft or a PR waiting on a human
-		// decision is meant to have it off.
-		if prev.AutoMerge != "" && prev.AutoMerge == t.PR.URL && t.PR.AutoMerge == nil && !t.PR.IsDraft && t.Bead.Status != StatusNeedsMe {
+		// without write access pushes. A draft, a PR waiting on a human
+		// decision, or a PR on a branch requiring no approving review is meant
+		// to have it off.
+		if prev.AutoMerge != "" && prev.AutoMerge == t.PR.URL && t.PR.AutoMerge == nil && !t.PR.IsDraft && t.Bead.Status != StatusNeedsMe && requiresGitHubReview(t.PR) {
 			ev(EventAutoMergeOff, "PR #%d auto-merge was turned off", t.PR.Number)
 			o.Prompts = append(o.Prompts, fmt.Sprintf(
-				"[quartermaster: automated, not the user] PR #%d no longer has auto-merge on; GitHub turns it off when the base branch changes or someone without write access pushes. Unless you turned it off on purpose, turn it back on with `gh pr merge %s --auto --squash`.",
+				"[quartermaster: automated, not the user] PR #%d no longer has auto-merge on; GitHub turns it off when the base branch changes or someone without write access pushes. If you disabled it intentionally, leave it off; otherwise turn it back on with `gh pr merge %s --auto --squash` once your merge check passes.",
 				t.PR.Number, t.PR.URL))
 		}
 	}
@@ -741,16 +754,42 @@ func freshPending(t Thread, pending []string) []string {
 				continue
 			}
 		}
+		if rest, ok := strings.CutPrefix(p, unsafeAutoPrompt); ok {
+			if k := unsafeAutoKey(t); k == "" || !strings.HasPrefix(rest, k+":") {
+				continue
+			}
+		}
 		keep = append(keep, p)
 	}
 	return keep
+}
+
+const unsafeAutoPrompt = "[" + toolName + ": automated, not the user] Native auto-merge on PR #"
+
+// unsafeAutoKey names an open PR with native auto-merge armed on a base branch
+// that requires no approving review (unless the current head is already
+// authorized and ready to merge).
+func unsafeAutoKey(t Thread) string {
+	if t.PR == nil || t.PR.State != "OPEN" || t.PR.AutoMerge == nil {
+		return ""
+	}
+	if requiresGitHubReview(t.PR) {
+		return ""
+	}
+	if t.Bead.Status == StatusInProgress && readyToMerge(t.PR, t.Checks) {
+		return ""
+	}
+	return fmt.Sprintf("%d@%s", t.PR.Number, t.PR.HeadSHA)
 }
 
 func approval(pr *PR) string {
 	if pr.ReviewDecision == "APPROVED" {
 		return "approved"
 	}
-	return "no review required"
+	if pr.Gate != nil && freshApproval(pr.Gate.Reviews, pr.Gate) {
+		return "current-head approved"
+	}
+	return "approval required by policy"
 }
 
 // deliverable reports whether the ticker may type into an agent now: it has

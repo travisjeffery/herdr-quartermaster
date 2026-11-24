@@ -47,7 +47,10 @@ func TestAutoNotes(t *testing.T) {
 func TestBriefDial(t *testing.T) {
 	s := brief(bead(StatusInProgress), "tj/x", "/w/x", "", "")
 	for _, want := range []string{
-		"once `quartermaster autonomy check backend-ab12 --action merge` passes: `gh pr merge <url> --auto --squash`",
+		"and then run `quartermaster autonomy check backend-ab12 --action merge`",
+		"independent approval of the exact current head",
+		"never use `--admin`",
+		"Do not arm `--auto` when the base branch requires no approving review",
 		"quartermaster autonomy check backend-ab12 --class 2",
 		"quartermaster autonomy check backend-ab12 --class N",
 		"quartermaster autonomy check backend-ab12 --action apply --target <stack>",
