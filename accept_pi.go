@@ -37,18 +37,7 @@ func piVerifierCommand(model string) []string {
 // configuration. Authentication and provider selection stay with pi; no
 // credentials are copied, printed, or reconfigured here.
 func piVerifierEnv(env []string) []string {
-	out := make([]string, 0, len(env)+1)
-	for _, kv := range env {
-		k, _, _ := strings.Cut(kv, "=")
-		switch k {
-		case "PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL",
-			"PI_CODING_AGENT_SESSION_DIR", "HERDR_ENV", "HERDR_PANE_ID", "RIPGREP_CONFIG_PATH",
-			"QUARTERMASTER_BEAD":
-			continue
-		}
-		out = append(out, kv)
-	}
-	return out
+	return scrubVerifierEnv(env)
 }
 
 // Keep output bounded even for a broken child. Writes still report success so
@@ -172,21 +161,21 @@ func parsePiVerifierOutput(out string) (string, error) {
 	if stop != "stop" || finalHasTools {
 		return bad("has no completed final assistant message")
 	}
-	// Require the final line, not an earlier candidate that the verifier then
-	// retracted. The legacy command parser keeps its existing wire contract.
-	lines := strings.Split(strings.TrimSpace(final), "\n")
-	last := strings.TrimSpace(lines[len(lines)-1])
-	if !strings.HasPrefix(last, "VERDICT ") {
+	// Require a terminal VERDICT at the end of the final assistant message,
+	// not an earlier candidate that the verifier then retracted.
+	payload, ok := extractTerminalVerdict(final)
+	if !ok {
 		return bad("final assistant message has no terminal VERDICT")
 	}
-	res, err := parseVerdict(last)
+	normalized := "VERDICT " + payload
+	res, err := parseVerdict(normalized)
 	if err != nil {
 		return bad("final VERDICT is malformed")
 	}
 	if res.Verdict == "pass" && !readEvidence {
 		return bad("claimed pass without a successful evidence read")
 	}
-	return last, nil
+	return normalized, nil
 }
 
 func validatePiVerdict(r verifierResult, criteria []string) error {

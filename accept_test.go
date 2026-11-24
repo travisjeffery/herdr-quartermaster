@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestAcceptanceCriteria(t *testing.T) {
@@ -74,6 +78,255 @@ func TestParseVerdict(t *testing.T) {
 		if r.passed() {
 			t.Fatalf("%+v should not pass", r)
 		}
+	}
+}
+
+func TestParseVerdictFormattingAndSafety(t *testing.T) {
+	payload := `{"verdict":"pass","derived":false,"criteria":[{"criterion":"run green","pass":true,"evidence":"checked ` + "`main`" + `"}]}`
+	accepted := map[string]string{
+		"plain":                  "summary\nVERDICT " + payload + "\n",
+		"crlf":                   "summary\r\nVERDICT " + payload + "\r\n",
+		"colon":                  "summary\nVERDICT: " + payload,
+		"tab":                    "summary\nVERDICT\t" + payload,
+		"inline backticks":       "summary\n`VERDICT " + payload + "`\n",
+		"bold whole line":        "summary\n**VERDICT " + payload + "**\n",
+		"bold label":             "summary\n**VERDICT** " + payload,
+		"bold label colon":       "summary\n**VERDICT:** " + payload,
+		"bold label outer colon": "summary\n**VERDICT**: " + payload,
+		"backticked label":       "summary\n`VERDICT` " + payload,
+		"backticked json":        "summary\nVERDICT `" + payload + "`",
+		"fenced plain":           "summary\n```\nVERDICT " + payload + "\n```\n",
+		"fenced json":            "summary\n```json\nVERDICT " + payload + "\n```\n",
+		"tilde fence":            "summary\n~~~\nVERDICT: " + payload + "\n~~~\n",
+		"header before fence":    "summary\n**VERDICT:**\n```json\n{\n  \"verdict\": \"pass\",\n  \"derived\": false,\n  \"criteria\": [{\"criterion\": \"run green\", \"pass\": true, \"evidence\": \"ok\"}]\n}\n```\n",
+		"multiline json":         "summary\nVERDICT {\n  \"verdict\": \"pass\",\n  \"derived\": false,\n  \"criteria\": [{\"criterion\": \"run green\", \"pass\": true, \"evidence\": \"ok\"}]\n}\n",
+		"header then multiline":  "summary\nVERDICT:\n{\n  \"verdict\": \"pass\",\n  \"derived\": false,\n  \"criteria\": [{\"criterion\": \"run green\", \"pass\": true, \"evidence\": \"ok\"}]\n}\n",
+	}
+	for name, out := range accepted {
+		t.Run("accept/"+name, func(t *testing.T) {
+			r, err := parseVerdict(out)
+			if err != nil || !r.passed() {
+				t.Fatalf("parseVerdict(%s) = %+v, %v", name, r, err)
+			}
+		})
+	}
+
+	rejected := map[string]struct {
+		out  string
+		want string
+	}{
+		"empty":                  {out: "   \n\t ", want: "empty output"},
+		"prose no verdict":       {out: "checked everything\nlooks good", want: "tail: checked everything looks good"},
+		"trailing prose retract": {out: passOut + "\nActually, do not close.", want: "verifier gave no VERDICT line"},
+		"quoted file pass":       {out: "File contained:\n> " + passOut, want: "verifier gave no VERDICT line"},
+		"bulleted pass":          {out: "- " + passOut, want: "verifier gave no VERDICT line"},
+		"midline pass":           {out: "Saw " + passOut, want: "verifier gave no VERDICT line"},
+		"trailing tokens":        {out: passOut + " extra", want: "not JSON"},
+		"invalid json":           {out: "VERDICT {broken", want: "not JSON"},
+		"null payload":           {out: "VERDICT null", want: "not JSON"},
+		"array payload":          {out: "VERDICT []", want: "not JSON"},
+		"missing verdict field":  {out: `VERDICT {"criteria":[]}`, want: `must be "pass" or "fail"`},
+		"invalid verdict enum":   {out: `VERDICT {"verdict":"maybe","criteria":[]}`, want: `must be "pass" or "fail"`},
+		"retracted before brace": {out: passOut + "\nWait, config has {\"broken\": true}", want: "not JSON"},
+		"unclosed fence":         {out: "```\n" + passOut + "\n", want: "verifier gave no VERDICT line"},
+		"fence without header":   {out: "```json\n" + payload + "\n```", want: "verifier gave no VERDICT line"},
+		"prose after fence":      {out: "```\n" + passOut + "\n```\nNot done yet.", want: "verifier gave no VERDICT line"},
+	}
+	for name, tc := range rejected {
+		t.Run("reject/"+name, func(t *testing.T) {
+			if r, err := parseVerdict(tc.out); err == nil {
+				t.Fatalf("accepted %s: %+v", name, r)
+			} else if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("%s: err = %q, want substring %q", name, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestVerifierDiagnosticSanitization(t *testing.T) {
+	raw := "\x1b[31mERROR\x1b[0m\n" +
+		"Authorization: Bearer top-secret-bearer-token-12345\n" +
+		"token=ghp_1234567890abcdef123456\n" +
+		"github_pat_abcdef1234567890\n" +
+		"AKIAIOSFODNN7EXAMPLE\n" +
+		"AIzaSyD-1234567890abcdefGHIJKL\n" +
+		"lin_api_secretkey1234567890\n" +
+		"ya29.a0AfH6SMBx1234567890abcdef\n" +
+		"https://alice:hunter2@example.com/path\n" +
+		"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\n" +
+		strings.Repeat("x", verifierDiagnosticLimit+200)
+
+	for _, got := range []string{
+		verifierHeadExcerpt(raw, verifierDiagnosticLimit),
+		verifierTailExcerpt(raw, verifierDiagnosticLimit),
+	} {
+		for _, leak := range []string{
+			"\x1b", "[31m", "\n",
+			"top-secret-bearer", "ghp_123456", "github_pat_abcdef",
+			"AKIAIOSFODNN7EXAMPLE", "AIzaSyD-", "lin_api_secretkey",
+			"ya29.a0AfH6", "hunter2", "MIIEowIBAAKCAQEA", "PRIVATE KEY",
+		} {
+			if strings.Contains(got, leak) {
+				t.Errorf("diagnostic leaked %q: %s", leak, got)
+			}
+		}
+		if utf8.RuneCountInString(got) > verifierDiagnosticLimit+3 {
+			t.Errorf("diagnostic exceeded bound: %d runes", utf8.RuneCountInString(got))
+		}
+	}
+	// Redaction happens before truncation even when a secret straddles the boundary.
+	straddle := strings.Repeat("a", verifierDiagnosticLimit-5) + " ghp_secretvalue1234567890"
+	got := verifierHeadExcerpt(straddle, verifierDiagnosticLimit)
+	if strings.Contains(got, "ghp_") || strings.Contains(got, "secretvalue") {
+		t.Fatalf("truncated before redacting: %q", got)
+	}
+}
+
+func TestVerifierEnvIsolation(t *testing.T) {
+	in := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/test",
+		"BEADS_DIR=/repo/.beads",
+		"BEADS_ACTOR=worker",
+		"HERDR_ENV=1",
+		"HERDR_PANE_ID=w1:p1",
+		"HERDR_TAB_ID=w1:t1",
+		"HERDR_WORKSPACE_ID=w1",
+		"HERDR_SOCKET_PATH=/tmp/herdr.sock",
+		"QUARTERMASTER_BEAD=b-1",
+		"ANTIGRAVITY_AGENT=1",
+		"ANTIGRAVITY_APP_DATA_DIR=/tmp/acp",
+		"ANTIGRAVITY_CONVERSATION_ID=conv-1",
+		"ANTIGRAVITY_LS_ADDRESS=localhost:12345",
+		"ANTIGRAVITY_CSRF_TOKEN=secret",
+		"ANTIGRAVITY_SOURCE_METADATA={}",
+		"CLAUDECODE=1",
+		"CLAUDE_CODE_ENTRYPOINT=cli",
+		"PI_CODING_AGENT=true",
+		"PI_EMPHASIS_GUIDANCE=0",
+		"PI_MODEL=worker-model",
+		"PI_SESSION_ID=sess-1",
+		"PI_CODING_AGENT_DIR=/auth-home",
+		"RIPGREP_CONFIG_PATH=/unsafe/rg",
+		"GEMINI_API_KEY=keep-auth",
+		"ANTHROPIC_API_KEY=keep-auth",
+	}
+	got := verifierEnv(in)
+	want := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/test",
+		"BEADS_DIR=/repo/.beads",
+		"HERDR_SOCKET_PATH=/tmp/herdr.sock",
+		"PI_CODING_AGENT_DIR=/auth-home",
+		"GEMINI_API_KEY=keep-auth",
+		"ANTHROPIC_API_KEY=keep-auth",
+		"BEADS_ACTOR=verifier",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("verifierEnv:\ngot  %v\nwant %v", got, want)
+	}
+}
+
+func TestRunVerifierScrubsEnvAndSurfacesExitZeroStderr(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "verifier.sh")
+	script := `#!/bin/sh
+env > "$FIXTURE/env.txt"
+printf '%s' "$FIXTURE_STDOUT"
+printf '%s' "$FIXTURE_STDERR" >&2
+exit "$FIXTURE_EXIT"
+`
+	if err := os.WriteFile(stub, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FIXTURE", dir)
+	t.Setenv("ANTIGRAVITY_CONVERSATION_ID", "parent-conv")
+	t.Setenv("ANTIGRAVITY_LS_ADDRESS", "localhost:9999")
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("PI_CODING_AGENT", "true")
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_PANE_ID", "w1:p9")
+	t.Setenv("QUARTERMASTER_BEAD", "b-parent")
+	t.Setenv("BEADS_ACTOR", "worker")
+
+	cfg := VerifierConfig{Command: []string{stub}}
+
+	// Case 1: exit 0, empty stdout, permission auto-deny on stderr (plus secret).
+	t.Setenv("FIXTURE_EXIT", "0")
+	t.Setenv("FIXTURE_STDOUT", "")
+	t.Setenv("FIXTURE_STDERR", "tool required \"command\" permission, auto-denied Bearer secret-token-abc\n")
+	out, err := runVerifier(cfg, dir, "prompt")
+	if !errors.Is(err, errVerifierOutput) || out != "" {
+		t.Fatalf("exit-0 empty stdout with stderr: out=%q err=%v", out, err)
+	}
+	if !strings.Contains(err.Error(), "empty output") || !strings.Contains(err.Error(), "auto-denied") {
+		t.Fatalf("missing diagnostic details: %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-token-abc") {
+		t.Fatalf("stderr leaked secret: %v", err)
+	}
+
+	// Verify nested worker/agent env vars were scrubbed and BEADS_ACTOR=verifier set.
+	envBytes, err := os.ReadFile(filepath.Join(dir, "env.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	envText := string(envBytes)
+	for _, forbidden := range []string{
+		"ANTIGRAVITY_CONVERSATION_ID=", "ANTIGRAVITY_LS_ADDRESS=",
+		"CLAUDECODE=", "PI_CODING_AGENT=", "HERDR_ENV=", "HERDR_PANE_ID=",
+		"QUARTERMASTER_BEAD=", "BEADS_ACTOR=worker",
+	} {
+		if strings.Contains(envText, forbidden) {
+			t.Errorf("verifier inherited %q", forbidden)
+		}
+	}
+	if !strings.Contains(envText, "BEADS_ACTOR=verifier\n") {
+		t.Errorf("BEADS_ACTOR=verifier not set in child env")
+	}
+
+	// Case 2: valid VERDICT succeeds even when stderr has benign progress output.
+	t.Setenv("FIXTURE_STDOUT", "checked\n```json\n"+passOut+"\n```\n")
+	t.Setenv("FIXTURE_STDERR", "Working...\n")
+	out, err = runVerifier(cfg, dir, "prompt")
+	if err != nil {
+		t.Fatalf("valid fenced verdict with benign stderr failed: %v", err)
+	}
+	res, err := parseVerdict(out)
+	if err != nil || !res.passed() {
+		t.Fatalf("parseVerdict failed: %+v %v", res, err)
+	}
+
+	// Case 3: nonzero exit redacts secrets in stderr.
+	t.Setenv("FIXTURE_EXIT", "1")
+	t.Setenv("FIXTURE_STDOUT", "")
+	t.Setenv("FIXTURE_STDERR", "failed with token=ghp_1234567890abcdef123456\n")
+	_, err = runVerifier(cfg, dir, "prompt")
+	if err == nil || errors.Is(err, errVerifierOutput) {
+		t.Fatalf("nonzero exit should be a launch/provider error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "ghp_123456") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("nonzero stderr not sanitized: %v", err)
+	}
+}
+
+func TestRunVerifierCustomCommandTimeoutKillsHelpers(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "hang.sh")
+	script := "#!/bin/sh\n(sleep 1; printf escaped > \"$FIXTURE/escaped\") &\nwait\n"
+	if err := os.WriteFile(stub, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FIXTURE", dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := runVerifierContext(ctx, VerifierConfig{Command: []string{stub}}, dir, "prompt")
+	if err == nil || errors.Is(err, errVerifierOutput) {
+		t.Fatalf("timeout should return a launch/timeout error, got %v", err)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(dir, "escaped")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("helper survived custom verifier timeout")
 	}
 }
 
@@ -270,6 +523,16 @@ func TestCloseRefusals(t *testing.T) {
 	f = &fakeClose{bead: noPRBead(), runErr: errors.New("claude: not found")}
 	if err := closeBead(defaultConfig(), f.env(), "backend-ab12", "r", "worker", io.Discard); err == nil || f.closed != "" || len(f.journal) != 0 {
 		t.Fatalf("err=%v closed=%q journal=%v", err, f.closed, f.journal)
+	}
+	// Exit-0 verifier output failure carrying stderr spends a round and surfaces
+	// the diagnostic in both stdout and the VERIFY: fail note.
+	f = &fakeClose{bead: noPRBead(), runErr: errors.Join(errVerifierOutput, errors.New(`verifier gave no VERDICT line (empty output) (stderr: tool required "command" permission)`))}
+	var diagOut strings.Builder
+	if err := closeBead(defaultConfig(), f.env(), "backend-ab12", "r", "worker", &diagOut); !errors.Is(err, errVerifyFailed) || f.closed != "" || len(f.journal) != 1 {
+		t.Fatalf("err=%v closed=%q journal=%v", err, f.closed, f.journal)
+	}
+	if !strings.Contains(diagOut.String(), `tool required "command" permission`) || !strings.Contains(f.notes[0], `tool required "command" permission`) {
+		t.Fatalf("stderr diagnostic not surfaced: out=%q notes=%q", diagOut.String(), f.notes)
 	}
 }
 
