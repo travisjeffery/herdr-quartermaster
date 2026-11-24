@@ -893,6 +893,16 @@ minutes = 15              # one run's time limit
 allow_cmd = false         # fail closed: cmd watches are refused unless explicitly enabled
 # max_concurrent = 4      # max probes evaluated in parallel per ticker pass
 
+[desktop]                 # event-driven desktop notifications via notify-send (docs/desktop-alerts.md)
+enabled = true            # defaults are all true; set individual keys false to silence
+pr_merged = true          # PR merged
+pr_green = true           # open non-draft PR checks green & awaiting review
+pr_ready = true           # open PR ready to merge
+needs_me = true           # bead enters needs_me or worker hits an approval prompt
+blocked = true            # bead enters blocked status
+needs_me_summary = true   # include bead ID + 1-line sanitized summary (never tap URLs or secrets)
+cooldown_seconds = 60     # minimum interval between desktop alerts; bursts coalesce (0 disables)
+
 [stall_retry]             # bounded ticker auto-retry when a pi worker stops on a transient ACP stall
 max_retries = 2           # max auto-nudges per stall episode before escalating to inbox; 0 disables
 backoff_seconds = 30      # base cooldown before retrying; doubles per attempt (30s, 60s, ...), capped at 10m

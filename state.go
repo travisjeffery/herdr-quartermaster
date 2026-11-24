@@ -176,6 +176,12 @@ type Snapshot struct {
 	// ReadyKey is the PR and head commit last seen ready to merge (readyKey),
 	// so ready_to_merge fires once per push and again for a replacement PR.
 	ReadyKey string `json:"ready_key,omitempty"`
+	// GreenKey is the PR and head commit last seen green and awaiting review
+	// (greenKey), so the green-PR desktop milestone fires once per head.
+	// GreenTracked marks a snapshot that kept it; pre-upgrade snapshots
+	// baseline without announcing already-green PRs.
+	GreenKey     string `json:"green_key,omitempty"`
+	GreenTracked bool   `json:"green_tracked,omitempty"`
 	// Merged holds the URL of every PR of the bead's already announced as
 	// merged, so a bead with several PRs hears of each merge once.
 	// MergedTracked marks a snapshot that kept it; older ones knew only their
@@ -475,6 +481,8 @@ func snapshotDebounced(t Thread, prev Snapshot, now time.Time, debounce, flap ti
 		Pending:        freshPending(t, prev.Pending),
 		NeedsMe:        t.Bead.Status == StatusNeedsMe,
 		ReadyKey:       prev.ReadyKey,
+		GreenKey:       prev.GreenKey,
+		GreenTracked:   true,
 		Relaunch:       prev.Relaunch,
 		StallRetries:   prev.StallRetries,
 		StallTurnID:    prev.StallTurnID,
@@ -545,6 +553,9 @@ func snapshotDebounced(t Thread, prev Snapshot, now time.Time, debounce, flap ti
 		// and the announcement follows the answer.
 		if k := readyKey(t); k != "" && t.Bead.Status != StatusNeedsMe {
 			s.ReadyKey = k
+		}
+		if k := greenKey(t); k != "" && t.Bead.Status != StatusNeedsMe {
+			s.GreenKey = k
 		}
 		if t.PR.State == "OPEN" && t.PR.AutoMerge != nil {
 			s.AutoMerge = t.PR.URL
@@ -777,6 +788,28 @@ func cutReadyPrompt(p string) (string, bool) {
 // when it isn't ready.
 func readyKey(t Thread) string {
 	if !readyToMerge(t.PR, t.Checks) {
+		return ""
+	}
+	return fmt.Sprintf("%d@%s", t.PR.Number, t.PR.HeadSHA)
+}
+
+// greenKey names the PR and head commit of an open non-draft PR whose checks
+// are all green and that is awaiting review (no failing or pending checks, no
+// requested changes, no merge conflicts, and no known open review threads).
+func greenKey(t Thread) string {
+	if t.PR == nil || t.PR.State != "OPEN" || t.PR.IsDraft {
+		return ""
+	}
+	if t.Checks.Passing == 0 || t.Checks.Pending > 0 || len(t.Checks.Failing) > 0 {
+		return ""
+	}
+	if t.PR.ReviewDecision == "CHANGES_REQUESTED" {
+		return ""
+	}
+	if t.PR.MergeState == "DIRTY" {
+		return ""
+	}
+	if t.PR.Gate != nil && t.PR.Gate.OpenThreads > 0 {
 		return ""
 	}
 	return fmt.Sprintf("%d@%s", t.PR.Number, t.PR.HeadSHA)
