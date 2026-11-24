@@ -41,8 +41,9 @@ type NeedsMeQuestion struct {
 }
 
 var (
-	questionOptionRe = regexp.MustCompile(`^(\d+)\.\s+(.*)$`)
-	questionClassRe  = regexp.MustCompile(`^CLASS:\s*(\d)\b`)
+	questionOptionRe         = regexp.MustCompile(`^(\d+)\.\s+(.*)$`)
+	questionClassRe          = regexp.MustCompile(`^CLASS:\s*(\d)\b`)
+	questionRecommendationRe = regexp.MustCompile(`(?i)\bRecommendation:\s*(?:option\s+|#|[*` + "`" + `]+)*(\d+)\b`)
 )
 
 // maxQuestionOptions bounds a tappable question: more reads as a numbered
@@ -154,6 +155,22 @@ func parseClassLine(l string) (string, int, bool) {
 		n, _ = strconv.Atoi(m[1])
 	}
 	return text, n, true
+}
+
+// recommendation extracts the recommended option number from q.Lines when
+// one is stated ("Recommendation: 2 — ...") and names one of q.Options.
+func (q NeedsMeQuestion) recommendation() *int {
+	for _, l := range q.Lines {
+		m := questionRecommendationRe.FindStringSubmatch(l)
+		if m == nil {
+			continue
+		}
+		n, err := strconv.Atoi(m[1])
+		if err == nil && n >= 1 && n <= len(q.Options) {
+			return &n
+		}
+	}
+	return nil
 }
 
 // Summary is the question in one line: its first line, critical or not.

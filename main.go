@@ -51,6 +51,7 @@ Usage:
                                                        (T: desktop, slack, stdout, none; default desktop)
   quartermaster digest show|install|uninstall          page the last digest; set up or remove the hourly timer
   quartermaster inbox done [<bead>|<file>...]          mark inbox items handled (all if none given)
+  quartermaster inbox --questions [--json]             list live approval prompts and needs_me OPTIONS questions
   quartermaster resolve <bead> [--force]               remove a finished bead's worktree and merged branch;
                                                        --force also removes an open or dirty one
   quartermaster close <bead> --reason R [--by WHO]     close a bead; one with steps after its merge (rolling-out,
@@ -243,6 +244,8 @@ func run(args []string) error {
 	amountFlag := fs.String("amount", "", "autonomy check: a spend's estimated cost in US dollars, one charge (40) or per month (300/month)")
 	forFlag := fs.Duration("for", 0, "autonomy level: how long a level 8 or 9 lease lasts (8 defaults to 4h); plan approve: how long the approval lasts (default 1h)")
 	expect := fs.String("expect", "", "answer: the hash of the prompt being answered, from quartermaster prompt")
+	questionsFlag := fs.Bool("questions", false, "inbox: list live approval prompts and needs_me OPTIONS questions")
+	jsonFlag := fs.Bool("json", false, "emit JSON output")
 	reasonFlag := fs.String("reason", "", "close: what shipped and how it was verified")
 	by := fs.String("by", "coordinator", "dispatch, focus, resume, stale --release, answer, close: who decided; anyone but TJ needs the bead's autonomy level to reach the step's class")
 	jsonOut := fs.Bool("json", false, "show, memory: output in JSON format")
@@ -343,14 +346,7 @@ func run(args []string) error {
 			return fmt.Errorf("usage: quartermaster digest [show|install|uninstall] [--deliver desktop,slack,stdout,none] [--always]")
 		}
 	case "inbox":
-		if len(pos) == 0 || pos[0] != "done" {
-			return fmt.Errorf("usage: quartermaster inbox done [<bead>|<file>...]")
-		}
-		n, err := inboxDone(pos[1:])
-		if err != nil {
-			return err
-		}
-		fmt.Printf("%d item(s) marked done\n", n)
+		return inboxCmd(cfg, h, pos, *questionsFlag, *jsonFlag, os.Stdout, os.Stderr)
 	case "resolve":
 		if len(pos) != 1 {
 			return fmt.Errorf("usage: quartermaster resolve <bead> [--force]")
