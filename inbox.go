@@ -38,6 +38,10 @@ func defaultInboxCondition(e Event) *InboxCondition {
 		kind = "checks_failing"
 	case EventReady:
 		kind = "ready_to_merge"
+	case EventReadyForReview:
+		kind = "ready_for_review"
+	case EventReviewBump:
+		kind = "review_bump"
 	case EventUnsafeAutoMerge:
 		kind = "unsafe_auto_merge"
 	}
@@ -59,7 +63,7 @@ func eventCondition(t Thread, kind EventKind) *InboxCondition {
 		default:
 			c.Kind, c.Key = "needs_me", asked(t.Bead)
 		}
-	case EventFailing, EventReady, EventUnsafeAutoMerge:
+	case EventFailing, EventReady, EventReadyForReview, EventReviewBump, EventUnsafeAutoMerge:
 		c.Key = inboxPRKey(t)
 	}
 	return c
@@ -119,6 +123,23 @@ func inboxObsolete(it InboxItem, active map[string]Thread) bool {
 		// ticker announces it once per head, so retain that observation
 		// until its resource changes or a human decision supersedes it.
 		return t.Bead.Status == StatusNeedsMe
+	case "ready_for_review", "review_bump":
+		if t.PR == nil {
+			return false
+		}
+		if t.PR.State != "OPEN" || (c.Key != "" && c.Key != inboxPRKey(t)) {
+			return true
+		}
+		if t.Bead.Status == StatusNeedsMe || t.PR.IsDraft || t.PR.ReviewDecision != "REVIEW_REQUIRED" {
+			return true
+		}
+		if len(t.Checks.Failing) > 0 || t.PR.MergeState == "DIRTY" || t.PR.Mergeable == "CONFLICTING" {
+			return true
+		}
+		if t.PR.Gate != nil && t.PR.Gate.Head == t.PR.HeadSHA && (t.PR.Gate.OpenThreads > 0 || t.PR.Gate.MoreThreads) {
+			return true
+		}
+		return false
 	case "unsafe_auto_merge":
 		if t.PR == nil {
 			return false

@@ -22,6 +22,7 @@ type PR struct {
 	ReviewDecision string    `json:"reviewDecision"`
 	HeadSHA        string    `json:"headRefOid"`
 	MergeState     string    `json:"mergeStateStatus"`
+	Mergeable      string    `json:"mergeable,omitempty"` // MERGEABLE, CONFLICTING or UNKNOWN
 	Checks         []Check   `json:"statusCheckRollup"`
 	Reviews        []Review  `json:"reviews"`
 	MergedAt       time.Time `json:"mergedAt"`
@@ -92,7 +93,7 @@ func (r Review) isBot() bool { return r.Bot || strings.HasSuffix(r.Author.Login,
 // listFields stay light: statusCheckRollup across 100 PRs in a repo with many
 // checks per PR makes GitHub's GraphQL time out (504).
 const listFields = "number,title,url,headRefName,state,isDraft,mergedAt"
-const detailFields = listFields + ",reviewDecision,statusCheckRollup,reviews,headRefOid,mergeStateStatus,autoMergeRequest"
+const detailFields = listFields + ",reviewDecision,statusCheckRollup,reviews,headRefOid,mergeStateStatus,mergeable,autoMergeRequest"
 
 type Checks struct {
 	Failing []string
@@ -169,6 +170,66 @@ func mergeable(pr *PR, c Checks) bool {
 		return true
 	}
 	return false
+}
+
+// reviewMergeable reports whether pr is mergeable (not conflicting, draft, or
+// unknown) for review readiness. Requires an explicit non-conflicting signal
+// from either Mergeable or MergeState.
+func reviewMergeable(pr *PR) bool {
+	if pr == nil {
+		return false
+	}
+	switch pr.Mergeable {
+	case "CONFLICTING", "UNKNOWN":
+		return false
+	}
+	switch pr.MergeState {
+	case "DIRTY", "UNKNOWN", "DRAFT":
+		return false
+	}
+	if pr.Mergeable == "MERGEABLE" {
+		return true
+	}
+	switch pr.MergeState {
+	case "CLEAN", "BLOCKED", "BEHIND", "UNSTABLE", "HAS_HOOKS":
+		return true
+	}
+	return false
+}
+
+// reviewGateCandidate reports whether pr satisfies all pre-gate conditions for
+// ready_for_review, so gatePRs fetches its current-head review threads.
+func reviewGateCandidate(pr *PR, c Checks) bool {
+	if pr == nil || pr.State != "OPEN" || pr.IsDraft || pr.HeadSHA == "" {
+		return false
+	}
+	if pr.ReviewDecision != "REVIEW_REQUIRED" {
+		return false
+	}
+	if c.Passing == 0 || c.Pending > 0 || len(c.Failing) > 0 {
+		return false
+	}
+	return reviewMergeable(pr)
+}
+
+// readyForReview reports whether pr is an open, non-draft, green, mergeable,
+// REVIEW_REQUIRED PR with fresh current-head gate evidence confirming zero
+// unresolved review threads.
+func readyForReview(pr *PR, c Checks) bool {
+	if !reviewGateCandidate(pr, c) {
+		return false
+	}
+	if !pr.DetailsFresh {
+		return false
+	}
+	g := pr.Gate
+	if g == nil || g.Head == "" || g.Head != pr.HeadSHA {
+		return false
+	}
+	if g.OpenThreads > 0 || g.MoreThreads {
+		return false
+	}
+	return true
 }
 
 // mergeBlockers are policy prerequisites beyond GitHub's mergeability.
