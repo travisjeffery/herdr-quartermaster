@@ -68,6 +68,7 @@ Usage:
   quartermaster router [status|sync]                   inspect Pi virtual-model router chains, thresholds, sync state
                                                        and provider headroom; sync router.json from config.toml
   quartermaster router set worker|coordinator M...     update ordered Pi router models in config.toml and sync router.json
+  quartermaster watch add|list|remove|check ...        manage declarative read-only per-bead watches evaluated by the ticker
   quartermaster configure [--repo PATH]                first-time setup: config, ~/.local/bin link, agent view
   quartermaster unconfigure                            stop the ticker, remove the view and sidebar tokens
   quartermaster autonomy level                         the dial: global level, max, leases, each active
@@ -217,6 +218,9 @@ func run(args []string) error {
 		return err
 	}
 	h := newHerdr()
+	if args[0] == "watch" {
+		return watchCmd(cfg, liveWatchEnv(cfg, h.on(cfg.coordSocket())), args[1:], os.Stdout)
+	}
 	cmd, rest := args[0], args[1:]
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	kind := fs.String("agent", "", "agent kind: claude, codex, muse, pi, agy or auto")

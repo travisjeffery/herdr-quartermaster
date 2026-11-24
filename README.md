@@ -352,6 +352,13 @@ lifecycle action.
   The worker is told when one succeeds and to continue, and when one fails
   you're notified and the worker is told to investigate. A running workflow
   shows on the thread's state line.
+- **Watches.** `quartermaster watch` attaches read-only external conditions
+  (`gh-release`, `gh-pr`, `gh-run`, `http`, and opt-in `cmd`) to any non-closed
+  bead. The ticker checks due watches with bounded concurrency, retires watches
+  on closed or expired beads, records one-shot `watch_triggered` inbox events,
+  bead notes and journal entries, and optionally wakes an idle non-`needs_me`
+  worker with an automated non-approving notice. Active watches show in
+  `quartermaster context`. See [docs/watches.md](docs/watches.md).
 - **`rolling-out`.** A worker adds this label when steps remain after its PR
   merges. The thread then shows **rolling out** instead of **merged**, and the
   merge prompt says to carry on rather than close.
@@ -863,6 +870,10 @@ minutes = 15              # one run's time limit
 # backend = "pi"           # opt-in filesystem-only verifier; default remains "claude"
 # model = "provider/model" # pi only; omit to use pi's configured default
 # command = ["claude", "-p", ...]   # legacy override; cannot combine with backend = "pi"
+
+[watches]                 # declarative per-bead watches (docs/watches.md)
+allow_cmd = false         # fail closed: cmd watches are refused unless explicitly enabled
+# max_concurrent = 4      # max probes evaluated in parallel per ticker pass
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts
@@ -1156,6 +1167,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster ticker notifications` | Read-only [worker desktop delivery receipts](docs/desktop-alerts.md): detection, bounded safe retries, submitted/failed/unknown. Submission is not human readback or task completion. |
 | `quartermaster router [status\|sync]` | Inspect the effective Pi virtual-model chains (including `:thinking` overrides), global and per-provider thresholds, whether `router.json` matches `config.toml`, and provider headroom/freshness from `quota.json`; `sync` validates `config.toml` and writes `router.json` immediately. |
 | `quartermaster router set worker\|coordinator <model>...` | Validate and update `[agents.pi]` `router_worker_models` or `router_coordinator_models` in `config.toml` (preserving comments, formatting, permissions, and unrelated sections; clearing a conflicting legacy singular key if present) and sync `router.json` immediately. |
+| `quartermaster watch add\|list\|remove\|check ...` | Manage declarative read-only per-bead watches (`gh-release`, `gh-pr`, `gh-run`, `http`, and config-gated `cmd`) evaluated on schedule by the ticker; see [docs/watches.md](docs/watches.md). |
 | `quartermaster configure [--repo PATH]` | First-time setup: write the config, link `~/.local/bin/quartermaster` (and `qm`), install the agent view. Safe to run again. |
 | `quartermaster unconfigure` | Stop the ticker and remove the agent view and sidebar tokens. |
 | `quartermaster autonomy level` | The dial: global level, max, leases, and each active bead's effective level. Advisory: workers hold their own credentials. |

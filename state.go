@@ -233,6 +233,8 @@ const (
 	EventUnsafeAutoMerge EventKind = "unsafe_auto_merge"
 	EventLeaseExpired    EventKind = "lease_expired"
 	EventBreaker         EventKind = "breaker_tripped"
+	EventWatchTriggered  EventKind = "watch_triggered"
+	EventWatchExpired    EventKind = "watch_expired"
 )
 
 type Event struct {
@@ -274,6 +276,7 @@ func isBookkeepingNote(line string) bool {
 	for _, prefix := range []string{
 		"AUTO:", "auto:", "VERIFY:", "PR:", "Linear:",
 		"PROMPT ANSWERED:", "NEEDS_ME ANSWERED:", "RAN:", "DONE:",
+		"WATCH TRIGGERED", "WATCH EXPIRED",
 	} {
 		if strings.HasPrefix(line, prefix) {
 			return true

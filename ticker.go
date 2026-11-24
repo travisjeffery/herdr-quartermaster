@@ -90,12 +90,13 @@ func saveState(s TickerState) error {
 }
 
 type Ticker struct {
-	cfg   Config
-	herdr Herdr
-	beads Beads
-	gh    GH
-	log   *log.Logger
-	side  *sidebar
+	cfg      Config
+	herdr    Herdr
+	beads    Beads
+	gh       GH
+	log      *log.Logger
+	side     *sidebar
+	watchEnv *WatchEnv
 }
 
 func newTicker(cfg Config, logger *log.Logger) Ticker {
@@ -536,6 +537,7 @@ func (t Ticker) once(st *TickerState) error {
 	if err := reconcileDesktop(alertThreads, now, submitDesktop); err != nil {
 		t.log.Printf("desktop notifications: %v", err)
 	}
+	t.checkWatches(threads, agents, now)
 	if coord, ok := agents[t.cfg.CoordinatorName]; ok {
 		inbox, _ := readInbox()
 		tokens := map[string]string{"sh_rank": coordinatorRank, "sh_state": coordinatorLine(threads, len(inbox))}
@@ -707,6 +709,38 @@ func (t Ticker) leftActive(st *TickerState, id string, prev Snapshot, agents map
 		_ = writeEvent(Event{Bead: id, Kind: "closed", Summary: summary, At: now})
 	}
 	delete(st.Threads, id)
+}
+
+func (t Ticker) checkWatches(threads []Thread, agents map[string]Agent, now time.Time) {
+	var env WatchEnv
+	if t.watchEnv != nil {
+		env = *t.watchEnv
+	} else {
+		env = liveWatchEnv(t.cfg, t.herdr)
+	}
+	if env.Now == nil {
+		env.Now = func() time.Time { return now }
+	}
+	if env.Logf == nil {
+		env.Logf = t.log.Printf
+	}
+	outcomes, err := runWatchesPass(t.cfg, env, threads, agents, "", false)
+	if err != nil {
+		t.log.Printf("watches: %v", err)
+		return
+	}
+	for _, o := range outcomes {
+		switch o.Action {
+		case "triggered":
+			t.log.Printf("watch %s (%s) triggered: %s", o.Watch.ID, o.Watch.Bead, o.Watch.Evidence)
+		case "expired":
+			t.log.Printf("watch %s (%s) expired", o.Watch.ID, o.Watch.Bead)
+		case "retired":
+			t.log.Printf("watch %s (%s) retired: %s", o.Watch.ID, o.Watch.Bead, o.Watch.Evidence)
+		case "error":
+			t.log.Printf("watch %s (%s) error (%d): %v", o.Watch.ID, o.Watch.Bead, o.Watch.ConsecutiveErrors, o.Err)
+		}
+	}
 }
 
 func (t Ticker) nudgeCoordinator(st *TickerState, agents map[string]Agent, now time.Time) {

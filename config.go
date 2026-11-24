@@ -96,6 +96,11 @@ type Config struct {
 	// answer a worker's approval prompt from a phone; see tap.go and
 	// docs/approval-taps.md. Off unless [tap] enabled is set.
 	Tap TapConfig `toml:"tap"`
+
+	// Watches configures declarative per-bead watches (`quartermaster watch`);
+	// see watch.go and docs/watches.md. Command probes fail closed unless
+	// [watches] allow_cmd = true is set.
+	Watches WatchesConfig `toml:"watches"`
 }
 
 // TapConfig is [tap]: the approval-tap endpoint the ticker runs. Devices are
@@ -480,6 +485,9 @@ func loadConfig() (Config, error) {
 	}
 	if err := cfg.validateTap(); err != nil {
 		return cfg, err
+	}
+	if cfg.Watches.MaxConcurrent < 0 {
+		return cfg, fmt.Errorf("[watches] max_concurrent %d is negative", cfg.Watches.MaxConcurrent)
 	}
 	if cfg.PromptDebounceSeconds < 0 {
 		return cfg, fmt.Errorf("prompt_debounce_seconds %d is negative; use 0 to disable the prompt debounce", cfg.PromptDebounceSeconds)
