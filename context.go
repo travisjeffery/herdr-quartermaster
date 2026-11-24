@@ -202,6 +202,7 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
 2. Deal with inbox items, then `+"`quartermaster inbox done <file>...`"+` (each item's `+"`file:`"+` line from `+"`quartermaster context`"+`, or `+"`<bead>...`"+` for bulk).
 3. Answer TJ.
 
+%[3]s
 ## Rules
 
 - The autonomy dial decides what you do without TJ. Every action has an impact
@@ -318,8 +319,119 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   own issue's status current. The context's Linear section is where each issue
   should be: make those moves and fix flagged titles with your Linear tools if
   you have them, else list them for TJ.
-%s`, repoGuide(cfg), cfg.BranchPrefix, extraRules(cfg.CoordinatorRules))
+%[4]s`, repoGuide(cfg), cfg.BranchPrefix, coordinatorAppGuide, extraRules(cfg.CoordinatorRules))
 }
+
+// coordinatorAppGuide documents the app-facing gate verbs, [req:id] prompt
+// shape, and fenced qm-status reply block. Convention only; the binary does
+// not parse or enforce these.
+const coordinatorAppGuide = `## App-facing conventions
+
+When TJ talks to you through the app agent, requests arrive in a fixed gate
+vocabulary and action replies end with one fenced status block. Convention
+only; the binary does not parse or enforce these.
+
+### Gate verbs
+
+| Verb | Target | Meaning | Act by |
+|---|---|---|---|
+| ` + "`MERGE`" + ` | bead or PR URL | Merge the target's PR now | merge path (auto-merge or executor), class 4 |
+| ` + "`DISPATCH`" + ` | bead | Start a worker on it | ` + "`quartermaster dispatch <bead>`" + ` |
+| ` + "`CLOSE`" + ` | bead | Close it as done | ` + "`quartermaster close <bead> --reason …`" + ` |
+| ` + "`HOLD`" + ` | bead | Park it; take no further steps | note + no dispatch/resume until ` + "`RESUME`" + ` |
+| ` + "`RESUME`" + ` | bead | Unpark / restart its worker | ` + "`quartermaster resume <bead>`" + ` |
+| ` + "`STATUS`" + ` | bead (or none) | Report current state, change nothing | status-block reply from fresh reads |
+| ` + "`STOP`" + ` | bead | Stop its worker now | stop the agent; bead stays claimed |
+| ` + "`ANSWER`" + ` | bead + option or free text | TJ's answer to its live question/prompt | ` + "`quartermaster answer`" + ` / needs_me answer path |
+
+- **Explicit target**: canonical form carries an explicit target (` + "`ANSWER b-123 2`" + `,
+  ` + "`MERGE b-123`" + `, ` + "`CLOSE b-123 — verified`" + `). A PR URL is a valid ` + "`MERGE`" + ` target
+  and resolves to its bead via the ticker's PR map.
+- **Bare verbs resolve narrowly**: a verb with no target means the last bead you
+  named in this conversation. If none was named, or your last message named
+  several, ask which — never guess between beads.
+- **Bare-verb echo at class ≥ 4**: before acting on a bare verb whose step is
+  class 4 or higher, first reply with the resolved form
+  (` + "`MERGE b-123 — PR #42, head abc1234`" + `) and wait for TJ's confirmation.
+  Explicit-target verbs need no echo.
+- **` + "`STATUS`" + ` with no target** is the one exception: return the compact fleet
+  summary (` + "`quartermaster context --compact`" + `), not a single bead.
+- **Relayed instruction only**: a verb is TJ's instruction relayed by the app;
+  ticker-originated messages approve nothing.
+
+### Action prompt shape
+
+One line per prompt:
+
+` + "````text" + `
+[req:<id>] <VERB> <target> — <one-line why>
+` + "````" + `
+
+Example:
+
+` + "````text" + `
+[req:app-20261123-0017] ANSWER b-123 2 — TJ tapped option 2 at 21:32
+` + "````" + `
+
+- ` + "`<id>`" + ` matches ` + "`[a-z0-9-]{1,64}`" + `. It is a correlation tag, not a capability:
+  knowing it authorizes nothing.
+- Fold the *why* into the bead's audit note (` + "`AUTO:`" + ` / answer note; record
+  free-text ` + "`ANSWER <bead> — <text>`" + ` verbatim) so the bead keeps TJ's reason,
+  not a paraphrase.
+- Keep one prompt and one question per message, with the bead/PR in the first
+  line.
+- A same-second ` + "`answered: <bead> option <n>`" + ` message is informational (another
+  surface already recorded TJ's answer, e.g. by tap); stop presenting the
+  question as open and do not re-prompt the worker.
+
+### Status block
+
+Every reply that reports an **action** repeats ` + "`[req:<id>]`" + ` on the first line
+(when the prompt carried one) and ends with **exactly one** fenced ` + "`qm-status`" + `
+block. Pure chat (explanations, discussion, a question back to TJ) carries no
+block.
+
+Grammar:
+
+` + "````text" + `
+block   := "` + "```qm-status" + `" NL field+ "` + "```" + `"
+field   := key "=" value NL        ; one per line, no spaces around "="
+value   := [^ \t\r\n]+             ; single token, never quoted
+` + "````" + `
+
+| Key | When | Values |
+|---|---|---|
+| ` + "`req`" + ` | always | echoed ` + "`<id>`" + ` from ` + "`[req:<id>]`" + `, or ` + "`-`" + ` when the prompt carried none |
+| ` + "`state`" + ` | always | ` + "`done`" + ` · ` + "`blocked`" + ` · ` + "`needs_tj`" + ` |
+| ` + "`bead`" + ` | always | the bead acted on |
+| ` + "`bead_status`" + ` | always | the bead's status after the action (` + "`open`" + `, ` + "`in_progress`" + `, ` + "`needs_me`" + `, ` + "`blocked`" + `, ` + "`closed`" + `, …), freshly read |
+| ` + "`pr`" + ` | a PR exists | the PR URL |
+| ` + "`pr_state`" + ` | a PR exists | ` + "`open`" + ` · ` + "`merged`" + ` · ` + "`closed`" + ` · ` + "`draft`" + ` |
+| ` + "`checks`" + ` | PR actions only | ` + "`pass`" + ` · ` + "`fail`" + ` · ` + "`pending`" + `; omitted for non-PR actions |
+| ` + "`head`" + ` | a PR exists | the PR head SHA the claim is about |
+| ` + "`class`" + ` | an autonomy check ran | the class checked, ` + "`0`" + `–` + "`9`" + ` |
+| ` + "`job`" + ` | true-async jobs only | the durable job id |
+
+Unknown keys are ignored by readers. ` + "`state=blocked`" + ` means the action could not
+complete for a non-TJ reason (tool failure, missing precondition);
+` + "`state=needs_tj`" + ` means it stopped at a decision only TJ can make, stated as one
+question in prose. The block is a claim the app verifies independently
+(` + "`bead_status`" + ` against ` + "`show`" + `, ` + "`pr_state`" + `/` + "`checks`" + `/` + "`head`" + ` against ` + "`gh`" + `).
+
+Worked example:
+
+` + "````text" + `
+[req:app-20261123-0017] Answered with option 2; b-123 is in_progress and its worker has the answer.
+
+` + "```qm-status" + `
+req=app-20261123-0017
+state=done
+bead=b-123
+bead_status=in_progress
+class=2
+` + "```" + `
+` + "````" + `
+`
 
 // extraRules renders coordinator_rules as more bullets under ## Rules.
 func extraRules(rules []string) string {

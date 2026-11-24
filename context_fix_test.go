@@ -1,6 +1,8 @@
 package main
 
 import (
+	"maps"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -90,5 +92,69 @@ func TestCoordinatorGuidePointsAtCheck(t *testing.T) {
 		if strings.Contains(g, gone) {
 			t.Errorf("guide still says %q", gone)
 		}
+	}
+}
+
+func TestCoordinatorGuideAppConventionsAndStatusBlock(t *testing.T) {
+	g := coordinatorGuide(Config{Repo: "/r"})
+
+	for _, verb := range []string{"MERGE", "DISPATCH", "CLOSE", "HOLD", "RESUME", "STATUS", "STOP", "ANSWER"} {
+		if !strings.Contains(g, "| `"+verb+"` |") {
+			t.Errorf("guide verb table missing %s", verb)
+		}
+	}
+	for _, want := range []string{
+		"Explicit target",
+		"Bare verbs resolve narrowly",
+		"Bare-verb echo at class ≥ 4",
+		"`STATUS` with no target",
+		"quartermaster context --compact",
+		"[req:<id>] <VERB> <target> — <one-line why>",
+		"[a-z0-9-]{1,64}",
+		"answered: <bead> option <n>",
+		"block   := \"```qm-status\" NL field+ \"```\"",
+		"field   := key \"=\" value NL",
+		"value   := [^ \\t\\r\\n]+",
+		"`done` · `blocked` · `needs_tj`",
+	} {
+		if !strings.Contains(g, want) {
+			t.Errorf("guide missing %q", want)
+		}
+	}
+	for _, key := range []string{"req", "state", "bead", "bead_status", "pr", "pr_state", "checks", "head", "class", "job"} {
+		if !strings.Contains(g, "| `"+key+"` |") {
+			t.Errorf("guide status-block table missing key %q", key)
+		}
+	}
+
+	// Match the exact regex from docs/design/coordinator-api.md.
+	re := regexp.MustCompile("(?s)```qm-status\n(.*?)```")
+	matches := re.FindAllStringSubmatch(g, -1)
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly 1 fenced qm-status example block, found %d", len(matches))
+	}
+	fields := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSuffix(matches[0][1], "\n"), "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || k == "" || v == "" {
+			t.Fatalf("malformed status-block line %q", line)
+		}
+		if strings.ContainsAny(k+v, " \t\r\n") {
+			t.Fatalf("status-block line %q violates single-token grammar", line)
+		}
+		fields[k] = v
+	}
+	want := map[string]string{
+		"req":         "app-20261123-0017",
+		"state":       "done",
+		"bead":        "b-123",
+		"bead_status": "in_progress",
+		"class":       "2",
+	}
+	if !maps.Equal(fields, want) {
+		t.Fatalf("parsed status block = %v, want %v", fields, want)
+	}
+	if !strings.Contains(g, "[req:"+want["req"]+"] Answered with option 2; "+want["bead"]) {
+		t.Errorf("worked example first line does not echo [req:%s] and bead %s", want["req"], want["bead"])
 	}
 }
