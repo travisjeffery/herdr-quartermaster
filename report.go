@@ -265,7 +265,7 @@ func renderReport(r Report, now time.Time) string {
 		s.WriteString("_None._\n")
 	}
 	for _, b := range r.NeedsYou {
-		fmt.Fprintf(&s, "- **%s** (`%s`): %s\n", oneLine(b.Title), b.ID, lastNote(b.Notes, 300))
+		fmt.Fprintf(&s, "- **%s** (`%s`): %s\n", oneLine(b.Title), b.ID, needsMeSummaryNote(b.Notes, 300))
 	}
 
 	// Only beads that took steps without TJ have these, so the section shows

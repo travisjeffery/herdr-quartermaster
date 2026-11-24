@@ -301,12 +301,23 @@ lifecycle action.
   set it. If something else renames a worker, the ticker renames it back once
   a minute, when it's the only agent in an active bead's worktree.
 - **Needs you.** A thread needs you when its bead is `needs_me` (the question
-  is its latest note) or its agent is stopped at a permission or question
-  prompt. Answer it in its pane and it drops out of needs you as soon as the
-  agent is working again (`working · needs_me`). On its next pass the ticker
-  sets the bead back to `in_progress` with the note `auto: agent resumed after
-  needs_me`, which keeps the question in the history. The ticker holds its own
-  prompts to a `needs_me` thread until then, so they never count as your answer.
+  is extracted from its latest unanswered `CRITICAL:` / `QUESTION:` / `RUN:` /
+  `OPTIONS:` note, ignoring trailing housekeeping notes such as `AUTO:`
+  handoffs or `likely_stale rejected`) or its agent is stopped at a permission
+  or question prompt. `quartermaster context`, `quartermaster digest`, and the
+  Web Inbox (`/inbox`) split `needs_me` threads into **Active** (live unparked
+  agent, active approval prompt, updated within `needs_me_parked_days` default
+  7d, or unsnoozed `CRITICAL:`) vs **Parked / Dormant** (no live agent and
+  older than `needs_me_parked_days`, or explicitly snoozed via
+  `quartermaster snooze <bead> <duration>`), showing active threads first with
+  a parked summary count. Snoozes expire automatically after their duration or
+  earlier when fresh activity arrives on the bead (and can be removed anytime
+  with `quartermaster snooze <bead> --clear`). Answer a thread in its pane and
+  it drops out of needs you as soon as the agent is working again
+  (`working · needs_me`). On its next pass the ticker sets the bead back to
+  `in_progress` with the note `auto: agent resumed after needs_me`, which keeps
+  the question in the history. The ticker holds its own prompts to a `needs_me`
+  thread until then, so they never count as your answer.
 - **Approval prompts.** For a worker stopped at a permission prompt, the
   ticker reads the prompt off its screen. The inbox item is debounced: the
   same prompt (identified by its hash; an unparsable prompt by its blocked
@@ -868,6 +879,7 @@ linear_workspace = "acme" # linear.app/<this>/issue/KEY: where the board's `l` o
 herdr_socket = "~/.config/herdr/herdr.sock"  # the herdr server the coordinator runs on
 verify_minutes = 60       # how often to re-check stale beads; 0 turns it off
 stale_days = 3            # a bead untouched this long is checked
+needs_me_parked_days = 7  # agentless non-critical needs_me beads older than this move to Parked / Dormant; 0 disables
 verify_max = 20           # GitHub calls a pass may make beyond its probes
 gh_min_remaining = 1000   # skip a pass below this many GraphQL points left
 coordinator_rules = ["Ask before touching the staging cluster."]  # extra bullets under the coordinator's Rules
@@ -1225,7 +1237,8 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster show <bead> [--json]` | Read-only wrapper over `bd show` pinned to the configured Beads workspace (works from any cwd or environment). `--json` emits the bead's `bd show --json` fields (`id`, `title`, `status`, `notes`, metadata) plus `notes_tail`. |
 | `quartermaster memory get <key> [--json]` | Read-only wrapper over `bd recall` pinned to the configured Beads workspace: prints a stored `bd remember` memory by exact key, or exits nonzero with a clean not-found error. Writes stay in `bd`. |
 | `quartermaster inbox done [<bead>...]` | Mark inbox items handled (all of them if no bead is given). |
-| `quartermaster inbox --questions [--json]` | List live worker approval prompts and `needs_me` `OPTIONS:` questions (read-only; excludes `RUN:` beads and already-answered questions, never mints tap links; `hash` carries the `--expect` hash for `prompt` and `null` for `needs_me`). |
+| `quartermaster inbox --questions [--json]` | List live worker approval prompts and active `needs_me` `OPTIONS:` questions (read-only; excludes `RUN:` beads, parked/snoozed beads, and already-answered questions, never mints tap links; `hash` carries the `--expect` hash for `prompt` and `null` for `needs_me`). |
+| `quartermaster snooze <bead> <duration> [--reason R]` | Temporarily park a `needs_me` bead out of the Active list (`30m`, `4h`, `3d`, `1w`) until expiry or fresh bead activity; `quartermaster snooze <bead> --clear` removes it, and bare `quartermaster snooze [--json]` lists active snoozes. |
 | `quartermaster resume [<bead>...] [--agent K]` | Restart exited workers in their worktrees, continuing their last conversation. |
 | `quartermaster stale [--days N] [--release]` | List claims with no agent, worktree or PR untouched N days (7); `--release` reopens them. |
 | `quartermaster verify [<bead>...] [--yes]` | Stale beads with evidence their work is done. Lists what a pass would do; `--yes` acts like the ticker (closes only at autonomy level 3+). |

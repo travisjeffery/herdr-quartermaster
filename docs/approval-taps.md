@@ -93,7 +93,14 @@ The inbox shows four live queues:
    ask), displaying bead id/title, autonomy level, prompt hash, the **actual
    command/prompt lines**, and fresh server-minted one-time `/tap/<token>`
    links per option (opening the standard confirm+POST page).
-2. **`needs_me` questions and structured cards:**
+2. **`needs_me` questions and structured cards:** split into **Active** (shown
+   first: live unparked agent, recent activity within `needs_me_parked_days`
+   default 7d, or unsnoozed `CRITICAL:`) vs **Parked / Dormant** (collapsed
+   disclosure section with summary count for agentless threads past the
+   threshold or explicitly snoozed via `quartermaster snooze <bead> <duration>`;
+   emitted under `parked_questions` in `/inbox.json`). Trailing housekeeping
+   notes (`AUTO:` handoffs, `likely_stale rejected`, etc.) never hide the real
+   question or command:
    - **Structured cards** from `<state dir>/cards/<bead>/question.json` (plus
      optional recent timeline from `<state dir>/cards/<bead>/milestones.jsonl`),
      rendering class badges (`C0`–`C9`, highlighting `C7`–`C9` and `CRITICAL`),

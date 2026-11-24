@@ -124,17 +124,19 @@ func groupKey(g Group) string {
 }
 
 type contextSummary struct {
-	NeedsYou      int      `json:"needs_you,omitempty"`
-	Merged        int      `json:"merged,omitempty"`
-	ReadyToMerge  int      `json:"ready_to_merge,omitempty"`
-	Review        int      `json:"review,omitempty"`
-	RollingOut    int      `json:"rolling_out,omitempty"`
-	ChecksFailing int      `json:"checks_failing,omitempty"`
-	Idle          int      `json:"idle,omitempty"`
-	Working       int      `json:"working,omitempty"`
-	Blocked       int      `json:"blocked,omitempty"`
-	NoAgent       int      `json:"no_agent,omitempty"`
-	Warnings      []string `json:"warnings,omitempty"`
+	NeedsYou       int      `json:"needs_you,omitempty"`
+	NeedsYouActive int      `json:"needs_you_active,omitempty"`
+	NeedsYouParked int      `json:"needs_you_parked,omitempty"`
+	Merged         int      `json:"merged,omitempty"`
+	ReadyToMerge   int      `json:"ready_to_merge,omitempty"`
+	Review         int      `json:"review,omitempty"`
+	RollingOut     int      `json:"rolling_out,omitempty"`
+	ChecksFailing  int      `json:"checks_failing,omitempty"`
+	Idle           int      `json:"idle,omitempty"`
+	Working        int      `json:"working,omitempty"`
+	Blocked        int      `json:"blocked,omitempty"`
+	NoAgent        int      `json:"no_agent,omitempty"`
+	Warnings       []string `json:"warnings,omitempty"`
 }
 
 type contextAutonomyLease struct {
@@ -173,30 +175,34 @@ type contextPR struct {
 }
 
 type contextThread struct {
-	Bead        string     `json:"bead,omitempty"`
-	Group       string     `json:"group"`
-	Status      string     `json:"status,omitempty"`
-	PR          *contextPR `json:"pr"`
-	Repo        string     `json:"repo,omitempty"`
-	State       string     `json:"state,omitempty"`
-	Agent       string     `json:"agent,omitempty"`
-	Title       string     `json:"title,omitempty"`
-	Linear      string     `json:"linear,omitempty"`
-	Level       string     `json:"level,omitempty"`
-	Run         string     `json:"run,omitempty"`
-	Question    string     `json:"question,omitempty"`
-	Options     string     `json:"options,omitempty"`
-	Watches     string     `json:"watches,omitempty"`
-	NoAgentKind string     `json:"no_agent_kind,omitempty"`
+	Bead         string     `json:"bead,omitempty"`
+	Group        string     `json:"group"`
+	Status       string     `json:"status,omitempty"`
+	Parked       bool       `json:"parked,omitempty"`
+	ParkedReason string     `json:"parked_reason,omitempty"`
+	SnoozedUntil *time.Time `json:"snoozed_until,omitempty"`
+	PR           *contextPR `json:"pr"`
+	Repo         string     `json:"repo,omitempty"`
+	State        string     `json:"state,omitempty"`
+	Agent        string     `json:"agent,omitempty"`
+	Title        string     `json:"title,omitempty"`
+	Linear       string     `json:"linear,omitempty"`
+	Level        string     `json:"level,omitempty"`
+	Run          string     `json:"run,omitempty"`
+	Question     string     `json:"question,omitempty"`
+	Options      string     `json:"options,omitempty"`
+	Watches      string     `json:"watches,omitempty"`
+	NoAgentKind  string     `json:"no_agent_kind,omitempty"`
 
 	Folded bool     `json:"folded,omitempty"`
 	Count  int      `json:"count,omitempty"`
 	Beads  []string `json:"beads,omitempty"`
 
-	group     Group  `json:"-"`
-	repoTag   string `json:"-"`
-	isNeedsMe bool   `json:"-"`
-	cardLine  string `json:"-"`
+	group      Group  `json:"-"`
+	repoTag    string `json:"-"`
+	isNeedsMe  bool   `json:"-"`
+	parkedKind string `json:"-"`
+	cardLine   string `json:"-"`
 }
 
 func (t contextThread) MarshalJSON() ([]byte, error) {
@@ -204,6 +210,7 @@ func (t contextThread) MarshalJSON() ([]byte, error) {
 		type foldedThread struct {
 			Group  string   `json:"group"`
 			Status string   `json:"status,omitempty"`
+			Parked bool     `json:"parked,omitempty"`
 			Count  int      `json:"count"`
 			Folded bool     `json:"folded"`
 			Beads  []string `json:"beads,omitempty"`
@@ -211,6 +218,7 @@ func (t contextThread) MarshalJSON() ([]byte, error) {
 		return json.Marshal(foldedThread{
 			Group:  t.Group,
 			Status: t.Status,
+			Parked: t.Parked,
 			Count:  t.Count,
 			Folded: true,
 			Beads:  t.Beads,
@@ -239,19 +247,23 @@ type contextDoc struct {
 	Next     *[]contextBead      `json:"next,omitempty"`
 	Ready    *[]contextBead      `json:"ready,omitempty"`
 
-	now           time.Time
-	compact       bool
-	summaryCounts map[Group]int
-	autonomyFull  string
-	noAgentRes    []string
-	noAgentStale  []string
-	noAgentBare   []string
-	extraWatches  []watchLine
-	workflowsText string
-	inboxOmitted  int
-	linearOmitted int
-	nextOmitted   int
-	readyOmitted  int
+	now             time.Time
+	compact         bool
+	summaryCounts   map[Group]int
+	needsYouActive  int
+	needsYouParked  int
+	needsYouSnoozed int
+	needsYouDormant int
+	autonomyFull    string
+	noAgentRes      []string
+	noAgentStale    []string
+	noAgentBare     []string
+	extraWatches    []watchLine
+	workflowsText   string
+	inboxOmitted    int
+	linearOmitted   int
+	nextOmitted     int
+	readyOmitted    int
 }
 
 type watchLine struct {
@@ -318,37 +330,71 @@ func buildContextDoc(cfg Config, rawThreads []Thread, next, ready []Bead, inbox 
 			}
 		}
 	}
+	snoozes := loadSnoozeState()
+	type parkedMeta struct {
+		parked bool
+		kind   string
+		until  time.Time
+	}
+	parkedByID := map[string]parkedMeta{}
+	counts := map[Group]int{}
+	needsYouActive, needsYouParked, needsYouSnoozed, needsYouDormant := 0, 0, 0, 0
+	for _, t := range threads {
+		g := classify(t)
+		counts[g]++
+		if g == GroupNeedsYou {
+			parked, kind, until := classifyNeedsYou(cfg, t, snoozes, now)
+			parkedByID[t.Bead.ID] = parkedMeta{parked: parked, kind: kind, until: until}
+			if parked {
+				needsYouParked++
+				if kind == parkedReasonSnoozed {
+					needsYouSnoozed++
+				} else {
+					needsYouDormant++
+				}
+			} else {
+				needsYouActive++
+			}
+		}
+	}
 	sort.SliceStable(threads, func(i, j int) bool {
 		gi, gj := classify(threads[i]), classify(threads[j])
 		if gi != gj {
 			return gi < gj
 		}
+		if gi == GroupNeedsYou {
+			pi, pj := parkedByID[threads[i].Bead.ID].parked, parkedByID[threads[j].Bead.ID].parked
+			if pi != pj {
+				return !pi
+			}
+		}
 		return threads[i].Bead.ID < threads[j].Bead.ID
 	})
 
-	counts := map[Group]int{}
-	for _, t := range threads {
-		counts[classify(t)]++
-	}
-
 	doc := contextDoc{
-		now:           now,
-		compact:       opts.Compact,
-		summaryCounts: counts,
+		now:             now,
+		compact:         opts.Compact,
+		summaryCounts:   counts,
+		needsYouActive:  needsYouActive,
+		needsYouParked:  needsYouParked,
+		needsYouSnoozed: needsYouSnoozed,
+		needsYouDormant: needsYouDormant,
 	}
 
 	if opts.Sections.has(ctxSummary) {
 		sum := &contextSummary{
-			NeedsYou:      counts[GroupNeedsYou],
-			Merged:        counts[GroupMerged],
-			ReadyToMerge:  counts[GroupReady],
-			Review:        counts[GroupReview],
-			RollingOut:    counts[GroupRollingOut],
-			ChecksFailing: counts[GroupFailing],
-			Idle:          counts[GroupIdle],
-			Working:       counts[GroupWorking],
-			Blocked:       counts[GroupBlocked],
-			NoAgent:       counts[GroupNoAgent],
+			NeedsYou:       counts[GroupNeedsYou],
+			NeedsYouActive: needsYouActive,
+			NeedsYouParked: needsYouParked,
+			Merged:         counts[GroupMerged],
+			ReadyToMerge:   counts[GroupReady],
+			Review:         counts[GroupReview],
+			RollingOut:     counts[GroupRollingOut],
+			ChecksFailing:  counts[GroupFailing],
+			Idle:           counts[GroupIdle],
+			Working:        counts[GroupWorking],
+			Blocked:        counts[GroupBlocked],
+			NoAgent:        counts[GroupNoAgent],
 		}
 		if !opts.Compact {
 			sum.Warnings = contextWarnings(cfg, threads, next, ready, st)
@@ -414,6 +460,19 @@ func buildContextDoc(cfg Config, rawThreads []Thread, next, ready []Bead, inbox 
 				continue
 			}
 			ct := buildContextThread(cfg, t, g, "", opts.Compact)
+			if g == GroupNeedsYou {
+				if pm := parkedByID[t.Bead.ID]; pm.parked {
+					ct.Parked = true
+					ct.parkedKind = pm.kind
+					if !opts.Compact {
+						ct.ParkedReason = formatParkedReason(pm.kind, pm.until, t.Bead.UpdatedAt, now)
+						if !pm.until.IsZero() {
+							u := pm.until
+							ct.SnoozedUntil = &u
+						}
+					}
+				}
+			}
 			if ws := watchesByBead[t.Bead.ID]; len(ws) > 0 {
 				ct.Watches = formatThreadWatches(ws)
 				shownWatches[t.Bead.ID] = true
@@ -583,8 +642,12 @@ func buildContextThread(cfg Config, t Thread, g Group, noAgentKind string, compa
 			if !compact {
 				ct.cardLine = cardContextLines(t.Bead)
 			}
-		} else if q := lastNote(t.Bead.Notes, 200); cmd == "" || !strings.HasPrefix(q, "RUN:") {
-			ct.Question = q
+		} else if cmd != "" {
+			if reason := pendingCommandReason(t.Bead.Notes); reason != "" {
+				ct.Question = shortTitle(reason, 200)
+			}
+		} else {
+			ct.Question = needsMeSummaryNote(t.Bead.Notes, 200)
 		}
 	}
 	return ct
@@ -672,13 +735,18 @@ func enforceCompactBudget(doc *contextDoc, sizeFn func(*contextDoc) int) {
 		return
 	}
 
-	// 7. Extreme fallback: drop autonomy leases, then pack needs_me IDs onto a
-	// single folded entry so every needs_me bead stays named under 4 KB.
+	// 7. Extreme fallback: drop autonomy leases, pack parked needs_me IDs first
+	// (keeping active needs_me threads individual when possible), then pack any
+	// remaining needs_me IDs onto a single folded entry so every needs_me bead
+	// stays named under 4 KB.
 	if doc.Autonomy != nil && len(doc.Autonomy.Leases) > 0 {
 		doc.Autonomy.Leases = nil
 		if !over() {
 			return
 		}
+	}
+	if packParkedNeedsMeThreads(doc) && !over() {
+		return
 	}
 	packNeedsMeThreads(doc)
 }
@@ -746,6 +814,38 @@ func trimCompactInbox(doc *contextDoc, over func() bool) {
 	}
 }
 
+// packParkedNeedsMeThreads compacts parked needs_me threads into a single ID
+// list entry before touching active needs_me threads.
+func packParkedNeedsMeThreads(doc *contextDoc) bool {
+	if doc.Threads == nil {
+		return false
+	}
+	var ids []string
+	var rest []contextThread
+	for _, t := range *doc.Threads {
+		if !t.Folded && t.isNeedsMe && t.Parked {
+			ids = append(ids, t.Bead)
+			continue
+		}
+		rest = append(rest, t)
+	}
+	if len(ids) == 0 {
+		return false
+	}
+	packed := contextThread{
+		Group:  groupKey(GroupNeedsYou),
+		group:  GroupNeedsYou,
+		Status: StatusNeedsMe,
+		Parked: true,
+		Folded: true,
+		Count:  len(ids),
+		Beads:  ids,
+	}
+	out := append(rest, packed)
+	doc.Threads = &out
+	return true
+}
+
 // packNeedsMeThreads compacts individual needs_me threads into a single ID
 // list entry while keeping every needs_me bead named.
 func packNeedsMeThreads(doc *contextDoc) {
@@ -757,6 +857,10 @@ func packNeedsMeThreads(doc *contextDoc) {
 	for _, t := range *doc.Threads {
 		if !t.Folded && t.isNeedsMe {
 			ids = append(ids, t.Bead)
+			continue
+		}
+		if t.Folded && t.group == GroupNeedsYou && t.Status == StatusNeedsMe && len(t.Beads) > 0 {
+			ids = append(ids, t.Beads...)
 			continue
 		}
 		rest = append(rest, t)
@@ -824,7 +928,11 @@ func renderSummaryText(doc *contextDoc) string {
 	var summary []string
 	for g := GroupNeedsYou; g <= GroupNoAgent; g++ {
 		if n := doc.summaryCounts[g]; n > 0 {
-			summary = append(summary, fmt.Sprintf("%d %s", n, g))
+			if g == GroupNeedsYou && doc.needsYouParked > 0 {
+				summary = append(summary, fmt.Sprintf("%d %s (%d active, %d parked)", n, g, doc.needsYouActive, doc.needsYouParked))
+			} else {
+				summary = append(summary, fmt.Sprintf("%d %s", n, g))
+			}
 		}
 	}
 	if len(summary) == 0 {
@@ -916,13 +1024,20 @@ func renderThreadsText(doc *contextDoc) string {
 		for _, t := range items {
 			if t.Folded {
 				if len(t.Beads) > 0 {
-					fmt.Fprintf(&s, "- %s (%d): %s\n", t.Status, t.Count, strings.Join(t.Beads, ", "))
+					label := t.Status
+					if t.Parked {
+						label += " parked"
+					}
+					fmt.Fprintf(&s, "- %s (%d): %s\n", label, t.Count, strings.Join(t.Beads, ", "))
 				} else {
 					fmt.Fprintf(&s, "- %s: %d\n", t.Group, t.Count)
 				}
 				continue
 			}
 			line := fmt.Sprintf("- %s · %s", t.Bead, t.Group)
+			if t.Parked {
+				line += " · parked"
+			}
 			if t.PR != nil {
 				line += " · PR#" + strconv.Itoa(t.PR.Number)
 			}
@@ -931,15 +1046,12 @@ func renderThreadsText(doc *contextDoc) string {
 		return s.String()
 	}
 
-	s.WriteString("## Threads (bead · state · agent)\n")
-	if len(items) == 0 {
-		s.WriteString("(none)\n")
-	}
-	for _, t := range items {
-		if t.group == GroupNoAgent {
-			continue
+	writeThread := func(t contextThread) {
+		state := t.State
+		if t.Parked && t.ParkedReason != "" {
+			state = "parked (" + t.ParkedReason + ")"
 		}
-		fmt.Fprintf(&s, "- %s%s · %s · %s · %s\n", t.Bead, t.repoTag, t.State, t.Agent, t.Title)
+		fmt.Fprintf(&s, "- %s%s · %s · %s · %s\n", t.Bead, t.repoTag, state, t.Agent, t.Title)
 		if t.Run != "" {
 			fmt.Fprintf(&s, "  run: %s\n", t.Run)
 		}
@@ -956,6 +1068,51 @@ func renderThreadsText(doc *contextDoc) string {
 		}
 		if t.Watches != "" {
 			fmt.Fprintf(&s, "  watches: %s\n", t.Watches)
+		}
+	}
+
+	s.WriteString("## Threads (bead · state · agent)\n")
+	if len(items) == 0 {
+		s.WriteString("(none)\n")
+	}
+	if doc.needsYouParked == 0 {
+		for _, t := range items {
+			if t.group == GroupNoAgent {
+				continue
+			}
+			writeThread(t)
+		}
+	} else {
+		var activeNeeds, otherThreads, parkedNeeds []contextThread
+		for _, t := range items {
+			if t.group == GroupNoAgent {
+				continue
+			}
+			switch {
+			case t.group == GroupNeedsYou && t.Parked:
+				parkedNeeds = append(parkedNeeds, t)
+			case t.group == GroupNeedsYou:
+				activeNeeds = append(activeNeeds, t)
+			default:
+				otherThreads = append(otherThreads, t)
+			}
+		}
+		fmt.Fprintf(&s, "### Active needs you (%d)\n", len(activeNeeds))
+		if len(activeNeeds) == 0 {
+			s.WriteString("(none)\n")
+		}
+		for _, t := range activeNeeds {
+			writeThread(t)
+		}
+		if len(otherThreads) > 0 {
+			s.WriteString("### Other threads\n")
+			for _, t := range otherThreads {
+				writeThread(t)
+			}
+		}
+		fmt.Fprintf(&s, "### Parked / Dormant needs you (%s)\n", formatParkedBreakdown(doc.needsYouSnoozed, doc.needsYouDormant))
+		for _, t := range parkedNeeds {
+			writeThread(t)
 		}
 	}
 	if len(doc.noAgentRes) > 0 {
