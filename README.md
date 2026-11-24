@@ -287,7 +287,7 @@ an irrelevant change request. Otherwise the board shows blockers such as
 (native auto-merge was newly enabled on a base branch requiring no approving review for an ineligible head; prompts to disable it, never fires on first sight or already-armed PRs, and clears automatically once disarmed or superseded), `run_succeeded`,
 `run_failed`, `finished` (a worker finished a turn),
 `agent_gone` (its agent exited), `resumed` (its agent was restarted),
-`likely_stale`, `auto_closed` (from the stale-bead check or orphan finisher sweep), `orphan_finish` (an agentless merged or completed `rolling-out` bead needing verification or coordinator action), and `closed`.
+`likely_stale`, `auto_closed` (from the stale-bead check or orphan finisher sweep), `orphan_finish` (an agentless merged or completed `rolling-out` bead needing verification or coordinator action), `unblocked` (a blocking dependency bead closed or a referenced upstream/watched PR merged), and `closed`.
 
 ### Features in detail
 
@@ -400,6 +400,16 @@ lifecycle action.
   emits a deduplicated `orphan_finish` inbox item naming the bead, PR/runs, and
   suggested `quartermaster close` or `quartermaster resume` command without
   retrying infinitely.
+- **Blocker-cleared wakeup.** Across ticks, the ticker tracks `blocks`
+  dependencies (`bd dep`) and upstream/waiting PR URLs referenced in a bead's
+  notes or `gh-pr` watches. When a blocking bead transitions to `closed` or a
+  referenced PR transitions to `MERGED`, it emits a deduplicated `unblocked`
+  event. If the bead has a live idle worker (at rest, not `needs_me`, not
+  held/headless/parked/relaunching) and its autonomy level reaches class 3
+  (`wake`), the ticker wakes the worker once with the exact cleared blocker
+  (closed bead ID or merged PR URL and commit SHA) and records an `AUTO:` note;
+  otherwise it surfaces `unblocked` to the coordinator inbox. Deduplication
+  state persists in `state.json` across ticker restarts.
 - **Bot reviews** (Codex, CodeRabbit and other GitHub Apps) are told apart from
   human ones. Both go to the worker; only a human review notifies you.
 - **Resume.** Herdr restarts don't relaunch agents. `quartermaster resume` restarts

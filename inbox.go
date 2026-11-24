@@ -26,9 +26,9 @@ func defaultInboxCondition(e Event) *InboxCondition {
 	switch e.Kind {
 	case "closed", EventAutoClosed:
 		kind = "manual"
-	case EventLikelyStale, EventLeaseExpired, EventBreaker, EventWatchTriggered, EventWatchExpired:
-		// Verify, lease expiry, breakers and watches can raise notices on
-		// open/backlog beads, which were never in the active-thread set.
+	case EventLikelyStale, EventLeaseExpired, EventBreaker, EventWatchTriggered, EventWatchExpired, EventUnblocked:
+		// Verify, lease expiry, breakers, watches and blocker wakeups can raise
+		// notices on open/backlog beads, which were never in the active-thread set.
 		kind = "bead_closed"
 	case EventOrphanFinish:
 		// Orphan finisher notices can apply to open or in_progress agentless

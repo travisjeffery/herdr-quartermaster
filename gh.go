@@ -13,19 +13,20 @@ import (
 )
 
 type PR struct {
-	Number         int       `json:"number"`
-	Title          string    `json:"title"`
-	URL            string    `json:"url"`
-	Head           string    `json:"headRefName"`
-	State          string    `json:"state"` // OPEN, MERGED, CLOSED
-	IsDraft        bool      `json:"isDraft"`
-	ReviewDecision string    `json:"reviewDecision"`
-	HeadSHA        string    `json:"headRefOid"`
-	MergeState     string    `json:"mergeStateStatus"`
-	Mergeable      string    `json:"mergeable,omitempty"` // MERGEABLE, CONFLICTING or UNKNOWN
-	Checks         []Check   `json:"statusCheckRollup"`
-	Reviews        []Review  `json:"reviews"`
-	MergedAt       time.Time `json:"mergedAt"`
+	Number         int        `json:"number"`
+	Title          string     `json:"title"`
+	URL            string     `json:"url"`
+	Head           string     `json:"headRefName"`
+	State          string     `json:"state"` // OPEN, MERGED, CLOSED
+	IsDraft        bool       `json:"isDraft"`
+	ReviewDecision string     `json:"reviewDecision"`
+	HeadSHA        string     `json:"headRefOid"`
+	MergeCommit    *CommitRef `json:"mergeCommit,omitempty"`
+	MergeState     string     `json:"mergeStateStatus"`
+	Mergeable      string     `json:"mergeable,omitempty"` // MERGEABLE, CONFLICTING or UNKNOWN
+	Checks         []Check    `json:"statusCheckRollup"`
+	Reviews        []Review   `json:"reviews"`
+	MergedAt       time.Time  `json:"mergedAt"`
 	// AutoMerge is set while auto-merge is on.
 	AutoMerge *AutoMerge `json:"autoMergeRequest"`
 	// Gate is what readyToMerge needs beyond gh pr view, fetched only for PRs
@@ -34,6 +35,20 @@ type PR struct {
 	// Policy is local task authorization, never GitHub data or cached consent.
 	Policy       *MergePolicy `json:"-"`
 	DetailsFresh bool         `json:"details_fresh,omitempty"` // last detail attempt succeeded; bounded by Gate.At in threadFor
+}
+
+// CommitRef holds a GitHub GraphQL / gh CLI commit object reference.
+type CommitRef struct {
+	OID string `json:"oid"`
+}
+
+// mergedSHA returns the commit SHA that landed for a merged PR, preferring
+// MergeCommit.OID when present and falling back to HeadSHA.
+func (p PR) mergedSHA() string {
+	if p.MergeCommit != nil && p.MergeCommit.OID != "" {
+		return p.MergeCommit.OID
+	}
+	return p.HeadSHA
 }
 
 // AutoMerge is a PR's pending auto-merge request.
@@ -92,8 +107,8 @@ func (r Review) isBot() bool { return r.Bot || strings.HasSuffix(r.Author.Login,
 
 // listFields stay light: statusCheckRollup across 100 PRs in a repo with many
 // checks per PR makes GitHub's GraphQL time out (504).
-const listFields = "number,title,url,headRefName,state,isDraft,mergedAt"
-const detailFields = listFields + ",reviewDecision,statusCheckRollup,reviews,headRefOid,mergeStateStatus,mergeable,autoMergeRequest"
+const listFields = "number,title,url,headRefName,state,isDraft,mergedAt,headRefOid,mergeCommit"
+const detailFields = listFields + ",reviewDecision,statusCheckRollup,reviews,mergeStateStatus,mergeable,autoMergeRequest"
 
 type Checks struct {
 	Failing []string
@@ -493,7 +508,7 @@ func (g GH) Lookup(urls []string) (map[string]PR, error) {
 }
 
 // lookupFields are listFields in GraphQL.
-const lookupFields = "number title url headRefName state isDraft mergedAt"
+const lookupFields = "number title url headRefName state isDraft mergedAt headRefOid mergeCommit { oid }"
 
 func parseLookup(out []byte, alias map[string]string, prs map[string]PR) error {
 	var resp struct {
@@ -621,7 +636,7 @@ func prForBead(b Bead, branchPrefix string, mine []PR, byURL map[string]PR, owne
 			add(pr)
 		}
 	}
-	urls := NotedPRs(b.Notes)
+	urls := deliveryNotedPRs(b.Notes)
 	for i := len(urls) - 1; i >= 0; i-- {
 		pr, ok := byURL[urls[i]]
 		if !ok {

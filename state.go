@@ -271,6 +271,7 @@ const (
 	EventBreaker         EventKind = "breaker_tripped"
 	EventWatchTriggered  EventKind = "watch_triggered"
 	EventWatchExpired    EventKind = "watch_expired"
+	EventUnblocked       EventKind = "unblocked"
 )
 
 type Event struct {

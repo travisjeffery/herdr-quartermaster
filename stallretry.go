@@ -433,7 +433,7 @@ func (t Ticker) stallGuardFor(th Thread, prev Snapshot, relaunching bool) stallR
 	return g
 }
 
-func (t Ticker) applyStallRetry(th Thread, snap *Snapshot, plan stallRetryPlan, pendingDelivered bool, now time.Time) {
+func (t Ticker) applyStallRetry(th Thread, snap *Snapshot, plan stallRetryPlan, pendingDelivered bool, now time.Time) bool {
 	id := th.Bead.ID
 	switch plan.Action {
 	case stallActionSchedule:
@@ -451,7 +451,7 @@ func (t Ticker) applyStallRetry(th Thread, snap *Snapshot, plan stallRetryPlan, 
 			next.NextAt = time.Time{}
 			applyStallSnapshot(snap, next)
 			t.log.Printf("stall retry %s: skipped attempt %d/%d (worker already prompted this tick)", id, plan.Attempt, plan.MaxRetries)
-			return
+			return false
 		}
 		if _, err := promptPiAgent(t.herdr, *th.Agent, plan.Prompt); err != nil {
 			t.log.Printf("stall retry %s: nudge failed (attempt %d/%d): %v", id, plan.Attempt, plan.MaxRetries, err)
@@ -477,11 +477,11 @@ func (t Ticker) applyStallRetry(th Thread, snap *Snapshot, plan stallRetryPlan, 
 						t.log.Printf("desktop notification submission failed: %v", derr)
 					}
 				}
-				return
+				return false
 			}
 			next.NextAt = now.Add(t.cfg.StallRetry.backoff(next.Retries + 1))
 			applyStallSnapshot(snap, next)
-			return
+			return false
 		}
 		next := plan.Next
 		next.Retries = plan.Attempt
@@ -498,6 +498,7 @@ func (t Ticker) applyStallRetry(th Thread, snap *Snapshot, plan stallRetryPlan, 
 				t.log.Printf("stall retry note %s: %v", id, nerr)
 			}
 		}
+		return true
 	case stallActionEscalate:
 		applyStallSnapshot(snap, plan.Next)
 		t.log.Printf("stall retry %s: escalated (%s)", id, plan.Reason)
@@ -524,4 +525,5 @@ func (t Ticker) applyStallRetry(th Thread, snap *Snapshot, plan stallRetryPlan, 
 	default:
 		applyStallSnapshot(snap, plan.Next)
 	}
+	return false
 }
