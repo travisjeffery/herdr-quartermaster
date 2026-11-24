@@ -801,13 +801,13 @@ func rpcWorkerEnv(cfg Config, id string) []string {
 	env := []string{}
 	for _, kv := range os.Environ() {
 		k, _, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(k, "HERDR_") || strings.HasPrefix(k, "PI_SESSION_") || k == "PI_MODEL" || k == "PI_PROVIDER" || k == "PI_REASONING_LEVEL" || k == "QUARTERMASTER_EXEC_SOCKET" || k == "QUARTERMASTER_RPC_PARK_FILE" || k == "QUARTERMASTER_RPC_HANDOFF_FILE" {
+		if strings.HasPrefix(k, "HERDR_") || strings.HasPrefix(k, "PI_SESSION_") || k == "PI_MODEL" || k == "PI_PROVIDER" || k == "PI_REASONING_LEVEL" || k == "QUARTERMASTER_BEAD" || k == "QUARTERMASTER_EXEC_SOCKET" || k == "QUARTERMASTER_RPC_PARK_FILE" || k == "QUARTERMASTER_RPC_HANDOFF_FILE" {
 			continue
 		}
 		env = append(env, kv)
 	}
 	env = append(env, cfg.Agents["pi"].Env...)
-	env = append(env, "BEADS_ACTOR=pi", "QUARTERMASTER_RPC=1", "QUARTERMASTER_STATE_DIR="+stateDir())
+	env = append(env, "BEADS_ACTOR=pi", "QUARTERMASTER_BEAD="+id, "QUARTERMASTER_RPC=1", "QUARTERMASTER_STATE_DIR="+stateDir())
 	if cfg.BeadsDir != "" {
 		env = append(env, "BEADS_DIR="+cfg.BeadsDir)
 	}

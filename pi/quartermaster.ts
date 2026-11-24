@@ -45,6 +45,10 @@
 //      XHigh first, then Claude, then OpenAI), failing over on per-provider
 //      low quota (quota.json beside the --quartermaster-router file), rate
 //      limits, provider unavailability, or expired/invalid auth tokens.
+//   8. For bead workers, registers structured `ask_user` and `report_milestone`
+//      tools backed by `quartermaster card ask|milestone` (cards.go), writing
+//      versioned JSON cards and recording `quartermaster.ask_user` and
+//      `quartermaster.milestone` custom session entries.
 //
 // @ts-nocheck
 
@@ -166,6 +170,330 @@ function controlConfig(sock: string): { ask: RegExp[]; timeoutMs: number } {
 
 const askOptions = ["Yes, run it", "No, block it"];
 
+const beadNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const milestoneStatuses = new Set(["info", "ok", "warn", "blocked"]);
+
+function argvFlagValue(flagName: string): string {
+  const argv = process.argv || [];
+  const prefix = flagName + "=";
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === flagName && i + 1 < argv.length) return String(argv[i + 1] || "").trim();
+    if (a.startsWith(prefix)) return a.slice(prefix.length).trim();
+  }
+  return "";
+}
+
+function hasArgvFlag(flagName: string): boolean {
+  const argv = process.argv || [];
+  const prefix = flagName + "=";
+  return argv.some((a) => a === flagName || a.startsWith(prefix));
+}
+
+function defaultWorkerBead(): string {
+  const envBead = (process.env.QUARTERMASTER_BEAD || "").trim();
+  if (envBead) return envBead;
+  const sessionId = argvFlagValue("--session-id");
+  if (sessionId && beadNamePattern.test(sessionId)) return sessionId;
+  return "";
+}
+
+function resolveWorkerBead(explicit: unknown): string {
+  const bead = typeof explicit === "string" && explicit.trim() !== "" ? explicit.trim() : defaultWorkerBead();
+  if (!bead) {
+    throw new Error("no bead id: set QUARTERMASTER_BEAD or pass an explicit bead argument");
+  }
+  if (!beadNamePattern.test(bead)) {
+    throw new Error("invalid bead id: " + bead);
+  }
+  return bead;
+}
+
+function quartermasterBinary(): string {
+  const custom = (process.env.QUARTERMASTER_BIN || "").trim();
+  return custom || "quartermaster";
+}
+
+function runQuartermasterCard(args: string[], payload: unknown): any {
+  const r = spawnSync(quartermasterBinary(), args, {
+    input: JSON.stringify(payload),
+    encoding: "utf8",
+    timeout: 30000,
+  });
+  if (r.error) {
+    throw new Error("quartermaster card failed: " + String(r.error.message || r.error));
+  }
+  if (r.status !== 0) {
+    const msg = (r.stderr || r.stdout || "quartermaster exited with status " + r.status).trim();
+    throw new Error(msg);
+  }
+  const text = (r.stdout || "").trim();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("quartermaster card returned non-JSON output: " + text);
+  }
+}
+
+function registerWorkerCardTools(pi: any) {
+  if (typeof pi.registerTool !== "function") return;
+  const isCoordinator =
+    hasArgvFlag("--quartermaster-coordinator") ||
+    (typeof pi.getFlag === "function" && Boolean(pi.getFlag("quartermaster-coordinator")));
+  if (isCoordinator) return;
+  const isWorker =
+    Boolean(defaultWorkerBead()) ||
+    hasArgvFlag("--quartermaster-control") ||
+    (typeof pi.getFlag === "function" && Boolean(pi.getFlag("quartermaster-control")));
+  if (!isWorker) return;
+
+  const linkSchema = {
+    type: "object",
+    properties: {
+      label: { type: "string", description: "Short display label for the link" },
+      url: { type: "string", description: "Link URL" },
+    },
+    required: ["label", "url"],
+    additionalProperties: false,
+  };
+
+  pi.registerTool({
+    name: "ask_user",
+    label: "Ask User",
+    description:
+      "Record a structured needs_me question card (2-9 options, impact class 0-9, optional recommendation and evidence), " +
+      "mirror a tap-compatible QUESTION:/OPTIONS:/CLASS: note on the bead, set bead status to needs_me, and pause for the user's answer.",
+    promptSnippet: "Ask the user a structured needs_me question with 2-9 options, impact class, recommendation, and evidence",
+    promptGuidelines: [
+      "Use ask_user when a decision or step above your autonomy level requires user input; after calling ask_user, stop and wait for the user's answer.",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        bead: { type: "string", description: "Bead ID (optional when QUARTERMASTER_BEAD is set)" },
+        question: { type: "string", description: "Short question line" },
+        details: { type: "string", description: "Optional extra context" },
+        options: {
+          type: "array",
+          minItems: 2,
+          maxItems: 9,
+          description: "2-9 numbered decision options",
+          items: {
+            type: "object",
+            properties: {
+              number: { type: "integer", minimum: 1, maximum: 9 },
+              label: { type: "string" },
+              description: { type: "string" },
+              class: { type: "integer", minimum: 0, maximum: 9 },
+            },
+            required: ["label"],
+            additionalProperties: false,
+          },
+        },
+        class: { type: "integer", minimum: 0, maximum: 9, description: "Impact class 0-9 (cannot lower an attached IaC preview class)" },
+        class_reason: { type: "string", description: "Short explanation of why the step has this class" },
+        recommendation: {
+          type: "object",
+          properties: {
+            option: { type: "integer", minimum: 1, maximum: 9 },
+            rationale: { type: "string" },
+          },
+          required: ["option"],
+          additionalProperties: false,
+        },
+        critical: { type: "boolean", description: "Mark true for class 8-9 or irreversible decisions" },
+        evidence: {
+          type: "object",
+          properties: {
+            pr_url: { type: "string" },
+            plan_digest: { type: "string" },
+            run_urls: { type: "array", items: { type: "string" } },
+            cost_estimate: { type: "string" },
+            iac: {
+              type: "object",
+              properties: {
+                tool: { type: "string" },
+                target: { type: "string" },
+                create: { type: "integer", minimum: 0 },
+                update: { type: "integer", minimum: 0 },
+                replace: { type: "integer", minimum: 0 },
+                delete: { type: "integer", minimum: 0 },
+                summary: { type: "string" },
+                excerpt: { type: "string" },
+              },
+              additionalProperties: false,
+            },
+            links: { type: "array", items: linkSchema },
+          },
+          additionalProperties: false,
+        },
+        iac_preview: { type: "string", description: "Optional path to pulumi preview --json or tofu show -json file for gate classification" },
+        iac_target: { type: "string", description: "Optional IaC target stack/environment when iac_preview is supplied" },
+        iac_expect: { type: "string", description: "Optional expected IaC counts (e.g. create=1,update=1)" },
+      },
+      required: ["question", "options", "class"],
+      additionalProperties: false,
+    },
+    async execute(_toolCallId: string, params: any) {
+      const bead = resolveWorkerBead(params?.bead);
+      const question = typeof params?.question === "string" ? params.question.trim() : "";
+      if (!question) throw new Error("ask_user: question is required");
+      if (!Array.isArray(params?.options) || params.options.length < 2 || params.options.length > 9) {
+        throw new Error("ask_user: options must contain 2-9 items");
+      }
+      const options = params.options.map((opt: any, idx: number) => {
+        if (typeof opt === "string") {
+          const label = opt.trim();
+          if (!label) throw new Error("ask_user: option " + (idx + 1) + " label is empty");
+          return { number: idx + 1, label };
+        }
+        const label = typeof opt?.label === "string" ? opt.label.trim() : "";
+        if (!label) throw new Error("ask_user: option " + (idx + 1) + " label is empty");
+        const out: any = { number: typeof opt?.number === "number" ? opt.number : idx + 1, label };
+        if (typeof opt?.description === "string" && opt.description.trim() !== "") out.description = opt.description.trim();
+        if (typeof opt?.class === "number") {
+          if (!Number.isInteger(opt.class) || opt.class < 0 || opt.class > 9) {
+            throw new Error("ask_user: option " + (idx + 1) + " class must be an integer 0-9");
+          }
+          out.class = opt.class;
+        }
+        return out;
+      });
+      if (!Number.isInteger(params?.class) || params.class < 0 || params.class > 9) {
+        throw new Error("ask_user: class must be an integer 0-9");
+      }
+      const payload: any = {
+        question,
+        options,
+        class: params.class,
+      };
+      if (typeof params.details === "string" && params.details.trim() !== "") payload.details = params.details.trim();
+      if (typeof params.class_reason === "string" && params.class_reason.trim() !== "") payload.class_reason = params.class_reason.trim();
+      if (typeof params.critical === "boolean") payload.critical = params.critical;
+      if (params.recommendation && typeof params.recommendation === "object") {
+        const optNum = params.recommendation.option;
+        if (!Number.isInteger(optNum) || optNum < 1 || optNum > options.length) {
+          throw new Error("ask_user: recommendation.option must be between 1 and " + options.length);
+        }
+        payload.recommendation = {
+          option: optNum,
+          ...(typeof params.recommendation.rationale === "string" && params.recommendation.rationale.trim() !== ""
+            ? { rationale: params.recommendation.rationale.trim() }
+            : {}),
+        };
+      }
+      if (params.evidence && typeof params.evidence === "object") {
+        payload.evidence = params.evidence;
+      }
+      const cliArgs = ["card", "ask", bead, "--file", "-", "--json"];
+      if (typeof params.iac_preview === "string" && params.iac_preview.trim() !== "") {
+        cliArgs.push("--iac-preview", params.iac_preview.trim());
+      }
+      if (typeof params.iac_target === "string" && params.iac_target.trim() !== "") {
+        cliArgs.push("--iac-target", params.iac_target.trim());
+      }
+      if (typeof params.iac_expect === "string" && params.iac_expect.trim() !== "") {
+        cliArgs.push("--iac-expect", params.iac_expect.trim());
+      }
+      const card = runQuartermasterCard(cliArgs, payload);
+      pi.appendEntry("quartermaster.ask_user", {
+        bead,
+        hash: card.hash,
+        class: card.class,
+        critical: Boolean(card.critical),
+        question: card.question,
+        options: card.options,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              "Recorded question card [" +
+              card.hash +
+              "] on " +
+              bead +
+              " (class " +
+              card.class +
+              (card.critical ? ", CRITICAL" : "") +
+              ") and set bead status to needs_me. Stop now and wait for the user's answer.",
+          },
+        ],
+        details: card,
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "report_milestone",
+    label: "Report Milestone",
+    description:
+      "Append a structured milestone record (phase, status, summary, evidence) to the bead's milestone log and mirror a concise MILESTONE note.",
+    promptSnippet: "Record a structured progress milestone (phase, status, summary, evidence) on the current bead",
+    promptGuidelines: [
+      "Use report_milestone at meaningful rollout or delivery checkpoints (such as pr_opened, merged, applied, or verified).",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        bead: { type: "string", description: "Bead ID (optional when QUARTERMASTER_BEAD is set)" },
+        phase: { type: "string", description: "Short milestone phase identifier (e.g. pr_opened, merged, applied, verified)" },
+        status: {
+          type: "string",
+          enum: ["info", "ok", "warn", "blocked"],
+          description: "Milestone status (default ok)",
+        },
+        summary: { type: "string", description: "One-line milestone summary" },
+        evidence: {
+          type: "object",
+          properties: {
+            pr_url: { type: "string" },
+            run_url: { type: "string" },
+            sha: { type: "string" },
+            plan_digest: { type: "string" },
+            links: { type: "array", items: linkSchema },
+          },
+          additionalProperties: false,
+        },
+      },
+      required: ["phase", "summary"],
+      additionalProperties: false,
+    },
+    async execute(_toolCallId: string, params: any) {
+      const bead = resolveWorkerBead(params?.bead);
+      const phase = typeof params?.phase === "string" ? params.phase.trim() : "";
+      const summary = typeof params?.summary === "string" ? params.summary.trim() : "";
+      if (!phase) throw new Error("report_milestone: phase is required");
+      if (!summary) throw new Error("report_milestone: summary is required");
+      const status = typeof params?.status === "string" && params.status.trim() !== "" ? params.status.trim().toLowerCase() : "ok";
+      if (!milestoneStatuses.has(status)) {
+        throw new Error("report_milestone: status must be info, ok, warn or blocked");
+      }
+      const payload: any = { phase, status, summary };
+      if (params.evidence && typeof params.evidence === "object") {
+        payload.evidence = params.evidence;
+      }
+      const rec = runQuartermasterCard(["card", "milestone", bead, "--file", "-", "--json"], payload);
+      pi.appendEntry("quartermaster.milestone", {
+        bead,
+        phase: rec.phase,
+        status: rec.status,
+        summary: rec.summary,
+        at: rec.at,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Recorded milestone [" + rec.phase + "] (" + rec.status + ") on " + bead + ": " + rec.summary,
+          },
+        ],
+        details: rec,
+      };
+    },
+  });
+}
+
 export default function (pi) {
   installCoordinatorInbox(pi);
   pi.registerFlag("quartermaster-control", {
@@ -178,6 +506,7 @@ export default function (pi) {
     type: "string",
     default: "",
   });
+  registerWorkerCardTools(pi);
 
   // The virtual auto models (pi/router.ts): one selectable model per role
   // that starts each turn on the highest-priority healthy physical model in

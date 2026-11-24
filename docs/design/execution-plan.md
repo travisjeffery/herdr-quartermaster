@@ -6,7 +6,9 @@ executor daemon with per-bead sockets, durable steps and resume
 (`executor.go`, `plan run|resume`, `quartermaster executor`), and the `gh`
 shim with merges through the executor (`shim.go`, `merge.go`,
 `quartermaster run`), and IaC applies from a clean checkout of the commit
-through the `pulumi`/`tofu` shims (`iac.go`). It designs the
+through the `pulumi`/`tofu` shims (`iac.go`), plus durable code-defined
+rollout workflows and structured approval/milestone cards layered on top
+(`workflow.go`, `cards.go`, [docs/workflows.md](../workflows.md)). It designs the
 "later, enforced" phase of [autonomy-dial.md](autonomy-dial.md) (the
 credential-holding executor). TJ chose the recommendation (R) for every
 decision; see "Decisions" at the end.
@@ -402,3 +404,25 @@ is in "Decisions" at the end.
   fallback noted in the AUTO note.
 - **E8** v1 is merges and IaC applies; deploy-service provisions, messages
   and other connectors come in P3; the browser stays advisory.
+
+## Durable rollout workflows and structured approval cards
+
+Multi-step rollouts compose on top of this IR and executor rather than
+extending `Plan` into a general programming language (`workflow.go`,
+`cards.go`, documented in [docs/workflows.md](../workflows.md)):
+
+- **Typed step graphs (`workflows/<id>/spec.json` + fsynced `events.jsonl`):**
+  Every side-effecting step (`plan_step`) lowers to a checked `Plan` and runs
+  through `executor.go`, preserving canonical digests, preconditions, CAS,
+  probes, and `plans/<digest>/events.jsonl`.
+- **Non-blocking gates and digest-bound approval:** `gate_check` runs
+  `gate.go` and binds the preview's SHA-256 digest and computed class (never
+  lowering it). `approval` checks the dial and budgets; when a step requires
+  TJ, it writes a structured `QuestionCard` under `<state dir>/cards/<bead>/question.json`
+  mirroring a hash-compatible `QUESTION:`/`OPTIONS:`/`CLASS:` bead note and
+  parks in `step_waiting`. Approvals expire (default `1h`) and are rechecked
+  against the current preview/plan digest before `plan_step` runs.
+- **Built-in templates and ticker advancement:** `pr-merge-verify` and
+  `iac-rollout` cover standard merge-and-verify and gate-approve-apply-verify
+  rollouts; the ticker advances waiting workflows as PRs, Actions runs, or
+  TJ approvals settle, never approving above the dial on its own.

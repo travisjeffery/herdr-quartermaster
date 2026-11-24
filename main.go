@@ -117,6 +117,20 @@ Usage:
                                                        ($QUARTERMASTER_EXEC_SOCKET): checked unless approved, then
                                                        run step by step; exit 0 only when every step is done
   quartermaster plan resume <digest>                   the executor continues a stopped plan (after TJ approves it)
+  quartermaster card ask <bead> (--file F | --question Q --option A --option B --class N [...])
+                                                       write a structured question card, mirror QUESTION:/OPTIONS:/CLASS:, set needs_me
+  quartermaster card milestone <bead> --phase P --summary S [--status info|ok|warn|blocked] [...]
+                                                       append a structured milestone record and MILESTONE note
+  quartermaster card show <bead> [--json]              inspect a bead's active/stale question card and milestones
+  quartermaster card list [--json]                     list beads with structured question cards or milestones
+  quartermaster workflow list-templates [--json]       list built-in durable rollout workflow templates
+  quartermaster workflow start <bead> (--template NAME [--var k=v ...] | --file <spec.json|->)
+                                                       start a durable rollout workflow (pr-merge-verify, iac-rollout, or custom spec)
+  quartermaster workflow status [<id|bead>] [--json]   show workflow status and step history
+  quartermaster workflow advance|resume <id> [--json]  idempotently advance or crash-resume a workflow
+  quartermaster workflow approve <id> --step N --by TJ [--for 1h]
+                                                       record a digest-bound TJ approval for a waiting step and resume
+  quartermaster workflow cancel <id> [--reason R]      cancel an active workflow
   quartermaster executor run|install|uninstall|status  the daemon that runs approved plans, durably; install sets
                                                        up its systemd user unit; it resumes unfinished plans on start
   quartermaster run -- gh|pulumi|tofu <args>           what the shims on a worker's PATH run: gh pr merge, gh api
@@ -226,6 +240,12 @@ func run(args []string) error {
 		return watchCmd(cfg, liveWatchEnv(cfg, h.on(cfg.coordSocket())), args[1:], os.Stdout)
 	}
 	cmd, rest := args[0], args[1:]
+	switch cmd {
+	case "card":
+		return cardCmd(cfg, liveCardEnv(), rest, os.Stdin, os.Stdout)
+	case "workflow":
+		return workflowCmd(cfg, liveWorkflowEnv(cfg), rest, os.Stdin, os.Stdout)
+	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	kind := fs.String("agent", "", "agent kind: claude, codex, muse, pi, agy or auto")
 	backend := fs.String("backend", "", "dispatch: herdr (default) or pi-rpc (local, headless)")

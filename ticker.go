@@ -555,6 +555,7 @@ func (t Ticker) once(st *TickerState) error {
 	if verifyDue(t.cfg, *st, now) {
 		t.verify(st, now)
 	}
+	t.advanceWorkflows(st, threads, now)
 	t.nudgeCoordinator(st, agents, now)
 	return nil
 }

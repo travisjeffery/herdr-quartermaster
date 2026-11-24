@@ -21,6 +21,7 @@ router below needs pi 1.6 (virtual models).
 | needs_me wake check | Read from the session file: a prompt after the worker settled resumes the bead, pi waking itself doesn't (below). |
 | Finished turns | The id of the session's last turn-ending assistant entry is kept in the ticker's snapshot; a new id is a finished turn even if no pass saw the agent working, and an `error` or `aborted` turn is reported as `stopped on error: <message>`. |
 | Guards | quartermaster's pi extension, loaded into every pi it starts (below). |
+| Structured cards | Worker sessions (`QUARTERMASTER_BEAD` / `--quartermaster-control`, never the coordinator) get `ask_user` and `report_milestone` tools backed by `quartermaster card` ([workflows and cards](workflows.md)). |
 | Close verifier | Default remains `claude -p`. Opt in separately to the [filesystem-only pi verifier](pi-verifier.md) with `[verifier] backend = "pi"`. |
 
 ## Quota routing: the auto models
@@ -222,6 +223,23 @@ passed with `-e`):
   thread shows as waiting on you; answer it in the pane.
 - **Compaction.** For a beads worker, `bd prime` goes back into context after
   a compaction, like Claude Code's PreCompact hook.
+- **Structured worker tools (`ask_user`, `report_milestone`).** When the
+  extension loads in a worker session (`QUARTERMASTER_BEAD`, `--session-id`, or
+  `--quartermaster-control`, and never the coordinator) and `pi.registerTool`
+  is available, it registers two first-class tools backed by `quartermaster card`:
+  - `ask_user`: accepts structured `{ question, details?, options, class,
+    class_reason?, recommendation?, critical?, evidence?, iac_preview?,
+    iac_target?, iac_expect? }`, invokes `quartermaster card ask <bead> --file - --json`
+    (persisting `<state dir>/cards/<bead>/question.json`, mirroring a
+    tap-compatible `QUESTION:`/`OPTIONS:`/`CLASS:` note, setting `needs_me`,
+    and never lowering an attached IaC preview's class), appends a
+    `quartermaster.ask_user` custom session entry, and returns the recorded
+    card hash with a reminder to stop and wait for the answer.
+  - `report_milestone`: accepts `{ phase, status?, summary, evidence? }`,
+    invokes `quartermaster card milestone <bead> --file - --json` (appending to
+    `<state dir>/cards/<bead>/milestones.jsonl` and mirroring a `MILESTONE`
+    bead note), appends a `quartermaster.milestone` custom session entry, and
+    returns confirmation. See [workflows and cards](workflows.md).
 
 ### The control socket
 
