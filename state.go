@@ -203,6 +203,18 @@ type Snapshot struct {
 	PromptLastSeen time.Time `json:"prompt_last_seen,omitempty"`
 	// TurnID is the id of the last turn end in a pi worker's session.
 	TurnID string `json:"turn_id,omitempty"`
+	// StallRetries is how many consecutive transient ACP stall auto-retries
+	// the ticker sent in the current stall episode; resets after a healthy turn.
+	StallRetries int `json:"stall_retries,omitempty"`
+	// StallTurnID is the failed turn id tracked for ACP stall auto-retry.
+	StallTurnID string `json:"stall_turn_id,omitempty"`
+	// StallNextAt is when a pending ACP stall retry becomes eligible after backoff.
+	StallNextAt time.Time `json:"stall_next_at,omitempty"`
+	// StallError is the stall error message for StallTurnID.
+	StallError string `json:"stall_error,omitempty"`
+	// StallEscalated marks that the current stall episode has already surfaced
+	// to the inbox so subsequent ticks do not duplicate it.
+	StallEscalated bool `json:"stall_escalated,omitempty"`
 	// Relaunch marks a worker asked to exit so it can be resumed in the
 	// launch mode its level calls for.
 	Relaunch bool `json:"relaunch,omitempty"`
@@ -452,7 +464,24 @@ func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
 }
 
 func snapshotDebounced(t Thread, prev Snapshot, now time.Time, debounce, flap time.Duration, first bool) Snapshot {
-	s := Snapshot{Unprompted: t.Unprompted, Group: classify(t), Reviews: t.Reviews, BotReviews: len(t.BotReviews), ReviewsSplit: true, Runs: runStates(t.Runs), Failing: t.Checks.Failing, Pending: freshPending(t, prev.Pending), NeedsMe: t.Bead.Status == StatusNeedsMe, ReadyKey: prev.ReadyKey, Relaunch: prev.Relaunch}
+	s := Snapshot{
+		Unprompted:     t.Unprompted,
+		Group:          classify(t),
+		Reviews:        t.Reviews,
+		BotReviews:     len(t.BotReviews),
+		ReviewsSplit:   true,
+		Runs:           runStates(t.Runs),
+		Failing:        t.Checks.Failing,
+		Pending:        freshPending(t, prev.Pending),
+		NeedsMe:        t.Bead.Status == StatusNeedsMe,
+		ReadyKey:       prev.ReadyKey,
+		Relaunch:       prev.Relaunch,
+		StallRetries:   prev.StallRetries,
+		StallTurnID:    prev.StallTurnID,
+		StallNextAt:    prev.StallNextAt,
+		StallError:     prev.StallError,
+		StallEscalated: prev.StallEscalated,
+	}
 	if t.Agent != nil {
 		s.AgentStatus, s.AgentSeq = t.Agent.Status, t.Agent.Seq
 		switch {
@@ -673,15 +702,7 @@ func transitionDebounced(t Thread, prev Snapshot, first bool, now time.Time, deb
 				r.Workflow, r.URL, r.Conclusion, r.ID, r.Repo))
 		}
 	}
-	// A whole turn can fit between two ticks; a moved state counter on a ready
-	// agent means it worked since the last look.
-	turned := prev.AgentStatus == "working" || (prev.AgentSeq != 0 && t.Agent != nil && t.Agent.Seq != prev.AgentSeq)
-	// A pi session's last turn end is a durable cursor: a new one is a new
-	// turn, whatever herdr's state counter did.
-	if t.Turn != nil && prev.TurnID != "" && t.Turn.ID != prev.TurnID {
-		turned = true
-	}
-	if t.Agent != nil && agentReady(t.Agent) && turned && g != GroupNeedsYou {
+	if turnFinishedOnTick(t, prev) {
 		if t.Turn.Failed() {
 			ev(EventFinished, "%s stopped on %s%s (%s)", id, t.Turn.StopReason, errSuffix(t.Turn.Error), stateLine(t))
 		} else {
@@ -693,6 +714,22 @@ func transitionDebounced(t Thread, prev Snapshot, first bool, now time.Time, deb
 		ev(EventAgentGone, "%s's agent exited while the bead is still %s", id, t.Bead.Status)
 	}
 	return o
+}
+
+// turnFinishedOnTick reports whether t's ready agent completed a turn since prev.
+func turnFinishedOnTick(t Thread, prev Snapshot) bool {
+	if t.Agent == nil || !agentReady(t.Agent) || classify(t) == GroupNeedsYou {
+		return false
+	}
+	// A whole turn can fit between two ticks; a moved state counter on a ready
+	// agent means it worked since the last look.
+	turned := prev.AgentStatus == "working" || (prev.AgentSeq != 0 && t.Agent.Seq != prev.AgentSeq)
+	// A pi session's last turn end is a durable cursor: a new one is a new
+	// turn, whatever herdr's state counter did.
+	if t.Turn != nil && prev.TurnID != "" && t.Turn.ID != prev.TurnID {
+		turned = true
+	}
+	return turned
 }
 
 // mergedPRs is every merged PR of t's: its merged list and its pick.

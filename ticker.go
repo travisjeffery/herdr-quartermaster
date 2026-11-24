@@ -98,6 +98,14 @@ type Ticker struct {
 	side     *sidebar
 	watchEnv *WatchEnv
 	jobEnv   *JobEnv
+	now      func() time.Time
+}
+
+func (t Ticker) clock() time.Time {
+	if t.now != nil {
+		return t.now()
+	}
+	return time.Now()
 }
 
 func newTicker(cfg Config, logger *log.Logger) Ticker {
@@ -402,7 +410,7 @@ func rank(g Group, id string) string { return fmt.Sprintf("%d-%s", int(g), id) }
 // once runs one pass: sidebar rows, events, prompts to threads, a nudge to the
 // coordinator, and closing up beads that left the active set.
 func (t Ticker) once(st *TickerState) error {
-	now := time.Now()
+	now := t.clock()
 	threads, agents, err := t.gather(st, now)
 	if err != nil {
 		if threads != nil { // canonical Beads read succeeded; agents are unknown
@@ -494,7 +502,12 @@ func (t Ticker) once(st *TickerState) error {
 		t.journalAuto(th, prev, seen, &snap, now)
 		snap.Pending = append(snap.Pending, out.Prompts...)
 		t.relaunch(th, &snap, relaunch[agentName(id)], now)
+		stallGuard := t.stallGuardFor(th, prev, relaunch[agentName(id)] || snap.Relaunch)
+		stallPlan := planStallRetry(t.cfg.StallRetry, th, prev, !seen, now, stallGuard)
 		for _, e := range out.Events {
+			if stallPlan.SuppressFinished && e.Kind == EventFinished {
+				continue
+			}
 			// A parsable approval prompt's event carries its tap links, so
 			// what the coordinator relays to TJ is tappable as it stands;
 			// a needs_me OPTIONS question's event carries its own.
@@ -513,6 +526,7 @@ func (t Ticker) once(st *TickerState) error {
 				t.log.Printf("desktop notification submission failed: %v", err)
 			}
 		}
+		pendingDelivered := false
 		if th.Agent != nil {
 			// A needs_me thread waits on the user; typing into it would look like
 			// an answer and resume it. Its prompts wait until it is answered.
@@ -525,8 +539,12 @@ func (t Ticker) once(st *TickerState) error {
 					t.log.Printf("prompted %s (%d item(s))", id, len(snap.Pending))
 					snap.Pending = nil
 					snap.ReadySince = time.Time{}
+					pendingDelivered = true
 				}
 			}
+		}
+		t.applyStallRetry(th, &snap, stallPlan, pendingDelivered, now)
+		if th.Agent != nil {
 			tokens := map[string]string{"sh_state": stateLine(th), "sh_rank": rank(classify(th), id)}
 			rows = append(rows, sidebarRow{Name: id, Pane: th.Agent.PaneID, Tokens: tokens})
 		}

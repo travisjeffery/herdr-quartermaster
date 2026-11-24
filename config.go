@@ -101,6 +101,10 @@ type Config struct {
 	// see watch.go and docs/watches.md. Command probes fail closed unless
 	// [watches] allow_cmd = true is set.
 	Watches WatchesConfig `toml:"watches"`
+
+	// StallRetry configures bounded automatic recovery when a pi worker stops
+	// a turn on a transient ACP stall error (stallretry.go).
+	StallRetry StallRetryConfig `toml:"stall_retry"`
 }
 
 // TapConfig is [tap]: the approval-tap endpoint the ticker runs. Devices are
@@ -331,6 +335,7 @@ func defaultConfig() Config {
 		VerifyMax:             20,
 		GHMinRemaining:        1000,
 		Autonomy:              AutonomyConfig{Level: 4, Max: maxStanding, Widespread: 5, Budget: BudgetConfig{Steps: 30, Applies: 3, Dispatches: 5}},
+		StallRetry:            StallRetryConfig{MaxRetries: defaultStallMaxRetries, BackoffSeconds: defaultStallBackoffSeconds},
 	}
 }
 
@@ -491,6 +496,9 @@ func loadConfig() (Config, error) {
 	}
 	if cfg.PromptDebounceSeconds < 0 {
 		return cfg, fmt.Errorf("prompt_debounce_seconds %d is negative; use 0 to disable the prompt debounce", cfg.PromptDebounceSeconds)
+	}
+	if err := cfg.validateStallRetry(); err != nil {
+		return cfg, err
 	}
 	if cfg.Repo == "" {
 		return cfg, errNoRepo
