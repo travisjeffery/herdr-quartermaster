@@ -22,9 +22,9 @@ func defaultInboxCondition(e Event) *InboxCondition {
 	switch e.Kind {
 	case "closed", EventAutoClosed:
 		kind = "manual"
-	case EventLikelyStale, EventLeaseExpired, EventBreaker:
-		// Verify, lease expiry and breakers can raise notices on backlog beads,
-		// which were never in the active-thread set.
+	case EventLikelyStale, EventLeaseExpired, EventBreaker, EventWatchTriggered, EventWatchExpired:
+		// Verify, lease expiry, breakers and watches can raise notices on
+		// open/backlog beads, which were never in the active-thread set.
 		kind = "bead_closed"
 	case EventNeedsYou:
 		kind = "needs_you" // legacy: either a bead question or an agent prompt

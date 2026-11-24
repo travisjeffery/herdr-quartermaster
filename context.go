@@ -76,6 +76,8 @@ func renderContext(cfg Config, threads []Thread, next, ready []Bead, inbox []Inb
 	if len(threads) == 0 {
 		s.WriteString("(none)\n")
 	}
+	watchesByBead := activeWatchesByBead()
+	shownWatches := map[string]bool{}
 	var resumable, stale, bare []string
 	for _, t := range threads {
 		// Claimed beads nobody is on are summarized, resumable or stale; listing each
@@ -110,6 +112,10 @@ func renderContext(cfg Config, threads []Thread, next, ready []Bead, inbox []Inb
 		if t.PR != nil {
 			fmt.Fprintf(&s, "  %s\n", t.PR.URL)
 		}
+		if ws := watchesByBead[t.Bead.ID]; len(ws) > 0 {
+			fmt.Fprintf(&s, "  watches: %s\n", formatThreadWatches(ws))
+			shownWatches[t.Bead.ID] = true
+		}
 	}
 	if len(resumable) > 0 {
 		fmt.Fprintf(&s, "- resumable (%d): %s  → quartermaster resume\n", len(resumable), strings.Join(resumable, ", "))
@@ -119,6 +125,11 @@ func renderContext(cfg Config, threads []Thread, next, ready []Bead, inbox []Inb
 	}
 	if len(bare) > 0 {
 		fmt.Fprintf(&s, "- claimed, no agent (%d): %s\n", len(bare), strings.Join(bare, ", "))
+	}
+	for _, id := range slices.Sorted(maps.Keys(watchesByBead)) {
+		if !shownWatches[id] {
+			fmt.Fprintf(&s, "- %s · watches: %s\n", id, formatThreadWatches(watchesByBead[id]))
+		}
 	}
 
 	if moves := linearMoves(threads); len(moves) > 0 {

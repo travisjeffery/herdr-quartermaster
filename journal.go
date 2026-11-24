@@ -35,6 +35,8 @@ const (
 	journalTap = "tap"
 	// journalNeedsMe is an answered needs_me question tap (tapquestion.go).
 	journalNeedsMe = "needs_me"
+	// journalWatch is a declarative watch lifecycle event (watch.go).
+	journalWatch = "watch"
 )
 
 type journalRecord struct {
