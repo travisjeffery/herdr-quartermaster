@@ -129,6 +129,21 @@ func TestCheckPiVirtualModel(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "meta/muse-wonder-full-1.0") {
 		t.Fatalf("configured router chain missing: %v", err)
 	}
+	// Configured chain with :thinking suffixes strips :thinking for --list-models and auth check.
+	calls = nil
+	cfg.Agents = map[string]AgentConfig{"pi": {RouterWorkerModels: []string{"anthropic/claude-opus-5-5:high", "openai-codex/gpt-6.2-astra:xhigh"}}}
+	if err := cfg.checkPiModel(fakePi(piAutoListing, 0, &calls), auto, "worker"); err != nil {
+		t.Fatalf("virtual model with :thinking chain failed: %v", err)
+	}
+	if !slices.Contains(calls, "-e /x/quartermaster.ts --list-models claude-opus-5-5") {
+		t.Errorf("expected --list-models without :thinking suffix, got calls: %q", calls)
+	}
+	calls = nil
+	cfg.Agents = map[string]AgentConfig{"pi": {RouterWorkerModels: []string{"anthropic/claude-opus-5-5:high"}}}
+	err = cfg.checkPiModel(fakePi(onlyVirtual, 1, &calls), auto, "worker")
+	if err == nil || !strings.Contains(err.Error(), "pi auth login anthropic") || !slices.Contains(calls, "auth check --provider anthropic") {
+		t.Fatalf("missing :thinking model auth check: err=%v calls=%q", err, calls)
+	}
 }
 
 func TestPiDefaults(t *testing.T) {

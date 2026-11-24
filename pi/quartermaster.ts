@@ -49,7 +49,14 @@
 // @ts-nocheck
 
 import { installCoordinatorInbox } from "./coordinator.ts";
-import { decideRoute, parseQuotaSnapshot, parseRouterConfig } from "./router.ts";
+import {
+  decideRoute,
+  formatVirtualModelName,
+  isValidThinkingLevel,
+  parseModelSpec,
+  parseQuotaSnapshot,
+  parseRouterConfig,
+} from "./router.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -177,8 +184,10 @@ export default function (pi) {
   // the role's ordered chain (default: Antigravity Neon XHigh -> Claude ->
   // OpenAI), failing over on per-provider low quota, rate limits, provider
   // unavailability, or expired auth tokens. Route reads both JSON files per
-  // request, so a ticker refresh applies at the next turn boundary; a missing
-  // or bad file routes on defaults with no quota, never an error.
+  // request, so a ticker refresh or `quartermaster router sync` applies at
+  // the next turn boundary; a missing or bad file routes on defaults with no
+  // quota, never an error.
+  let refreshRouterModels: (() => void) | undefined;
   if (typeof pi.registerVirtualModel === "function") {
     const readOr = (p: string): string => {
       try {
@@ -189,83 +198,125 @@ export default function (pi) {
     };
     const refOf = (m: any): string | null =>
       m && typeof m.provider === "string" && typeof m.id === "string" ? m.provider + "/" + m.id : null;
-    const findUsable = (ctx: any, ref: string): any => {
-      const slash = ref.indexOf("/");
-      if (slash <= 0 || slash === ref.length - 1) return null;
-      const [provider, id] = [ref.slice(0, slash), ref.slice(slash + 1)];
-      const model = ctx.modelRegistry.find(provider, id);
+    const findUsable = (ctx: any, specStr: string): { model: any; ref: string; thinkingLevel: string | null } | null => {
+      const spec = parseModelSpec(specStr);
+      if (!spec) return null;
+      const model = ctx.modelRegistry.find(spec.rawProvider, spec.id);
       if (!model) return null;
       const avail = typeof ctx.modelRegistry.getAvailable === "function" ? ctx.modelRegistry.getAvailable() : null;
-      if (Array.isArray(avail) && !avail.some((m: any) => refOf(m) === ref)) return null;
-      return model;
+      if (Array.isArray(avail) && !avail.some((m: any) => refOf(m) === spec.ref)) return null;
+      return { model, ref: spec.ref, thinkingLevel: spec.thinkingLevel };
     };
-    for (const [role, id, name] of [
-      ["worker", "worker-auto", "Worker auto (Antigravity, Claude, OpenAI failover)"],
-      ["coordinator", "coordinator-auto", "Coordinator auto (Antigravity, Claude, OpenAI failover)"],
-    ] as const) {
-      pi.registerVirtualModel({
-        provider: "quartermaster",
-        id,
-        name,
-        thinkingLevels: ["off", "low", "medium", "high", "xhigh"],
-        // The smaller physical window, shown only before the first
-        // response; compaction re-checks the routed model's own limits.
-        contextWindow: 272_000,
-        maxTokens: 65_536,
-        route(request: any, ctx: any) {
-          const routerPath = pi.getFlag("quartermaster-router");
-          const config = parseRouterConfig(typeof routerPath === "string" && routerPath ? readOr(routerPath) : "");
-          const quotaPath =
-            typeof routerPath === "string" && routerPath ? path.join(path.dirname(routerPath), "quota.json") : "";
-          const nowMs = Date.now();
-          const quota = parseQuotaSnapshot(quotaPath ? readOr(quotaPath) : "", nowMs, config.quota_max_age_seconds * 1000);
-          const chain = role === "coordinator" ? config.coordinator_models : config.worker_models;
-          const usableMap = new Map<string, any>();
-          for (const ref of chain) {
-            const m = findUsable(ctx, ref);
-            if (m) usableMap.set(ref, m);
-          }
-          const decision = decideRoute({
-            role,
-            config,
-            quota,
-            nowMs,
-            usable: [...usableMap.keys()],
-            reason: request.reason,
-            previous: refOf(request.previous?.model),
-            failed: refOf(request.failed?.model),
-            failedError: request.failed?.message
-              ? String(request.failed.message.errorMessage || "") + " " + String(request.failed.message.stopReason || "")
-              : "",
-            state: request.state ?? null,
-          });
-          // Keep the exact model object of a sticky route; else use the
-          // resolved usable physical model from the chain, falling back to
-          // the first usable model so route() errors only when no physical
-          // model can serve at all.
-          let model = null;
-          const sticky = request.failed?.model ?? request.previous?.model;
-          if (sticky && refOf(sticky) === decision.model) model = sticky;
-          if (!model) model = usableMap.get(decision.model) || findUsable(ctx, decision.model);
-          if (!model) {
-            for (const m of usableMap.values()) {
-              model = m;
-              break;
+    const readConfiguredForLabel = () => {
+      const routerPath = pi.getFlag("quartermaster-router");
+      if (typeof routerPath !== "string" || !routerPath) return null;
+      const rawText = readOr(routerPath);
+      if (!rawText) return null;
+      try {
+        const parsed = JSON.parse(rawText);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      } catch {
+        return null;
+      }
+      return parseRouterConfig(rawText);
+    };
+    const registeredNames: Record<string, string> = {};
+    refreshRouterModels = () => {
+      const labelCfg = readConfiguredForLabel();
+      for (const [role, id] of [
+        ["worker", "worker-auto"],
+        ["coordinator", "coordinator-auto"],
+      ] as const) {
+        const name = formatVirtualModelName(role, labelCfg);
+        if (registeredNames[id] === name) continue;
+        registeredNames[id] = name;
+        pi.registerVirtualModel({
+          provider: "quartermaster",
+          id,
+          name,
+          thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+          // The smaller physical window, shown only before the first
+          // response; compaction re-checks the routed model's own limits.
+          contextWindow: 272_000,
+          maxTokens: 65_536,
+          route(request: any, ctx: any) {
+            const routerPath = pi.getFlag("quartermaster-router");
+            const config = parseRouterConfig(typeof routerPath === "string" && routerPath ? readOr(routerPath) : "");
+            const quotaPath =
+              typeof routerPath === "string" && routerPath ? path.join(path.dirname(routerPath), "quota.json") : "";
+            const nowMs = Date.now();
+            const quota = parseQuotaSnapshot(quotaPath ? readOr(quotaPath) : "", nowMs, config.quota_max_age_seconds * 1000);
+            const chain = role === "coordinator" ? config.coordinator_models : config.worker_models;
+            const usableMap = new Map<string, { model: any; thinkingLevel: string | null }>();
+            for (const spec of chain) {
+              const resolved = findUsable(ctx, spec);
+              if (resolved && !usableMap.has(resolved.ref)) {
+                usableMap.set(resolved.ref, { model: resolved.model, thinkingLevel: resolved.thinkingLevel });
+              }
             }
-          }
-          if (!model && sticky) model = sticky;
-          if (!model) {
-            throw new Error(
-              "quartermaster router: none of " +
-                chain.join(", ") +
-                " is usable in pi (check `pi --list-models` and `pi auth check`)",
-            );
-          }
-          const thinkingLevel = model.reasoning ? request.thinkingLevel || "xhigh" : "off";
-          return { model, thinkingLevel, state: decision.state };
-        },
-      });
-    }
+            const decision = decideRoute({
+              role,
+              config,
+              quota,
+              nowMs,
+              usable: [...usableMap.keys()],
+              reason: request.reason,
+              previous: refOf(request.previous?.model),
+              failed: refOf(request.failed?.model),
+              failedError: request.failed?.message
+                ? String(request.failed.message.errorMessage || "") + " " + String(request.failed.message.stopReason || "")
+                : "",
+              state: request.state ?? null,
+            });
+            // Keep the exact model object of a sticky route; else use the
+            // resolved usable physical model from the chain, falling back to
+            // the first usable model so route() errors only when no physical
+            // model can serve at all.
+            let model = null;
+            const stickyObj = request.failed ?? request.previous;
+            const sticky = stickyObj?.model;
+            const stickyMatched = !!(sticky && refOf(sticky) === decision.model);
+            const isStickyRoute =
+              stickyMatched && typeof decision.why === "string" && decision.why.startsWith("sticky:");
+            if (stickyMatched) model = sticky;
+            if (!model) model = usableMap.get(decision.model)?.model || findUsable(ctx, decision.model)?.model || null;
+            if (!model) {
+              for (const entry of usableMap.values()) {
+                model = entry.model;
+                break;
+              }
+            }
+            if (!model && sticky) model = sticky;
+            if (!model) {
+              throw new Error(
+                "quartermaster router: none of " +
+                  chain.join(", ") +
+                  " is usable in pi (check `pi --list-models` and `pi auth check`)",
+              );
+            }
+            let thinkingLevel = "off";
+            if (model.reasoning) {
+              const modelRef = refOf(model);
+              const entryThinking =
+                modelRef === decision.model
+                  ? decision.thinkingLevel
+                  : (modelRef && usableMap.get(modelRef)?.thinkingLevel) || null;
+              if (isStickyRoute && isValidThinkingLevel(stickyObj?.thinkingLevel)) {
+                thinkingLevel = stickyObj.thinkingLevel;
+              } else if (isValidThinkingLevel(entryThinking)) {
+                thinkingLevel = entryThinking;
+              } else if (isValidThinkingLevel(request.thinkingLevel)) {
+                thinkingLevel = request.thinkingLevel;
+              } else {
+                thinkingLevel = "xhigh";
+              }
+            }
+            return { model, thinkingLevel, state: decision.state };
+          },
+        });
+      }
+    };
+    refreshRouterModels();
   }
 
   // Texts of prompts quartermaster sent over the socket that pi hasn't yet
@@ -428,6 +479,13 @@ export default function (pi) {
 
   pi.on("session_start", (_event, ctx) => {
     ctxNow = ctx;
+    if (typeof refreshRouterModels === "function") {
+      try {
+        refreshRouterModels();
+      } catch {
+        // Keep the initial neutral virtual-model labels if refresh fails.
+      }
+    }
     const handoff = process.env.QUARTERMASTER_RPC_HANDOFF_FILE;
     if (handoff && nativeRPC(ctx)) {
       // Verify the freshly seeded custom message, never convert old history

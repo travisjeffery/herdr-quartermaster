@@ -825,7 +825,8 @@ args = ["--mode", "auto", "--model", "gemini-4-neon-high"]
 args = ["--approve", "--model", "quartermaster/worker-auto"]
 coordinator_args = ["--approve", "--model", "quartermaster/coordinator-auto"]
 router_threshold = 20     # percent provider headroom left: new turns switch to the next model at or below
-router_recover = 30       # percent: switch back at or above (router_*_models override the ordered chains)
+router_recover = 30       # percent: switch back at or above (router_*_models accept optional :thinking suffixes;
+                          # [agents.pi.router_providers.<provider>] overrides threshold/recover per provider)
 ask = []                  # bash commands (JS regexps) a hook would ask about that wait for `quartermaster answer` instead of blocking
 ask_timeout = "10m"       # how long such a command waits before it blocks anyway
 
@@ -1153,6 +1154,8 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster board` | The board popup (`prefix+j`): every open bead by state, acting on them, and the tidy view. See [The board](#the-board). |
 | `quartermaster ticker run\|start\|stop\|status`, `quartermaster tick` | The background loop, or one pass of it in the foreground. `status` shows the herdr socket it follows. |
 | `quartermaster ticker notifications` | Read-only [worker desktop delivery receipts](docs/desktop-alerts.md): detection, bounded safe retries, submitted/failed/unknown. Submission is not human readback or task completion. |
+| `quartermaster router [status\|sync]` | Inspect the effective Pi virtual-model chains (including `:thinking` overrides), global and per-provider thresholds, whether `router.json` matches `config.toml`, and provider headroom/freshness from `quota.json`; `sync` validates `config.toml` and writes `router.json` immediately. |
+| `quartermaster router set worker\|coordinator <model>...` | Validate and update `[agents.pi]` `router_worker_models` or `router_coordinator_models` in `config.toml` (preserving comments, formatting, permissions, and unrelated sections; clearing a conflicting legacy singular key if present) and sync `router.json` immediately. |
 | `quartermaster configure [--repo PATH]` | First-time setup: write the config, link `~/.local/bin/quartermaster` (and `qm`), install the agent view. Safe to run again. |
 | `quartermaster unconfigure` | Stop the ticker and remove the agent view and sidebar tokens. |
 | `quartermaster autonomy level` | The dial: global level, max, leases, and each active bead's effective level. Advisory: workers hold their own credentials. |
