@@ -196,6 +196,7 @@ type contextThread struct {
 	group     Group  `json:"-"`
 	repoTag   string `json:"-"`
 	isNeedsMe bool   `json:"-"`
+	cardLine  string `json:"-"`
 }
 
 func (t contextThread) MarshalJSON() ([]byte, error) {
@@ -246,6 +247,7 @@ type contextDoc struct {
 	noAgentStale  []string
 	noAgentBare   []string
 	extraWatches  []watchLine
+	workflowsText string
 	inboxOmitted  int
 	linearOmitted int
 	nextOmitted   int
@@ -409,6 +411,9 @@ func buildContextDoc(cfg Config, rawThreads []Thread, next, ready []Bead, inbox 
 			})
 		}
 		doc.Threads = &items
+		if !opts.Compact {
+			doc.workflowsText = workflowContextSection()
+		}
 	}
 
 	if opts.Sections.has(ctxLinear) {
@@ -549,6 +554,9 @@ func buildContextThread(cfg Config, t Thread, g Group, noAgentKind string, compa
 		if q, ok := liveQuestion(t); ok {
 			ct.Question = shortTitle(strings.Join(q.Lines, " "), 200)
 			ct.Options = q.Choices()
+			if !compact {
+				ct.cardLine = cardContextLines(t.Bead)
+			}
 		} else if q := lastNote(t.Bead.Notes, 200); cmd == "" || !strings.HasPrefix(q, "RUN:") {
 			ct.Question = q
 		}
@@ -770,6 +778,9 @@ func renderContextText(doc *contextDoc) string {
 	if doc.Threads != nil {
 		parts = append(parts, renderThreadsText(doc))
 	}
+	if doc.workflowsText != "" {
+		parts = append(parts, strings.TrimPrefix(doc.workflowsText, "\n"))
+	}
 	if doc.Linear != nil {
 		parts = append(parts, renderLinearText(doc))
 	}
@@ -908,6 +919,9 @@ func renderThreadsText(doc *contextDoc) string {
 		}
 		if t.Options != "" {
 			fmt.Fprintf(&s, "  question: %s\n  options: %s\n", t.Question, t.Options)
+			if t.cardLine != "" {
+				s.WriteString(t.cardLine)
+			}
 		} else if t.Question != "" {
 			fmt.Fprintf(&s, "  question: %s\n", t.Question)
 		}

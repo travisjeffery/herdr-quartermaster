@@ -255,7 +255,7 @@ func resumeOne(cfg Config, h Herdr, r Resumable, kind string) (string, error) {
 		}
 	}
 	text := fmt.Sprintf("[quartermaster] You were resumed after your agent exited. Run `bd show %s` and continue.", id)
-	_ = h.Run(pane, cfg.agentEnv(kind)+execEnv(id))
+	_ = h.Run(pane, cfg.agentEnv(kind)+" QUARTERMASTER_BEAD="+shellQuote(id)+execEnv(id))
 	args := cfg.agentArgs(kind, cfg.launchBypass(r.Bead, localHost), resumeArgs[kind]...)
 	if kind == "pi" {
 		var err error

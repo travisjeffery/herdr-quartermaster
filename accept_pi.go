@@ -42,7 +42,8 @@ func piVerifierEnv(env []string) []string {
 		k, _, _ := strings.Cut(kv, "=")
 		switch k {
 		case "PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL",
-			"PI_CODING_AGENT_SESSION_DIR", "HERDR_ENV", "HERDR_PANE_ID", "RIPGREP_CONFIG_PATH":
+			"PI_CODING_AGENT_SESSION_DIR", "HERDR_ENV", "HERDR_PANE_ID", "RIPGREP_CONFIG_PATH",
+			"QUARTERMASTER_BEAD":
 			continue
 		}
 		out = append(out, kv)

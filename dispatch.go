@@ -231,7 +231,7 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 		// the dispatch on record.
 		_ = bd.Note(id, fmt.Sprintf("%s dispatched %s%s — quartermaster dispatch", auto, kind, onHost(host)))
 	}
-	env := cfg.agentEnvOn(host, kind)
+	env := cfg.agentEnvOn(host, kind) + " QUARTERMASTER_BEAD=" + shellQuote(id)
 	if host == localHost {
 		// The bead's own socket to the executor and the shims, if one is
 		// running (S1: advisory routing).

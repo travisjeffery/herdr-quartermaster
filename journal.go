@@ -37,6 +37,10 @@ const (
 	journalNeedsMe = "needs_me"
 	// journalWatch is a declarative watch lifecycle event (watch.go).
 	journalWatch = "watch"
+	// journalCard is a structured question card or milestone (cards.go).
+	journalCard = "card"
+	// journalWorkflow is a durable rollout workflow transition (workflow.go).
+	journalWorkflow = "workflow"
 )
 
 type journalRecord struct {
