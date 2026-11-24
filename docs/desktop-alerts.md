@@ -1,11 +1,46 @@
 # Worker desktop alerts
 
-The ticker reconciles **current** `blocked` / `needs_me` beads and workers
-waiting at an approval/question prompt, including native pi RPC workers. This
-is independent of transition-event suppression, coordinator inbox delivery and
-headless enrollment. It never prompts, activates, answers, stops or restarts a
-worker. Migration parking alone is not a new approval; an explicitly blocked
-or needs_me task still counts.
+The ticker sends local desktop notifications (`notify-send`) for both:
+
+1. **Current blockers:** `needs_me` beads, `blocked` beads, and workers waiting
+   at an approval/question prompt, including native pi RPC workers.
+2. **Event-driven PR milestones:**
+   - **PR merged** (`pr_merged`)
+   - **PR green & awaiting review** (`pr_green`) — open, non-draft PR with
+     passing checks, no failing/pending checks, no requested changes, no merge
+     conflicts, and no known open review threads
+   - **PR ready to merge** (`pr_ready`) — open PR satisfying merge readiness
+     (takes precedence over `pr_green` when both occur on the same tick)
+
+Blocker reconciliation runs independently of transition-event suppression,
+coordinator inbox delivery, and headless enrollment. It never prompts,
+activates, answers, stops, or restarts a worker. Migration parking alone is not
+a new approval; an explicitly blocked or `needs_me` task still counts.
+
+PR milestones are derived on thread transitions and baselined on first sight
+(and across upgrades via `green_tracked` / `merged_tracked`) so restarting the
+ticker never replays historical PR states.
+
+## Configuration
+
+All desktop alerts are enabled by default and configurable under `[desktop]` in
+`~/.config/quartermaster/config.toml`:
+
+```toml
+[desktop]
+enabled = true             # master switch for ticker notify-send alerts
+pr_merged = true           # notify when a tracked PR merges
+pr_green = true            # notify when an open non-draft PR is green & awaiting review
+pr_ready = true            # notify when an open PR is ready to merge
+needs_me = true            # notify when a bead enters needs_me or a worker hits an approval prompt
+blocked = true             # notify when a bead enters blocked status
+needs_me_summary = true    # include bead ID + concise 1-line sanitized question/reason on needs_me
+cooldown_seconds = 60      # minimum interval between desktop notifications (coalesces bursts; 0 disables)
+```
+
+Negative `cooldown_seconds` fails closed on config load. Slack delivery in the
+hourly digest is unaffected; ticker milestone alerts use local `notify-send`
+only.
 
 ## Evidence, not task state
 
@@ -40,13 +75,18 @@ reconcile; ordinary transitions are skipped and the discovery error remains
 visible. If Beads itself is unreadable, reconciliation waits rather than
 inventing task state.
 
-Each current episode gets at most three **safe** attempts: immediate, after one
-minute, then after five minutes. Every attempt coalesces all due episodes into
-one generic local notification, globally limited to one per minute. Repeated
-observations, ticker restarts and unchanged/missing prompt hashes cannot reset
-the retry budget. A confirmed different approval prompt or a resolved-then-new
-blocker creates a new episode. The latest receipt per task is retained, with all
-active blockers plus at most 256 inactive receipts; this is an operational
+Each current episode or milestone gets at most three **safe** attempts:
+immediate, after one minute, then after five minutes. Every attempt coalesces
+all due episodes and milestones into one concise single-line local notification
+(capped at five entries plus a `+N more` count), globally rate-limited by
+`[desktop] cooldown_seconds` (default one minute). Bursts arriving during the
+cooldown are durably recorded and coalesced into the next notification rather
+than dropped. Repeated observations, ticker restarts, and unchanged/missing
+prompt hashes cannot reset the retry budget. A confirmed different approval
+prompt, a new `needs_me` question (ignoring bookkeeping notes), or a
+resolved-then-new blocker creates a new episode. PR milestones settle inactive
+once submitted, ambiguous (`unknown`), or retries are exhausted. All active
+receipts plus at most 256 inactive receipts are retained; this is an operational
 outbox, not an append-only audit history.
 
 First startup may summarize existing current blockers **once**, not one alert
@@ -56,14 +96,27 @@ question remains unanswered. No desktop notification acknowledges an inbox item
 or changes Beads status. There is no implicit human-readback receipt; actual
 visibility/readback must be confirmed separately by the operator.
 
-## Delivery and failure recovery
+## Delivery, sanitization, and failure recovery
 
 The adapter uses `notify-send`, the same local desktop convention as the digest,
 without requiring a Herdr pane or a headless service. The ticker's environment
 must find the notifier and reach the desktop user session. It has a three-second
-timeout, no shell evaluation, and no Slack/email fallback. Desktop text is fixed:
-no task identifiers/titles, commands awaiting approval, resource names, private
-notes, subprocess output or transcripts appear on the desktop.
+timeout, passes `--` before title and body, uses no shell evaluation, and has
+no Slack/email fallback.
+
+- **`needs_me` alerts** include the bead ID and a concise, single-line sanitized
+  summary of the live question or `RUN:` reason. Complete values are sanitized
+  before truncation: tap URLs (`/tap/...`, `/tap-links/...`, `/inbox/...`,
+  tailnet addresses and `.ts.net` links), generic URLs, signed tokens, bearer
+  and basic credentials, API keys, passwords, private keys, cookies, ANSI
+  escapes, and control/bidi characters are stripped or redacted so neither
+  `notify-send` nor `notifications.json` leaks secrets or tap links. Set
+  `[desktop] needs_me_summary = false` to fall back to fixed generic wording.
+- **`blocked` and `worker_blocked` alerts** keep fixed generic wording: commands
+  awaiting approval, subprocess output, and transcripts never appear on the
+  desktop.
+- **PR milestone alerts** show the bead ID, `owner/repo#N`, milestone status,
+  and (for merged/green PRs) a sanitized short PR title.
 
 The ticker log records failed/unknown outcomes and storage errors with the
 report command. For `notifier-unavailable`, restore the executable/PATH and wait

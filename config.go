@@ -101,6 +101,82 @@ type Config struct {
 	// see watch.go and docs/watches.md. Command probes fail closed unless
 	// [watches] allow_cmd = true is set.
 	Watches WatchesConfig `toml:"watches"`
+
+	// Desktop configures event-driven desktop notifications (`notify-send`)
+	// delivered by the ticker; see desktop.go and docs/desktop-alerts.md.
+	Desktop DesktopConfig `toml:"desktop"`
+}
+
+// DesktopConfig is [desktop]: controls event-driven desktop notifications
+// delivered via notify-send. Omitted booleans default to true (on);
+// cooldown_seconds defaults to 60 (0 disables cooldown).
+type DesktopConfig struct {
+	// Enabled turns ticker desktop notifications on or off (default true).
+	Enabled *bool `toml:"enabled"`
+	// PRMerged notifies when a tracked PR merges (default true).
+	PRMerged *bool `toml:"pr_merged"`
+	// PRGreen notifies when an open non-draft PR's checks are green and it is
+	// awaiting review (default true).
+	PRGreen *bool `toml:"pr_green"`
+	// PRReady notifies when an open PR becomes ready to merge (default true).
+	PRReady *bool `toml:"pr_ready"`
+	// NeedsMe notifies when a bead enters needs_me or a worker hits an
+	// approval prompt (default true).
+	NeedsMe *bool `toml:"needs_me"`
+	// Blocked notifies when a bead enters blocked status (default true).
+	Blocked *bool `toml:"blocked"`
+	// NeedsMeSummary includes the bead ID and a concise 1-line sanitized
+	// summary on needs_me notifications (default true). Set false for fixed
+	// generic wording with no bead ID or note summary.
+	NeedsMeSummary *bool `toml:"needs_me_summary"`
+	// CooldownSeconds is the minimum interval between desktop notifications
+	// so bursts coalesce into one alert (default 60; 0 disables cooldown).
+	CooldownSeconds *int `toml:"cooldown_seconds"`
+}
+
+func desktopBool(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
+func (c DesktopConfig) enabled() bool               { return desktopBool(c.Enabled, true) }
+func (c DesktopConfig) notifyPRMerged() bool        { return c.enabled() && desktopBool(c.PRMerged, true) }
+func (c DesktopConfig) notifyPRGreen() bool         { return c.enabled() && desktopBool(c.PRGreen, true) }
+func (c DesktopConfig) notifyPRReady() bool         { return c.enabled() && desktopBool(c.PRReady, true) }
+func (c DesktopConfig) notifyNeedsMe() bool         { return c.enabled() && desktopBool(c.NeedsMe, true) }
+func (c DesktopConfig) notifyBlocked() bool         { return c.enabled() && desktopBool(c.Blocked, true) }
+func (c DesktopConfig) includeNeedsMeSummary() bool { return desktopBool(c.NeedsMeSummary, true) }
+
+func (c DesktopConfig) allowsMilestone(reason string) bool {
+	switch reason {
+	case "pr_merged":
+		return c.notifyPRMerged()
+	case "pr_green":
+		return c.notifyPRGreen()
+	case "pr_ready":
+		return c.notifyPRReady()
+	default:
+		return false
+	}
+}
+
+func (c DesktopConfig) cooldown() time.Duration {
+	if c.CooldownSeconds == nil {
+		return time.Minute
+	}
+	if *c.CooldownSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(*c.CooldownSeconds) * time.Second
+}
+
+func (c Config) validateDesktop() error {
+	if c.Desktop.CooldownSeconds != nil && *c.Desktop.CooldownSeconds < 0 {
+		return fmt.Errorf("[desktop] cooldown_seconds %d is negative; use 0 to disable cooldown", *c.Desktop.CooldownSeconds)
+	}
+	return nil
 }
 
 // TapConfig is [tap]: the approval-tap endpoint the ticker runs. Devices are
@@ -484,6 +560,9 @@ func loadConfig() (Config, error) {
 		return cfg, err
 	}
 	if err := cfg.validateTap(); err != nil {
+		return cfg, err
+	}
+	if err := cfg.validateDesktop(); err != nil {
 		return cfg, err
 	}
 	if cfg.Watches.MaxConcurrent < 0 {
