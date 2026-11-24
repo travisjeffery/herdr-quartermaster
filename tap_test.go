@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -28,8 +29,19 @@ func testTapServer(t *testing.T, f *fakePane, device string) *tapServer {
 }
 
 func tapRequest(s *tapServer, method, token, remoteAddr string) (int, string) {
+	return tapFormRequest(s, method, token, nil, remoteAddr)
+}
+
+func tapFormRequest(s *tapServer, method, token string, form url.Values, remoteAddr string) (int, string) {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(method, "/tap/"+token, nil)
+	var body io.Reader
+	if form != nil {
+		body = strings.NewReader(form.Encode())
+	}
+	req := httptest.NewRequest(method, "/tap/"+token, body)
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
 	req.RemoteAddr = remoteAddr
 	s.handler().ServeHTTP(rec, req)
 	return rec.Code, rec.Body.String()
@@ -88,11 +100,15 @@ func TestTapAnswersPromptEndToEnd(t *testing.T) {
 	s := testTapServer(t, f, "iphone181")
 	tok := tapTokenFor(t, s, p, "1")
 
-	// The tap target first shows the actual command; opening it answers nothing.
+	// The tap target first shows the actual command; opening it answers nothing,
+	// and tool approval prompts never gain a free-text input.
 	code, body := tapRequest(s, http.MethodGet, tok, tapPhoneAddr)
 	// The command is the agent's screen text, so it arrives HTML-escaped.
 	if code != http.StatusOK || !strings.Contains(body, "mkdir -p out2 &amp;&amp; touch out2/hello.txt") || !strings.Contains(body, "Answer 1. Yes") {
 		t.Fatalf("confirm page = %d %q", code, body)
+	}
+	if strings.Contains(body, "<textarea") {
+		t.Fatalf("approval prompt confirm page unexpectedly rendered a textarea:\n%s", body)
 	}
 	if len(f.sent) != 0 {
 		t.Fatalf("a GET sent keys: %q", f.sent)
@@ -112,6 +128,25 @@ func TestTapAnswersPromptEndToEnd(t *testing.T) {
 	recs, err := readJournal(time.Time{})
 	if err != nil || len(recs) != 1 || recs[0].Kind != journalPrompt || recs[0].Text != want {
 		t.Fatalf("journal = %+v, err %v", recs, err)
+	}
+}
+
+func TestTapPromptRejectsFreeTextBeforeSpend(t *testing.T) {
+	bash := screen(t, "claude-bash-4.txt")
+	p, _ := parsePrompt(bash)
+	f := &fakePane{screens: []string{bash, screen(t, "claude-idle.txt")}}
+	s := testTapServer(t, f, "iphone181")
+	tok := tapTokenFor(t, s, p, "1")
+
+	if code, body := tapFormRequest(s, http.MethodPost, tok, url.Values{"text": {"extra note"}}, tapPhoneAddr); code != http.StatusBadRequest || !strings.Contains(body, "do not accept free text") {
+		t.Fatalf("prompt free text = %d %q", code, body)
+	}
+	if len(f.sent) != 0 || len(f.notes) != 0 {
+		t.Fatalf("refused free text on prompt acted: sent %q notes %q", f.sent, f.notes)
+	}
+	// Nonce was not spent: a normal tap still answers the prompt.
+	if code, body := tapRequest(s, http.MethodPost, tok, tapPhoneAddr); code != http.StatusOK || !strings.Contains(body, "Answered") {
+		t.Fatalf("normal tap after refusal = %d %q", code, body)
 	}
 }
 

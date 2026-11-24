@@ -342,9 +342,16 @@ type inboxQuestion struct {
 	Lines          []string               `json:"lines,omitempty"`
 	Recommendation *tapCardRecommendation `json:"recommendation,omitempty"`
 	Options        []inboxQuestionOption  `json:"options,omitempty"`
+	FreeText       *inboxFreeTextLink     `json:"free_text,omitempty"`
 	Expires        *time.Time             `json:"expires,omitempty"`
 	Evidence       *inboxEvidence         `json:"evidence,omitempty"`
 	Milestones     []tapMilestoneCard     `json:"milestones,omitempty"`
+}
+
+type inboxFreeTextLink struct {
+	Path     string `json:"path"`
+	URL      string `json:"url"`
+	MaxChars int    `json:"max_chars"`
 }
 
 type inboxQuestionOption struct {
@@ -851,6 +858,18 @@ func (s *tapServer) buildQuestionItem(th Thread, pendingPlans map[string]string,
 			item.Expires = &exp
 			item.Tappable = true
 		}
+		if ft, err := mintQuestionFreeTextTapLink(s.secret, "", b.ID, q, now); err == nil {
+			item.FreeText = &inboxFreeTextLink{
+				Path:     ft.URL,
+				URL:      s.linkURL(ft.URL),
+				MaxChars: tapMaxFreeTextRunes,
+			}
+			if item.Expires == nil {
+				exp := ft.Exp
+				item.Expires = &exp
+			}
+			item.Tappable = true
+		}
 
 		if cardMatches {
 			item.Kind = "structured"
@@ -971,8 +990,21 @@ func (s *tapServer) buildQuestionItem(th Thread, pendingPlans map[string]string,
 		return item
 	}
 
-	// 4. Free-text needs_me note: show read-only so nothing awaiting TJ hides.
+	// 4. Free-text needs_me note: tappable via free-text confirm page when a
+	// live question is present; read-only fallback when the bead has no note text.
 	item.Kind = "free_text"
+	if fq, ok := parseFreeTextNeedsMeQuestion(b.Notes); ok {
+		if ft, err := mintQuestionFreeTextTapLink(s.secret, "", b.ID, fq, now); err == nil {
+			exp := ft.Exp
+			item.Expires = &exp
+			item.Tappable = true
+			item.FreeText = &inboxFreeTextLink{
+				Path:     ft.URL,
+				URL:      s.linkURL(ft.URL),
+				MaxChars: tapMaxFreeTextRunes,
+			}
+		}
+	}
 	notes := noteLines(b.Notes)
 	if n := waitingNotes(notes); n > 0 {
 		item.Lines = notes[len(notes)-n:]
@@ -1662,6 +1694,7 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--border);font-
       {{if eq .Kind "run"}}<span class="tag warn">RUN</span>
       {{else if eq .Kind "structured"}}<span class="tag med">card</span>
       {{else if eq .Kind "options"}}<span class="tag med">options</span>
+      {{else if .Tappable}}<span class="tag med">free text</span>
       {{else}}<span class="tag">read-only</span>{{end}}
     </div>
     {{if .Title}}<div class="card-title">{{.Title}}</div>{{end}}
@@ -1742,15 +1775,28 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--border);font-
         </div>
         {{end}}
       {{end}}
+      {{if .FreeText}}
+      <a class="opt-btn" href="{{.FreeText.Path}}">
+        <span class="opt-top">Answer with free text…</span>
+        <span class="opt-desc">Write prose instead of or alongside an option (up to {{.FreeText.MaxChars}} chars)</span>
+      </a>
+      {{end}}
     </div>
     {{if .Expires}}
-    <div class="hint">Tapping opens a live re-read confirm page before answering (one-time links expire {{fmtTime .Expires}}).</div>
+    <div class="hint">Tapping opens a live re-read confirm page with an optional free-text field (one-time links expire {{fmtTime .Expires}}).</div>
     {{else}}
     <div class="hint">Read-only card (no live OPTIONS note on bead for one-time tap links).</div>
     {{end}}
     {{else if eq .Kind "free_text"}}
     {{if gt (len .Lines) 1}}<pre>{{joinLines .Lines}}</pre>{{end}}
+    {{if .FreeText}}
+    <div class="actions">
+      <a class="btn btn-primary" href="{{.FreeText.Path}}">Answer with free text →</a>
+    </div>
+    <div class="hint">Opens a live re-read confirm page with a free-text field (up to {{.FreeText.MaxChars}} chars; one-time link expires {{fmtTime .Expires}}).</div>
+    {{else}}
     <div class="hint">Read-only needs_me note — reply via coordinator or worker terminal.</div>
+    {{end}}
     {{end}}
 
     {{if gt (len .Milestones) 0}}

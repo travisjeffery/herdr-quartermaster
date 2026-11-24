@@ -95,11 +95,11 @@ Usage:
                 [--by WHO] [--class N]                 if it is still the one with HASH; waits for it to clear
                                                        and notes the answer on the bead; N is the class of
                                                        the command it releases
-  quartermaster tap links <bead>                       signed one-time links, one per option, that answer the
-                                                       bead's prompt (or its needs_me OPTIONS question) as
-                                                       TJ when tapped from an allowed phone (needs [tap]
-                                                       enabled; the ticker serves them, and adds them to
-                                                       the prompt's or question's inbox event)
+  quartermaster tap links <bead>                       signed one-time links (options + free text) that answer
+                                                       the bead's prompt or needs_me question as TJ when tapped
+                                                       from an allowed phone (needs [tap] enabled; the ticker
+                                                       serves them, and adds them to the prompt's or question's
+                                                       inbox event)
   quartermaster tap url                                bookmarkable Tailnet Web Inbox URL (/inbox) when [tap]
                                                        is enabled and Tailscale resolves (fails closed otherwise)
   quartermaster tap serve                              run the tap endpoint in the foreground (the ticker
