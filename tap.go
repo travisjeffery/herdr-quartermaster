@@ -313,6 +313,8 @@ func newTapServerWithConfig(cfg Config, env promptEnv, inbox *tapInboxEnv) (*tap
 func (s *tapServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tap/", s.handleTap)
+	mux.HandleFunc("/tap-links", s.handleTapLinks)
+	mux.HandleFunc("/tap-links/", s.handleTapLinks)
 	mux.HandleFunc("/inbox", s.handleInbox)
 	mux.HandleFunc("/inbox.json", s.handleInboxJSON)
 	mux.HandleFunc("/inbox/plan/", s.handleInboxPlan)

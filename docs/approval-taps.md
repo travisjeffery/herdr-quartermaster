@@ -60,13 +60,31 @@ The same Tailscale-bound tap server also hosts a persistent, mobile-first
   `[tap]` is enabled with a valid `devices` allowlist and Tailscale resolves;
   it fails closed otherwise.
 
-Every route (`/`, `/inbox`, `/inbox.json`, `/inbox/plan/<digest>`, and
-`/tap/<token>`) enforces the exact same fail-closed auth guard: tailnet source
+Every route (`/`, `/inbox`, `/inbox.json`, `/inbox/plan/<digest>`,
+`/tap-links/<bead>`, and `/tap/<token>`) enforces the exact same fail-closed auth guard: tailnet source
 IP, `tailscale whois` lookup, and explicit membership in `[tap] devices`. Any
 non-tailnet source, failed `whois`, or disallowed device — including the host
 machine itself — receives `403` and is journalled as `TAP REFUSED: …` before
 any state is read or touched. `GET` requests never mutate state, spend nonces,
 answer prompts, or approve plans.
+
+### On-demand tap links (`GET /tap-links/<bead>`)
+
+Clients on an allowed tailnet device can mint fresh, 15-minute one-time
+`/tap/<token>` links on demand for one bead at a live approval prompt or live
+`needs_me` `OPTIONS:` question:
+
+- **`GET /tap-links/<bead>`** returns JSON (`bead`, `kind`, `question`,
+  `expires`, `links`) with `Cache-Control: no-store`.
+- Every call mints fresh nonces without invalidating earlier sets; the one-use
+  nonce spend and live re-read keep answering at-most-once.
+- Non-live targets (missing or closed bead, `RUN:` bead, worker already working
+  again, answered question, or no parseable prompt/options) return `404` JSON
+  `{"error": …}` and mint nothing. There is no listing route.
+- Minted URLs are bearer credentials returned only in the HTTP response — never
+  written to the inbox, logs, bead notes, or `journal.jsonl` (the journal
+  records `TAP MINTED:` with bead, device, and link count only, and refusals as
+  `TAP REFUSED:`).
 
 The inbox shows four live queues:
 

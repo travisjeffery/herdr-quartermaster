@@ -340,7 +340,9 @@ lifecycle action.
   with the answer. Free-text questions are unchanged. The same listener also
   serves a bookmarkable, mobile-first **Tailnet Web Inbox** at `/inbox` (and
   `/inbox.json`, with `/` redirecting to `/inbox`; `quartermaster tap url`
-  prints the URL) behind the exact same fail-closed tailnet IP +
+  prints the URL) and an on-demand JSON link minter at `GET /tap-links/<bead>`
+  (fresh 15-minute links per call, never persisted or logged) behind the exact
+  same fail-closed tailnet IP +
   `tailscale whois` `[tap] devices` allowlist, showing live approval prompts,
   `needs_me` questions (including `RUN:` commands, free-text notes, and
   optional structured review cards under `cards/<bead>/`), pending checked
