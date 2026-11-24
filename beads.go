@@ -76,6 +76,39 @@ func (b Bead) HasLabel(l string) bool {
 	return false
 }
 
+// parentIDs returns the unique parent bead IDs of b: its Parent field plus
+// any "parent-child" dependency edge.
+func (b Bead) parentIDs() []string {
+	var out []string
+	if b.Parent != "" {
+		out = append(out, b.Parent)
+	}
+	for _, d := range b.Dependencies {
+		if d.Type == "parent-child" && d.DependsOn != "" && !slices.Contains(out, d.DependsOn) {
+			out = append(out, d.DependsOn)
+		}
+	}
+	return out
+}
+
+// openChildCounts counts non-closed child beads per parent bead ID.
+func openChildCounts(beads []Bead) map[string]int {
+	counts := map[string]int{}
+	for _, b := range beads {
+		if b.Status == StatusClosed {
+			continue
+		}
+		for _, p := range b.parentIDs() {
+			counts[p]++
+		}
+	}
+	return counts
+}
+
+func isActiveStatus(status string) bool {
+	return status == StatusInProgress || status == StatusNeedsMe || status == StatusBlocked
+}
+
 const (
 	StatusOpen       = "open"
 	StatusInProgress = "in_progress"
@@ -178,6 +211,11 @@ func (b Beads) list(args ...string) ([]Bead, error) {
 // Active is every bead a worker could be on or a human could be owed.
 func (b Beads) Active() ([]Bead, error) {
 	return b.list("--status", strings.Join([]string{StatusInProgress, StatusNeedsMe, StatusBlocked}, ","))
+}
+
+// NonClosed is every open, in_progress, needs_me, or blocked bead.
+func (b Beads) NonClosed() ([]Bead, error) {
+	return b.list("--status", strings.Join(boardStatuses, ","))
 }
 
 func (b Beads) Next() ([]Bead, error) {

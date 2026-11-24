@@ -114,6 +114,10 @@ type Config struct {
 	// StallRetry configures bounded automatic recovery when a pi worker stops
 	// a turn on a transient ACP stall error (stallretry.go).
 	StallRetry StallRetryConfig `toml:"stall_retry"`
+
+	// OrphanFinish configures the bounded periodic finisher sweep for agentless
+	// merged and completed rolling-out beads (orphanfinish.go).
+	OrphanFinish OrphanFinishConfig `toml:"orphan_finish"`
 }
 
 // DesktopConfig is [desktop]: controls event-driven desktop notifications
@@ -418,6 +422,11 @@ func defaultConfig() Config {
 		GHMinRemaining:        1000,
 		Autonomy:              AutonomyConfig{Level: 4, Max: maxStanding, Widespread: 5, Budget: BudgetConfig{Steps: 30, Applies: 3, Dispatches: 5}},
 		StallRetry:            StallRetryConfig{MaxRetries: defaultStallMaxRetries, BackoffSeconds: defaultStallBackoffSeconds},
+		OrphanFinish: OrphanFinishConfig{
+			IntervalSeconds: defaultOrphanFinishIntervalSeconds,
+			GraceSeconds:    defaultOrphanFinishGraceSeconds,
+			MaxPerPass:      defaultOrphanFinishMaxPerPass,
+		},
 	}
 }
 
@@ -586,6 +595,9 @@ func loadConfig() (Config, error) {
 		return cfg, fmt.Errorf("review_bump_hours %d is negative; use 0 to disable review bump reminders", cfg.ReviewBumpHours)
 	}
 	if err := cfg.validateStallRetry(); err != nil {
+		return cfg, err
+	}
+	if err := cfg.validateOrphanFinish(); err != nil {
 		return cfg, err
 	}
 	if cfg.Repo == "" {

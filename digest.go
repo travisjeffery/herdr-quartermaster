@@ -336,6 +336,7 @@ func buildDigest(in digestInputs, prev digestState, prefixes []string, now time.
 	for _, b := range in.open {
 		byID[b.ID] = b
 	}
+	children := openChildCounts(in.open)
 	next := digestState{At: now, Beads: map[string]Section{}, PRs: map[string]DigestPR{}, Auto: map[string]int{}}
 	prOwner := map[string]string{}
 	for _, b := range in.open {
@@ -347,6 +348,7 @@ func buildDigest(in digestInputs, prev digestState, prefixes []string, now time.
 		}
 		th := threadFor(in.cfg, in.ticker, b, in.agents)
 		th.Blockers = blockers
+		th.OpenChildren = children[b.ID]
 		urls := beadPRURLs(b, in.branch)
 		// References to another thread's selected branch are not delivery.
 		urls = slices.DeleteFunc(urls, func(u string) bool {

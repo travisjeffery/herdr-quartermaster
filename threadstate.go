@@ -5,17 +5,18 @@ import "time"
 // ThreadState is a read-only projection of one observation, not a lifecycle or
 // merge authorization. All views use it; transitions still own side effects.
 type ThreadState struct {
-	Kind       ThreadKind
-	Waiting    WaitOn
-	Command    string
-	PR         *PR
-	Gate       DeliveryGate
-	RollingOut bool
-	Next       bool
-	ActiveTurn bool // needs_me was set during a turn, or the user answered it
-	Agent      string
-	Blockers   []string
-	UpdatedAt  time.Time
+	Kind         ThreadKind
+	Waiting      WaitOn
+	Command      string
+	PR           *PR
+	Gate         DeliveryGate
+	RollingOut   bool
+	Next         bool
+	ActiveTurn   bool // needs_me was set during a turn, or the user answered it
+	Agent        string
+	Blockers     []string
+	OpenChildren int
+	UpdatedAt    time.Time
 }
 
 type ThreadKind string
@@ -53,21 +54,24 @@ const (
 //  2. needs_me without an active, prompted turn -> waiting on command/user
 //  3. unstarted open bead -> blocked by dependencies, else queued (next/backlog)
 //  4. explicit blocked status -> blocked
-//  5. merged PR -> merged, with the rolling-out facet
+//  5. merged PR (with no open children, unless rolling out) -> merged, with the rolling-out facet
 //  6. ready PR -> delivering/ready (readiness is owned by the merge policy)
 //  7. failing open PR -> delivering/failing
 //  8. working agent -> working
 //  9. open PR with a ready agent -> delivering/review
+//
 // 10. present agent -> idle (unknown is not proof the agent is absent)
 // 11. otherwise -> no agent
 //
 // An open bead's idle agent and historical PRs do not start its work.
+// A parent bead that still has open child beads is not classified as merged
+// just because an earlier PR merged.
 // Background compaction is not an answer to needs_me. Missing evidence retains
 // the existing active-turn behavior; this function never resumes a bead.
 func deriveThreadState(t Thread) ThreadState {
 	s := ThreadState{PR: t.PR, RollingOut: t.Bead.HasLabel(LabelRollingOut),
 		Next: t.Bead.HasLabel(LabelNext), ActiveTurn: answered(t),
-		Blockers: t.Blockers, UpdatedAt: t.Bead.UpdatedAt}
+		Blockers: t.Blockers, OpenChildren: t.OpenChildren, UpdatedAt: t.Bead.UpdatedAt}
 	if t.Agent != nil {
 		s.Agent = t.Agent.Status
 	}
@@ -89,7 +93,7 @@ func deriveThreadState(t Thread) ThreadState {
 		}
 	case t.Bead.Status == StatusBlocked:
 		s.Kind = ThreadBlocked
-	case t.PR != nil && t.PR.State == "MERGED":
+	case t.PR != nil && t.PR.State == "MERGED" && (t.OpenChildren == 0 || s.RollingOut):
 		s.Kind = ThreadMerged
 	case readyToMerge(t.PR, t.Checks):
 		s.Kind, s.Gate = ThreadDelivering, GateReady

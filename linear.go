@@ -69,7 +69,7 @@ func linearMoves(threads []Thread) []string {
 			continue
 		}
 		switch {
-		case t.PR.State == "MERGED":
+		case t.PR.State == "MERGED" && t.OpenChildren == 0:
 			out = append(out, fmt.Sprintf("%s → Done (PR #%d merged)", t.Linear, t.PR.Number))
 		case t.PR.State == "OPEN" && !t.PR.IsDraft:
 			out = append(out, fmt.Sprintf("%s → In Review (PR #%d open)", t.Linear, t.PR.Number))

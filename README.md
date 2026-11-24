@@ -287,7 +287,7 @@ an irrelevant change request. Otherwise the board shows blockers such as
 (native auto-merge was newly enabled on a base branch requiring no approving review for an ineligible head; prompts to disable it, never fires on first sight or already-armed PRs, and clears automatically once disarmed or superseded), `run_succeeded`,
 `run_failed`, `finished` (a worker finished a turn),
 `agent_gone` (its agent exited), `resumed` (its agent was restarted),
-`likely_stale` and `auto_closed` (from the stale-bead check), and `closed`.
+`likely_stale`, `auto_closed` (from the stale-bead check or orphan finisher sweep), `orphan_finish` (an agentless merged or completed `rolling-out` bead needing verification or coordinator action), and `closed`.
 
 ### Features in detail
 
@@ -386,6 +386,20 @@ lifecycle action.
 - **`rolling-out`.** A worker adds this label when steps remain after its PR
   merges. The thread then shows **rolling out** instead of **merged**, and the
   merge prompt says to carry on rather than close.
+- **Orphan finisher sweep.** Every `[orphan_finish] interval_seconds` (default
+  300s), the ticker runs a bounded sweep (`max_per_pass`, default 5) over
+  non-epic `open` and `in_progress` beads with no live agent and no open child
+  beads that have been untouched past `grace_seconds` (default 600s). Parent
+  beads with open children are never classified as `merged` or swept as orphans.
+  When a bead's work ends at its own merged PR (no `rolling-out`, no noted runs,
+  no remaining work noted) and its autonomy check for `close` (class 3) passes,
+  the ticker closes it, removes its clean merged worktree via `resolve`, and
+  emits a deduplicated `auto_closed` event. When a bead is labelled
+  `rolling-out` with all noted post-merge runs completed, requires verification,
+  has work remaining, is below autonomy level 3, or fails to close, the ticker
+  emits a deduplicated `orphan_finish` inbox item naming the bead, PR/runs, and
+  suggested `quartermaster close` or `quartermaster resume` command without
+  retrying infinitely.
 - **Bot reviews** (Codex, CodeRabbit and other GitHub Apps) are told apart from
   human ones. Both go to the worker; only a human review notifies you.
 - **Resume.** Herdr restarts don't relaunch agents. `quartermaster resume` restarts
@@ -915,6 +929,11 @@ cooldown_seconds = 60     # minimum interval between desktop alerts; bursts coal
 [stall_retry]             # bounded ticker auto-retry when a pi worker stops on a transient ACP stall
 max_retries = 2           # max auto-nudges per stall episode before escalating to inbox; 0 disables
 backoff_seconds = 30      # base cooldown before retrying; doubles per attempt (30s, 60s, ...), capped at 10m
+
+[orphan_finish]           # bounded periodic sweep for agentless merged and completed rolling-out beads
+interval_seconds = 300    # how often the sweep runs; 0 disables
+grace_seconds = 600       # untouched grace window after bead update / merge / run start
+max_per_pass = 5          # max orphan beads acted on per sweep pass; 0 disables
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts

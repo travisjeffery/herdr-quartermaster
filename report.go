@@ -166,10 +166,12 @@ func buildReportFor(cfg Config, since time.Time, closed, active []Bead, merged [
 			agents[agentName(b.ID)] = Agent{Name: agentName(b.ID), Status: snap.AgentStatus, Seq: snap.AgentSeq}
 		}
 	}
+	children := openChildCounts(active)
 	for _, b := range active {
 		th := threadFor(cfg, st, b, agents)
 		th.Level = "" // the report is a work summary, not the autonomy dashboard
 		th.Blockers = waitsOn(b, live)
+		th.OpenChildren = children[b.ID]
 		th = th.derive()
 		state := th.derived()
 		if state.Kind == ThreadWaiting {

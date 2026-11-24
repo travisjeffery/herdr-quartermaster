@@ -1094,12 +1094,7 @@ func stillClosable(env verifyEnv, b Bead) string {
 	if err != nil {
 		return "could not list beads: " + err.Error()
 	}
-	children := 0
-	for _, c := range all {
-		if c.Parent == b.ID {
-			children++
-		}
-	}
+	children := openChildCounts(all)[b.ID]
 	if why := closable(cur, children); why != "" {
 		return "now " + why
 	}
@@ -1107,8 +1102,8 @@ func stillClosable(env verifyEnv, b Bead) string {
 }
 
 // rejectedNote is a note turning a verdict down: the coordinator's or TJ's, or
-// verify's own close note on a bead that was reopened since.
-var rejectedNote = regexp.MustCompile(`(?i)likely[_ -]stale( flag)? rejected|\bkeep open\b|AUTO: \[verify\b[^\]]*\] closed as already done`)
+// verify's or the orphan finisher's own close note on a bead that was reopened since.
+var rejectedNote = regexp.MustCompile(`(?i)likely[_ -]stale( flag)? rejected|\bkeep open\b|AUTO: \[(?:verify\b[^\]]*\] closed as already done|ticker\b[^\]]*\] orphan finisher closed)`)
 
 // LabelStaleRejected marks a bead whose likely_stale verdict was turned down.
 const LabelStaleRejected = "stale-rejected"
@@ -1150,12 +1145,7 @@ func listVerify(cfg Config, env verifyEnv, marks map[string]VerifyMark, ids []st
 	if err != nil {
 		return nil, nil, err
 	}
-	children := map[string]int{}
-	for _, b := range all {
-		if b.Parent != "" {
-			children[b.Parent]++
-		}
-	}
+	children := openChildCounts(all)
 	if len(ids) > 0 {
 		var out []Bead
 		for _, id := range ids {

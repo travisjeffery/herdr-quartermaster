@@ -30,6 +30,10 @@ func defaultInboxCondition(e Event) *InboxCondition {
 		// Verify, lease expiry, breakers and watches can raise notices on
 		// open/backlog beads, which were never in the active-thread set.
 		kind = "bead_closed"
+	case EventOrphanFinish:
+		// Orphan finisher notices can apply to open or in_progress agentless
+		// beads and clear once the bead closes or a live agent picks it up.
+		kind = "orphan_finish"
 	case EventNeedsYou:
 		kind = "needs_you" // legacy: either a bead question or an agent prompt
 	case EventAgentGone:
@@ -93,6 +97,9 @@ func inboxObsolete(it InboxItem, active map[string]Thread) bool {
 	t, ok := active[it.Bead]
 	if c.Kind == "bead_closed" {
 		return ok && t.Bead.Status == StatusClosed
+	}
+	if c.Kind == "orphan_finish" {
+		return ok && (t.Bead.Status == StatusClosed || t.Agent != nil)
 	}
 	if !ok || (t.Bead.Status != StatusInProgress && t.Bead.Status != StatusNeedsMe && t.Bead.Status != StatusBlocked) {
 		return true
@@ -170,7 +177,7 @@ func reconcileInbox(threads []Thread, show func(string) (Bead, error)) error {
 		if c == nil {
 			c = defaultInboxCondition(it.Event)
 		}
-		if _, known := active[it.Bead]; !known && c.Kind == "bead_closed" && show != nil && !looked[it.Bead] {
+		if _, known := active[it.Bead]; !known && (c.Kind == "bead_closed" || c.Kind == "orphan_finish") && show != nil && !looked[it.Bead] {
 			looked[it.Bead] = true
 			if b, err := show(it.Bead); err == nil && b.ID == it.Bead {
 				active[it.Bead] = Thread{Bead: b}

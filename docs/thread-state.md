@@ -18,7 +18,7 @@ existing behavior, including ready-to-merge ahead of optional check failures.
 | Open, unstarted bead with live blocking dependencies | Blocked |
 | Open, unstarted bead | Queued (next or backlog) |
 | Explicit blocked status | Blocked |
-| Selected PR merged | Merged, with a rolling-out facet |
+| Selected PR merged (no open children, unless rolling out) | Merged, with a rolling-out facet |
 | Merge-policy readiness passes | Delivering, ready |
 | Open PR with failing checks | Delivering, failing |
 | Working agent | Working |
