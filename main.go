@@ -53,6 +53,8 @@ Usage:
   quartermaster digest show|install|uninstall          page the last digest; set up or remove the hourly timer
   quartermaster inbox done [<bead>|<file>...]          mark inbox items handled (all if none given)
   quartermaster inbox --questions [--json]             list live approval prompts and needs_me OPTIONS questions
+  quartermaster inbox-runner run [--dry-run]           run one headless coordinator turn for allowlisted inbox items
+  quartermaster inbox-runner status [--json]           inspect headless inbox runner status, lock, cooldown, and attempts
   quartermaster snooze <bead> <duration> [--reason R]  park a needs_me bead until duration expires or fresh activity
   quartermaster snooze <bead> --clear                  clear an active snooze on a bead
   quartermaster snooze [--json]                        list active snoozed beads
@@ -264,6 +266,8 @@ func run(args []string) error {
 		return jobCmd(cfg, liveJobEnv(cfg, h.on(cfg.coordSocket()), nil, nil, time.Time{}, nil), rest, os.Stdout)
 	case "snooze":
 		return snoozeCmd(cfg, liveSnoozeEnv(cfg), rest, os.Stdout)
+	case "inbox-runner":
+		return inboxRunnerCmd(cfg, liveInboxRunnerEnv(cfg, h.on(cfg.coordSocket()), nil), rest, os.Stdout)
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	kind := fs.String("agent", "", "agent kind: claude, codex, muse, pi, agy or auto")

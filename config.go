@@ -122,6 +122,11 @@ type Config struct {
 	// OrphanFinish configures the bounded periodic finisher sweep for agentless
 	// merged and completed rolling-out beads (orphanfinish.go).
 	OrphanFinish OrphanFinishConfig `toml:"orphan_finish"`
+
+	// InboxRunner configures the opt-in headless inbox runner that drives
+	// autonomous coordinator turns for allowlisted inbox events while the
+	// interactive coordinator is idle or closed (inboxrunner.go, docs/inbox-runner.md).
+	InboxRunner InboxRunnerConfig `toml:"inbox_runner"`
 }
 
 // DesktopConfig is [desktop]: controls event-driven desktop notifications
@@ -431,6 +436,14 @@ func defaultConfig() Config {
 			GraceSeconds:    defaultOrphanFinishGraceSeconds,
 			MaxPerPass:      defaultOrphanFinishMaxPerPass,
 		},
+		InboxRunner: InboxRunnerConfig{
+			Enabled:         false,
+			IdleSeconds:     defaultInboxRunnerIdleSeconds,
+			CooldownSeconds: defaultInboxRunnerCooldownSeconds,
+			TimeoutSeconds:  defaultInboxRunnerTimeoutSeconds,
+			MaxAttempts:     defaultInboxRunnerMaxAttempts,
+			Kinds:           slices.Clone(defaultInboxRunnerKinds),
+		},
 	}
 }
 
@@ -605,6 +618,9 @@ func loadConfig() (Config, error) {
 		return cfg, err
 	}
 	if err := cfg.validateOrphanFinish(); err != nil {
+		return cfg, err
+	}
+	if err := cfg.validateInboxRunner(); err != nil {
 		return cfg, err
 	}
 	if cfg.Repo == "" {
