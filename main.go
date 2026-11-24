@@ -43,6 +43,8 @@ Usage:
   quartermaster headless enroll|run|pause|takeover|resume|status|watch|reports|ack
                                                        opt-in fenced native coordinator (docs/pi-headless.md)
   quartermaster context                                the coordinator's per-turn digest
+  quartermaster show <bead> [--json]                   show one bead from the configured Beads workspace (read-only)
+  quartermaster memory get <key> [--json]              read one stored bd remember memory by key (read-only)
   quartermaster report [--since 24h|7d|YYYY-MM-DD]     Markdown of what shipped, merged, is in flight, needs you
   quartermaster digest [--deliver T,...] [--always]    every open bead by state, what changed since the last run;
                                                        writes digest.md, notifies when something changed or needs you
@@ -243,6 +245,7 @@ func run(args []string) error {
 	expect := fs.String("expect", "", "answer: the hash of the prompt being answered, from quartermaster prompt")
 	reasonFlag := fs.String("reason", "", "close: what shipped and how it was verified")
 	by := fs.String("by", "coordinator", "dispatch, focus, resume, stale --release, answer, close: who decided; anyone but TJ needs the bead's autonomy level to reach the step's class")
+	jsonOut := fs.Bool("json", false, "show, memory: output in JSON format")
 	pos, err := interspersed(fs, rest)
 	if err != nil {
 		return err
@@ -303,6 +306,10 @@ func run(args []string) error {
 		ready, _ := Beads{}.Ready()
 		inbox, _ := readInbox()
 		fmt.Print(renderContext(cfg, threads, next, ready, inbox, st, worktreed(cfg, h, threads, st.PRs), time.Now()))
+	case "show":
+		return showCmd(cfg.readBeads().Show, pos, *jsonOut, os.Stdout)
+	case "memory":
+		return memoryCmd(cfg.readBeads().Recall, pos, *jsonOut, os.Stdout)
 	case "report":
 		now := time.Now()
 		since, err := parseSince(*sinceFlag, now)
