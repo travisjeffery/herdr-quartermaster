@@ -22,23 +22,27 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // Approval taps: TJ answers a worker's approval prompt — or its needs_me
-// question, when the worker wrote it with enumerated options
-// (tapquestion.go) — from his phone by tapping a signed, one-time link. The
-// link is bound to one bead, one prompt or question instance (its --expect
-// hash) and one option; the handler runs on this machine's Tailscale
+// question (with or without enumerated options, tapquestion.go) — from his
+// phone by tapping a signed, one-time link. The link is bound to one bead, one
+// prompt or question instance (its --expect hash) and an option (or free-text
+// choice for needs_me questions); the handler runs on this machine's Tailscale
 // address only, checks the tapping device with `tailscale whois` against
-// [tap] devices, and answers through answerPromptVia or answerNeedsMeVia,
+// [tap] devices, and answers through answerPromptVia or answerNeedsMeTextVia,
 // so every guard of the guarded paths — the hash re-read, the wait for the
 // prompt to clear, the audit note and the journal — applies unchanged. A
 // tap is TJ's answer (`--by TJ`); the note records the device as the
 // identity evidence. See docs/approval-taps.md. Off unless [tap] enabled;
-// only prompts parsePrompt recognizes (or a pi worker's ask) and questions
-// in the OPTIONS convention can be tapped.
+// only prompts parsePrompt recognizes (or a pi worker's ask) and live
+// needs_me questions (never RUN: commands) can be tapped.
 
-const defaultTapPort = 8642
+const (
+	defaultTapPort  = 8642
+	tapPostMaxBytes = 64 * 1024
+)
 
 // tapTTL bounds a link's life. The prompt hash is the real guard — a link
 // for a prompt that has changed or cleared is refused whenever it arrives —
@@ -117,6 +121,9 @@ func mintTapTokenKind(secret []byte, kind, bead, hash, choice string, now time.T
 	if kind != tapKindPrompt && kind != tapKindQuestion {
 		return "", tapClaims{}, fmt.Errorf("tap link kind %q is not usable", kind)
 	}
+	if kind == tapKindPrompt && choice == tapChoiceFreeText {
+		return "", tapClaims{}, errors.New("approval prompt tap links do not allow free text")
+	}
 	for _, f := range []string{bead, hash, choice} {
 		if f == "" || strings.Contains(f, "|") {
 			return "", tapClaims{}, fmt.Errorf("tap link field %q is not usable", f)
@@ -151,6 +158,9 @@ func parseTapToken(secret []byte, token string, now time.Time) (tapClaims, error
 		f = append([]string{tapKindPrompt}, f...)
 	}
 	if len(f) != 6 || (f[0] != tapKindPrompt && f[0] != tapKindQuestion) || f[1] == "" || f[2] == "" || f[3] == "" || f[5] == "" {
+		return tapClaims{}, errors.New("not a tap link")
+	}
+	if f[0] == tapKindPrompt && f[3] == tapChoiceFreeText {
 		return tapClaims{}, errors.New("not a tap link")
 	}
 	exp, err := strconv.ParseInt(f[4], 10, 64)
@@ -403,7 +413,7 @@ func (s *tapServer) handleTap(w http.ResponseWriter, r *http.Request) {
 			s.confirm(w, claims, ident)
 		}
 	case http.MethodPost:
-		s.answer(w, claims, ident)
+		s.answer(w, r, claims, ident)
 	default:
 		s.refuse(w, http.StatusMethodNotAllowed, claims.Bead, "taps are GET to review, POST to answer")
 	}
@@ -440,9 +450,10 @@ func (s *tapServer) confirm(w http.ResponseWriter, c tapClaims, ident tapIdentit
 }
 
 // confirmQuestion shows the bead's question as it stands now, re-read from
-// its notes, with a button that answers it. Like a prompt's confirm page, a
-// GET spends nothing, and a stale link — the bead answered, the question
-// changed, the worker working again — is refused here first.
+// its notes, with a free-text field and option button(s) when the question has
+// options. Like a prompt's confirm page, a GET spends nothing, and a stale
+// link — the bead answered, the question changed, the worker working again —
+// is refused here first.
 func (s *tapServer) confirmQuestion(w http.ResponseWriter, c tapClaims, ident tapIdentity) {
 	b, q, err := beadQuestion(s.env, c.Bead)
 	if err != nil {
@@ -457,28 +468,110 @@ func (s *tapServer) confirmQuestion(w http.ResponseWriter, c tapClaims, ident ta
 		s.refuse(w, http.StatusConflict, c.Bead, errWorkerWorking.Error())
 		return
 	}
-	o, err := q.choose(c.Choice)
-	if err != nil {
-		s.refuse(w, http.StatusConflict, c.Bead, err.Error())
-		return
+	type questionConfirmData struct {
+		Bead         string
+		Summary      string
+		Text         string
+		Device       string
+		MaxChars     int
+		FreeTextLink bool
+		Number       int
+		Option       string
+		Options      []PromptOption
+	}
+	data := questionConfirmData{
+		Bead:         c.Bead,
+		Summary:      q.Summary(),
+		Text:         q.String(),
+		Device:       ident.Device,
+		MaxChars:     tapMaxFreeTextRunes,
+		FreeTextLink: c.Choice == tapChoiceFreeText,
+		Options:      q.Options,
+	}
+	if !data.FreeTextLink {
+		o, err := q.choose(c.Choice)
+		if err != nil {
+			s.refuse(w, http.StatusConflict, c.Bead, err.Error())
+			return
+		}
+		data.Number = o.Number
+		data.Option = o.Label
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	data := struct {
-		Bead, Summary, Text, Option, Device string
-		Number                              int
-	}{c.Bead, q.Summary(), q.String(), o.Label, ident.Device, o.Number}
-	if err := tapConfirmTmpl.Execute(w, data); err != nil {
+	if err := tapQuestionConfirmTmpl.Execute(w, data); err != nil {
 		s.logf("tap: confirm page: %v", err)
 	}
 }
 
-// answer spends the nonce, then hands over to the same guarded paths as
+// answer validates form input before spending the nonce, spends the nonce
+// atomically, then hands over to the same guarded paths as
 // `quartermaster answer ... --by TJ` for a prompt and a coordinator's
 // relayed answer for a question: each re-reads its target, refuses a
 // changed one, and notes the answer on the bead with the tapping device as
 // the identity evidence.
-func (s *tapServer) answer(w http.ResponseWriter, c tapClaims, ident tapIdentity) {
+func (s *tapServer) answer(w http.ResponseWriter, r *http.Request, c tapClaims, ident tapIdentity) {
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, tapPostMaxBytes)
+	}
+	if err := r.ParseForm(); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.refuse(w, http.StatusBadRequest, c.Bead, fmt.Sprintf("free-text answer exceeds the %d-character limit (this link was not spent — shorten it and submit again)", tapMaxFreeTextRunes))
+			return
+		}
+		s.refuse(w, http.StatusBadRequest, c.Bead, "could not read tap form: "+err.Error())
+		return
+	}
+	text := normalizeTapFreeText(r.PostFormValue("text"))
+	formChoice := strings.TrimSpace(r.PostFormValue("choice"))
+	choice := c.Choice
+
+	if c.Kind == tapKindPrompt {
+		if strings.TrimSpace(text) != "" {
+			s.refuse(w, http.StatusBadRequest, c.Bead, "approval prompts do not accept free text")
+			return
+		}
+		if formChoice != "" && formChoice != c.Choice {
+			s.refuse(w, http.StatusBadRequest, c.Bead, fmt.Sprintf("this tap link is for option %s, not %s", c.Choice, formChoice))
+			return
+		}
+	} else {
+		if n := utf8.RuneCountInString(text); n > tapMaxFreeTextRunes {
+			s.refuse(w, http.StatusBadRequest, c.Bead, fmt.Sprintf("free-text answer is %d characters, over the %d-character limit (this link was not spent — edit and submit again)", n, tapMaxFreeTextRunes))
+			return
+		}
+		if c.Choice == tapChoiceFreeText {
+			if formChoice == "" || formChoice == tapChoiceFreeText {
+				choice = tapChoiceFreeText
+			} else {
+				n, err := strconv.Atoi(formChoice)
+				if err != nil || n < 1 || n > maxQuestionOptions {
+					s.refuse(w, http.StatusBadRequest, c.Bead, fmt.Sprintf("invalid option %q (this link was not spent)", formChoice))
+					return
+				}
+				choice = formChoice
+			}
+		} else {
+			switch {
+			case formChoice == "" || formChoice == c.Choice:
+				choice = c.Choice
+			case formChoice == tapChoiceFreeText:
+				choice = tapChoiceFreeText
+			default:
+				s.refuse(w, http.StatusBadRequest, c.Bead, fmt.Sprintf("this tap link is for option %s, not %s (this link was not spent)", c.Choice, formChoice))
+				return
+			}
+		}
+		if choice == tapChoiceFreeText && strings.TrimSpace(text) == "" {
+			s.refuse(w, http.StatusBadRequest, c.Bead, "free-text answer cannot be empty (this link was not spent)")
+			return
+		}
+		if choice != tapChoiceFreeText && strings.TrimSpace(text) == "" {
+			text = ""
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	replay, err := s.consume(c.Nonce, c.Exp, s.now())
@@ -493,7 +586,7 @@ func (s *tapServer) answer(w http.ResponseWriter, c tapClaims, ident tapIdentity
 	via := "tap (device " + ident.Device + ")"
 	var msg string
 	if c.Kind == tapKindQuestion {
-		msg, err = answerNeedsMeVia(s.env, c.Bead, c.Choice, c.Hash, via)
+		msg, err = answerNeedsMeTextVia(s.env, c.Bead, choice, text, c.Hash, via)
 		if err != nil {
 			s.refuse(w, http.StatusConflict, c.Bead, "the tap was recorded but the question was not answered: "+err.Error())
 			return
@@ -520,6 +613,69 @@ var tapConfirmTmpl = template.Must(template.New("confirm").Parse(`<!DOCTYPE html
 <form method="post"><button type="submit">Answer {{.Number}}. {{.Option}}</button></form>
 <p>You are answering as TJ from {{.Device}}. Anything else: close this page.</p>
 <p class="nav"><a href="/inbox">Back to Inbox</a></p>
+</body></html>`))
+
+var tapQuestionConfirmTmpl = template.Must(template.New("question-confirm").Parse(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Answer {{.Bead}}?</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;margin:1.2em auto;max-width:44rem;padding:0 12px;line-height:1.45}
+pre{white-space:pre-wrap;word-break:break-word;background:#f4f4f4;padding:.8em;border-radius:.5em}
+label{display:block;font-weight:600;margin:.9em 0 .35em}
+textarea{width:100%;font-family:inherit;font-size:1rem;padding:.65em;border:1px solid #c9d1d9;border-radius:.5em;resize:vertical}
+.hint{font-size:.85em;color:#59636e;margin:.3em 0 .85em;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.btns{display:flex;flex-direction:column;gap:.55em;margin-top:.6em}
+button{font-size:1.05em;font-weight:600;padding:.75em 1.1em;width:100%;min-height:46px;border-radius:.55em;border:1px solid #c9d1d9;background:#f4f4f4;color:inherit;cursor:pointer;text-align:center}
+button.primary{background:#0969da;border-color:#0969da;color:#fff}
+.nav{margin-top:1em;font-size:.95em}
+@media (prefers-color-scheme:dark){
+  body{background:#111418;color:#e6edf3}
+  pre{background:#1b2129;color:#e6edf3}
+  textarea{background:#0d1117;color:#e6edf3;border-color:#30363d}
+  .hint{color:#8b949e}
+  button{background:#21262d;border-color:#30363d;color:#e6edf3}
+  button.primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+  a{color:#79c0ff}
+}
+</style>
+</head><body>
+<h1>{{.Bead}}: {{.Summary}}</h1>
+<pre>{{.Text}}</pre>
+<form method="post">
+  {{if .FreeTextLink}}
+    {{if gt (len .Options) 0}}
+    <label for="tap-text">Free-text answer or note (optional when picking an option)</label>
+    <textarea id="tap-text" name="text" rows="5" maxlength="{{.MaxChars}}" placeholder="Write your answer verbatim, or add detail for an option below (up to {{.MaxChars}} characters)…"></textarea>
+    <div class="hint"><span>Recorded verbatim. Send text alone, pick an option alone, or pick an option with text.</span><span id="tap-count">0 / {{.MaxChars}}</span></div>
+    <div class="btns">
+      <button type="submit" class="primary" name="choice" value="text">Send free-text answer</button>
+      {{range .Options}}
+      <button type="submit" name="choice" value="{{.Number}}">Answer {{.Number}}. {{.Label}}</button>
+      {{end}}
+    </div>
+    {{else}}
+    <label for="tap-text">Your answer</label>
+    <textarea id="tap-text" name="text" rows="5" maxlength="{{.MaxChars}}" required placeholder="Write your answer verbatim (up to {{.MaxChars}} characters)…"></textarea>
+    <div class="hint"><span>Recorded verbatim (up to {{.MaxChars}} characters).</span><span id="tap-count">0 / {{.MaxChars}}</span></div>
+    <div class="btns">
+      <button type="submit" class="primary">Send free-text answer</button>
+    </div>
+    {{end}}
+  {{else}}
+    <label for="tap-text">Optional free-text note (recorded verbatim)</label>
+    <textarea id="tap-text" name="text" rows="4" maxlength="{{.MaxChars}}" placeholder="Add details alongside option {{.Number}}, or send free text only (up to {{.MaxChars}} characters)…"></textarea>
+    <div class="hint"><span>Up to {{.MaxChars}} characters. Leave blank to answer option {{.Number}} alone.</span><span id="tap-count">0 / {{.MaxChars}}</span></div>
+    <div class="btns">
+      <button type="submit" class="primary">Answer {{.Number}}. {{.Option}}</button>
+      <button type="submit" name="choice" value="text">Send free-text answer only</button>
+    </div>
+  {{end}}
+</form>
+<p>You are answering as TJ from {{.Device}}. Anything else: close this page.</p>
+<p class="nav"><a href="/inbox">Back to Inbox</a></p>
+<script>(function(){var ta=document.getElementById('tap-text'),c=document.getElementById('tap-count');if(ta&&c){var max={{.MaxChars}};function u(){var n=Array.from(ta.value.replace(/\r\n/g,'\n')).length;c.textContent=n+' / '+max;}ta.addEventListener('input',u);u();}})();</script>
 </body></html>`))
 
 var tapPageTmpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
@@ -561,6 +717,14 @@ func mintTapLinks(secret []byte, base, bead string, p ApprovalPrompt, now time.T
 
 func mintQuestionTapLinks(secret []byte, base, bead string, q NeedsMeQuestion, now time.Time) ([]tapLink, error) {
 	return mintTapLinksFor(secret, base, tapKindQuestion, bead, q.Hash, q.Options, now)
+}
+
+func mintQuestionFreeTextTapLink(secret []byte, base, bead string, q NeedsMeQuestion, now time.Time) (tapLink, error) {
+	tok, c, err := mintTapTokenKind(secret, tapKindQuestion, bead, q.Hash, tapChoiceFreeText, now)
+	if err != nil {
+		return tapLink{}, err
+	}
+	return tapLink{Option: PromptOption{Label: "Free text"}, URL: base + "/tap/" + tok, Exp: c.Exp}, nil
 }
 
 func mintTapLinksFor(secret []byte, base, kind, bead, hash string, opts []PromptOption, now time.Time) ([]tapLink, error) {
@@ -619,7 +783,8 @@ func tapLinksText(cfg Config, env promptEnv, id string, now time.Time) (string, 
 	return s.String(), nil
 }
 
-// questionLinksText is tapLinksText for a bead's needs_me question.
+// questionLinksText is tapLinksText for a bead's needs_me question (with or
+// without an OPTIONS block).
 func questionLinksText(cfg Config, env promptEnv, id string, now time.Time) (string, error) {
 	_, q, err := beadQuestion(env, id)
 	if err != nil {
@@ -637,12 +802,21 @@ func questionLinksText(cfg Config, env promptEnv, id string, now time.Time) (str
 	if err != nil {
 		return "", err
 	}
+	ft, err := mintQuestionFreeTextTapLink(secret, base, id, q, now)
+	if err != nil {
+		return "", err
+	}
+	exp := ft.Exp
+	if len(links) > 0 {
+		exp = links[0].Exp
+	}
 	var s strings.Builder
 	fmt.Fprintf(&s, "%s is marked needs_me [%s]\n%s", id, q.Hash, q.String())
-	fmt.Fprintf(&s, "tap to answer as TJ (one use each, expires %s):\n", links[0].Exp.Format("15:04"))
+	fmt.Fprintf(&s, "tap to answer as TJ (one use each, expires %s):\n", exp.Format("15:04"))
 	for _, l := range links {
 		fmt.Fprintf(&s, "%d %s — %s\n", l.Option.Number, l.Option.Label, l.URL)
 	}
+	fmt.Fprintf(&s, "free text (up to %d chars) — %s\n", tapMaxFreeTextRunes, ft.URL)
 	return s.String(), nil
 }
 
@@ -680,15 +854,15 @@ func (t Ticker) tapEventSuffix(th Thread) string {
 	return "; prompt: " + actual + "; tap to answer as TJ (one use each, expires " + links[0].Exp.Format("15:04") + "): " + strings.Join(parts, " · ")
 }
 
-// tapQuestionEventSuffix is tapEventSuffix for a needs_me thread's OPTIONS
-// question: the question and one link per option ride its needs_you inbox
-// event, so what the coordinator relays is tappable as it stands. "" for a
-// free-text question, which then travels exactly as it always has.
+// tapQuestionEventSuffix is tapEventSuffix for a needs_me thread's question
+// (with or without an OPTIONS block): the question and signed tap links ride
+// its needs_you inbox event, so what the coordinator relays is tappable as it
+// stands. "" for RUN: beads, answered threads, or empty notes.
 func (t Ticker) tapQuestionEventSuffix(th Thread) string {
 	if !t.cfg.Tap.Enabled {
 		return ""
 	}
-	q, ok := liveQuestion(th)
+	q, ok := liveTapQuestion(th)
 	if !ok {
 		return ""
 	}
@@ -702,17 +876,28 @@ func (t Ticker) tapQuestionEventSuffix(th Thread) string {
 		t.log.Printf("tap: %v", err)
 		return ""
 	}
-	links, err := mintQuestionTapLinks(secret, base, th.Bead.ID, q, time.Now())
+	now := time.Now()
+	links, err := mintQuestionTapLinks(secret, base, th.Bead.ID, q, now)
 	if err != nil {
 		t.log.Printf("tap: %v", err)
 		return ""
 	}
-	parts := make([]string, 0, len(links))
+	ft, err := mintQuestionFreeTextTapLink(secret, base, th.Bead.ID, q, now)
+	if err != nil {
+		t.log.Printf("tap: %v", err)
+		return ""
+	}
+	parts := make([]string, 0, len(links)+1)
 	for _, l := range links {
 		parts = append(parts, fmt.Sprintf("%d %s %s", l.Option.Number, shortTitle(l.Option.Label, 50), l.URL))
 	}
+	parts = append(parts, "free text "+ft.URL)
+	exp := ft.Exp
+	if len(links) > 0 {
+		exp = links[0].Exp
+	}
 	question := shortTitle(strings.Join(q.Lines, " / "), 300)
-	return "; question: " + question + "; tap to answer as TJ (one use each, expires " + links[0].Exp.Format("15:04") + "): " + strings.Join(parts, " · ")
+	return "; question: " + question + "; tap to answer as TJ (one use each, expires " + exp.Format("15:04") + "): " + strings.Join(parts, " · ")
 }
 
 // startTapServer binds the tap endpoint to the tailnet address and serves in

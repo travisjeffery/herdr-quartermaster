@@ -562,7 +562,7 @@ CLASS: 8 — one prod delete`
 	if snap.Questions[0].Bead != "task-3" || !snap.Questions[0].Critical {
 		t.Errorf("expected CRITICAL task-3 first, got %+v", snap.Questions[0])
 	}
-	if q2 := qByBead["task-2"]; q2.Kind != "structured" || !q2.Tappable || q2.Class == nil || *q2.Class != 7 ||
+	if q2 := qByBead["task-2"]; q2.Kind != "structured" || !q2.Tappable || q2.FreeText == nil || q2.FreeText.MaxChars != tapMaxFreeTextRunes || q2.Class == nil || *q2.Class != 7 ||
 		q2.Recommendation == nil || q2.Recommendation.Option != 2 ||
 		q2.Evidence == nil || q2.Evidence.IaC == nil || q2.Evidence.IaC.Create != 1 || q2.Evidence.IaC.Update != 2 ||
 		q2.Evidence.CostEstimate != "$25/month" || len(q2.Milestones) != 2 {
@@ -573,16 +573,16 @@ CLASS: 8 — one prod delete`
 			t.Errorf("expected unsafe link stripped, got %+v", q2.Evidence.Links)
 		}
 	}
-	if q3 := qByBead["task-3"]; q3.Kind != "options" || !q3.Tappable || q3.Class == nil || *q3.Class != 8 ||
+	if q3 := qByBead["task-3"]; q3.Kind != "options" || !q3.Tappable || q3.FreeText == nil || q3.FreeText.MaxChars != tapMaxFreeTextRunes || q3.Class == nil || *q3.Class != 8 ||
 		q3.Evidence == nil || q3.Evidence.PlanDigest != pendingDigest || q3.Evidence.PlanApprovePath != "/inbox/plan/"+pendingDigest ||
 		q3.Evidence.IaC == nil || q3.Evidence.IaC.Delete != 1 {
 		t.Fatalf("options question task-3 = %+v", q3)
 	}
-	if q4 := qByBead["task-4"]; q4.Kind != "run" || q4.Tappable || q4.RunCommand != "aws sso login --profile dev-admin" {
+	if q4 := qByBead["task-4"]; q4.Kind != "run" || q4.Tappable || q4.FreeText != nil || q4.RunCommand != "aws sso login --profile dev-admin" {
 		t.Fatalf("run question task-4 = %+v", q4)
 	}
-	if q5 := qByBead["task-5"]; q5.Kind != "free_text" || q5.Tappable || !strings.Contains(q5.Question, "rename the CLI subcommand") {
-		t.Fatalf("free_text fallback task-5 = %+v", q5)
+	if q5 := qByBead["task-5"]; q5.Kind != "free_text" || !q5.Tappable || q5.FreeText == nil || q5.FreeText.MaxChars != tapMaxFreeTextRunes || !strings.HasPrefix(q5.FreeText.Path, "/tap/") || !strings.Contains(q5.Question, "rename the CLI subcommand") {
+		t.Fatalf("free_text task-5 = %+v", q5)
 	}
 
 	// Verify Section 3: Pending plans (iacPlan + stoppedPlan; donePlan and closedPlan excluded).
@@ -622,6 +622,8 @@ CLASS: 8 — one prod delete`
 		"C8 — one prod delete",
 		"aws sso login --profile dev-admin",
 		"rename the CLI subcommand",
+		"Answer with free text →",
+		"Answer with free text…",
 		"/inbox/plan/" + pendingDigest,
 		"PR #42: Add Tailnet Web Inbox",
 		"https://github.com/example/repo/pull/42",
@@ -961,5 +963,163 @@ func TestTapInboxPiAskExpiredPlanAndEndToEndTap(t *testing.T) {
 	}
 	if len(notes) != 1 || !strings.Contains(notes[0], "by TJ via tap (device iphone181)") {
 		t.Fatalf("notes = %q", notes)
+	}
+}
+
+func TestTapInboxFreeTextAndOptionPlusTextEndToEnd(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	now := time.Now().UTC().Truncate(time.Second)
+
+	cfg := defaultConfig()
+	cfg.Tap = TapConfig{Enabled: true, Devices: []string{"iphone181"}}
+
+	freeBead := Bead{
+		ID:     "task-free",
+		Status: StatusNeedsMe,
+		Title:  "Clarify naming",
+		Notes:  "Should we keep the existing subcommand name?\nCLASS: 2 — cli naming",
+	}
+	optsBead := Bead{
+		ID:     "task-opts",
+		Status: StatusNeedsMe,
+		Title:  "Choose rollout order",
+		Notes:  questionNotes,
+	}
+	emptyBead := Bead{
+		ID:     "task-empty",
+		Status: StatusNeedsMe,
+		Title:  "No notes yet",
+		Notes:  "",
+	}
+	runBead := Bead{
+		ID:     "task-run",
+		Status: StatusNeedsMe,
+		Title:  "Login needed",
+		Notes:  "RUN: aws sso login\nwhy: token expired",
+	}
+
+	byID := map[string]*Bead{
+		freeBead.ID:  &freeBead,
+		optsBead.ID:  &optsBead,
+		emptyBead.ID: &emptyBead,
+		runBead.ID:   &runBead,
+	}
+	agents := map[string]*Agent{
+		"task-free": {Name: "task-free", Kind: "pi", Status: "idle", PaneID: "w1:p1"},
+		"task-opts": {Name: "task-opts", Kind: "pi", Status: "idle", PaneID: "w1:p2"},
+	}
+	notesByBead := map[string][]string{}
+	toldByBead := map[string][]string{}
+
+	penv := promptEnv{
+		show: func(id string) (Bead, error) {
+			if b, ok := byID[id]; ok {
+				return *b, nil
+			}
+			return Bead{}, errors.New("not found")
+		},
+		agent: func(_, name string) (*Agent, error) {
+			return agents[name], nil
+		},
+		note: func(id, text string) error {
+			notesByBead[id] = append(notesByBead[id], text)
+			if b, ok := byID[id]; ok {
+				b.Notes += "\n" + text
+			}
+			return nil
+		},
+		setStatus: func(id, status string) error {
+			if b, ok := byID[id]; ok {
+				b.Status = status
+			}
+			return nil
+		},
+		tell: func(_ string, a *Agent, text string) error {
+			toldByBead[a.Name] = append(toldByBead[a.Name], text)
+			return nil
+		},
+		sleep: func(time.Duration) {},
+		level: func(string) (int, string) { return 4, "" },
+	}
+	ienv := &tapInboxEnv{
+		active: func() ([]Bead, error) {
+			return []Bead{*byID["task-free"], *byID["task-opts"], *byID["task-empty"], *byID["task-run"]}, nil
+		},
+		agents: func() ([]Agent, error) {
+			return []Agent{*agents["task-free"], *agents["task-opts"]}, nil
+		},
+	}
+
+	s := newTestInboxServer(t, cfg, penv, ienv, "iphone181")
+	s.now = func() time.Time { return now }
+
+	rec := inboxRequest(s, http.MethodGet, "/inbox.json", "", tapPhoneAddr)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /inbox.json = %d %q", rec.Code, rec.Body.String())
+	}
+	var snap inboxSnapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatal(err)
+	}
+	qByBead := map[string]inboxQuestion{}
+	for _, q := range snap.Questions {
+		qByBead[q.Bead] = q
+	}
+	if qEmpty := qByBead["task-empty"]; qEmpty.Kind != "free_text" || qEmpty.Tappable || qEmpty.FreeText != nil {
+		t.Fatalf("empty needs_me bead should stay read-only: %+v", qEmpty)
+	}
+	if qRun := qByBead["task-run"]; qRun.Kind != "run" || qRun.Tappable || qRun.FreeText != nil {
+		t.Fatalf("RUN bead must never be tappable: %+v", qRun)
+	}
+
+	// 1. Free-text-only bead: follow /inbox free_text.path -> GET confirm -> over-limit refusal -> valid POST -> replay refused.
+	ftPath := qByBead["task-free"].FreeText.Path
+	confirmRec := inboxRequest(s, http.MethodGet, ftPath, "", tapPhoneAddr)
+	if confirmRec.Code != http.StatusOK || !strings.Contains(confirmRec.Body.String(), "Should we keep the existing subcommand name?") || !strings.Contains(confirmRec.Body.String(), `maxlength="2000"`) {
+		t.Fatalf("free-text confirm = %d %q", confirmRec.Code, confirmRec.Body.String())
+	}
+	// Over-limit refused without spending nonce.
+	overRec := inboxRequest(s, http.MethodPost, ftPath, url.Values{"text": {strings.Repeat("z", 2001)}}.Encode(), tapPhoneAddr)
+	if overRec.Code != http.StatusBadRequest {
+		t.Fatalf("over-limit POST = %d %q, want 400", overRec.Code, overRec.Body.String())
+	}
+	// Resubmit valid verbatim text on same link.
+	verbatim := "Keep the current name; add an alias in v2."
+	postRec := inboxRequest(s, http.MethodPost, ftPath, url.Values{"text": {verbatim}}.Encode(), tapPhoneAddr)
+	if postRec.Code != http.StatusOK || !strings.Contains(postRec.Body.String(), "Answered") {
+		t.Fatalf("free-text POST = %d %q", postRec.Code, postRec.Body.String())
+	}
+	if byID["task-free"].Status != StatusInProgress {
+		t.Fatalf("task-free status = %s, want in_progress", byID["task-free"].Status)
+	}
+	if len(notesByBead["task-free"]) != 1 || !strings.HasPrefix(notesByBead["task-free"][0], "NEEDS_ME ANSWERED: free text to ") || !strings.HasSuffix(notesByBead["task-free"][0], ": "+verbatim) {
+		t.Fatalf("task-free notes = %q", notesByBead["task-free"])
+	}
+	if len(toldByBead["task-free"]) != 1 || !strings.Contains(toldByBead["task-free"][0], verbatim) {
+		t.Fatalf("task-free told = %q", toldByBead["task-free"])
+	}
+	if replayRec := inboxRequest(s, http.MethodPost, ftPath, url.Values{"text": {"again"}}.Encode(), tapPhoneAddr); replayRec.Code != http.StatusConflict {
+		t.Fatalf("replay POST = %d, want 409", replayRec.Code)
+	}
+
+	// 2. OPTIONS bead: follow option 2 link -> GET confirm -> POST option 2 + verbatim text.
+	opt2Path := qByBead["task-opts"].Options[1].Path
+	confirm2 := inboxRequest(s, http.MethodGet, opt2Path, "", tapPhoneAddr)
+	if confirm2.Code != http.StatusOK || !strings.Contains(confirm2.Body.String(), "Answer 2. One region first, then the rest") || !strings.Contains(confirm2.Body.String(), `<textarea`) {
+		t.Fatalf("option 2 confirm = %d %q", confirm2.Code, confirm2.Body.String())
+	}
+	extra := "  use us-west-2 first  "
+	post2 := inboxRequest(s, http.MethodPost, opt2Path, url.Values{"text": {extra}}.Encode(), tapPhoneAddr)
+	if post2.Code != http.StatusOK {
+		t.Fatalf("option 2 + text POST = %d %q", post2.Code, post2.Body.String())
+	}
+	if byID["task-opts"].Status != StatusInProgress {
+		t.Fatalf("task-opts status = %s", byID["task-opts"].Status)
+	}
+	if len(notesByBead["task-opts"]) != 1 || !strings.HasPrefix(notesByBead["task-opts"][0], "NEEDS_ME ANSWERED: 2 ") || !strings.HasSuffix(notesByBead["task-opts"][0], ": "+extra) {
+		t.Fatalf("task-opts notes = %q", notesByBead["task-opts"])
+	}
+	if len(toldByBead["task-opts"]) != 1 || !strings.Contains(toldByBead["task-opts"][0], "2. One region first, then the rest") || !strings.Contains(toldByBead["task-opts"][0], extra) {
+		t.Fatalf("task-opts told = %q", toldByBead["task-opts"])
 	}
 }

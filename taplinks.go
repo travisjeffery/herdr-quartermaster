@@ -159,12 +159,12 @@ func (s *tapServer) handleTapLinks(w http.ResponseWriter, r *http.Request) {
 		kind = questionKindPrompt
 		question = promptQuestionText(*livePrompt)
 	} else if b.Status == StatusNeedsMe {
-		q, ok := parseNeedsMeQuestion(b.Notes)
+		q, ok := parseTappableNeedsMeQuestion(b.Notes)
 		if !ok {
-			if strings.Contains(b.Notes, "NEEDS_ME ANSWERED:") || strings.Contains(b.Notes, "OPTIONS:") {
-				s.refuseJSON(w, http.StatusNotFound, b.ID, fmt.Sprintf("the question is gone: %s no longer ends in a live OPTIONS question", b.ID))
+			if strings.Contains(b.Notes, "NEEDS_ME ANSWERED:") {
+				s.refuseJSON(w, http.StatusNotFound, b.ID, fmt.Sprintf("the question is gone: %s was already answered", b.ID))
 			} else {
-				s.refuseJSON(w, http.StatusNotFound, b.ID, fmt.Sprintf("%s has no live prompt or tappable OPTIONS question", b.ID))
+				s.refuseJSON(w, http.StatusNotFound, b.ID, fmt.Sprintf("%s has no live prompt or question", b.ID))
 			}
 			return
 		}
@@ -195,19 +195,38 @@ func (s *tapServer) handleTapLinks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := s.now()
-	var minted []tapLink
+	var (
+		minted   []tapLink
+		freeText *tapLinksFreeText
+		exp      time.Time
+	)
 	if livePrompt != nil {
 		minted, err = mintTapLinks(s.secret, base, b.ID, *livePrompt, now)
+		if err != nil || len(minted) == 0 {
+			reason := "could not mint tap links"
+			if err != nil {
+				reason += ": " + err.Error()
+			}
+			s.refuseJSON(w, http.StatusInternalServerError, b.ID, reason)
+			return
+		}
+		exp = minted[0].Exp
 	} else {
 		minted, err = mintQuestionTapLinks(s.secret, base, b.ID, *liveQ, now)
-	}
-	if err != nil || len(minted) == 0 {
-		reason := "could not mint tap links"
 		if err != nil {
-			reason += ": " + err.Error()
+			s.refuseJSON(w, http.StatusInternalServerError, b.ID, "could not mint tap links: "+err.Error())
+			return
 		}
-		s.refuseJSON(w, http.StatusInternalServerError, b.ID, reason)
-		return
+		ft, err := mintQuestionFreeTextTapLink(s.secret, base, b.ID, *liveQ, now)
+		if err != nil {
+			s.refuseJSON(w, http.StatusInternalServerError, b.ID, "could not mint free-text tap link: "+err.Error())
+			return
+		}
+		freeText = &tapLinksFreeText{URL: ft.URL, MaxChars: tapMaxFreeTextRunes}
+		exp = ft.Exp
+		if len(minted) > 0 {
+			exp = minted[0].Exp
+		}
 	}
 
 	items := make([]tapLinksItem, len(minted))
@@ -218,8 +237,9 @@ func (s *tapServer) handleTapLinks(w http.ResponseWriter, r *http.Request) {
 		Bead:     b.ID,
 		Kind:     kind,
 		Question: question,
-		Expires:  time.Unix(minted[0].Exp.Unix(), 0).In(now.Location()),
+		Expires:  time.Unix(exp.Unix(), 0).In(now.Location()),
 		Links:    items,
+		FreeText: freeText,
 	}
 
 	var buf bytes.Buffer
@@ -232,7 +252,11 @@ func (s *tapServer) handleTapLinks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.journalMint(b.ID, kind, ident.Device, len(items))
+	mintCount := len(items)
+	if freeText != nil {
+		mintCount++
+	}
+	s.journalMint(b.ID, kind, ident.Device, mintCount)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)

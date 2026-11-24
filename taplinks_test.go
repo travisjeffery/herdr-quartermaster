@@ -270,8 +270,11 @@ func TestTapLinksNeedsMeQuestionFreshMintAndEndToEnd(t *testing.T) {
 			if len(resp1.Links) != len(wantQ.Options) {
 				t.Fatalf("links = %+v, want %d", resp1.Links, len(wantQ.Options))
 			}
+			if resp1.FreeText == nil || resp1.FreeText.MaxChars != tapMaxFreeTextRunes {
+				t.Fatalf("resp1.FreeText = %+v, want non-nil max_chars=%d", resp1.FreeText, tapMaxFreeTextRunes)
+			}
 
-			// Second mint gives different URLs.
+			// Second mint gives different URLs (options and free_text).
 			rec2 := tapLinksRequest(s, http.MethodGet, "/tap-links/task-42.1", tapPhoneAddr)
 			if rec2.Code != http.StatusOK {
 				t.Fatalf("second GET = %d %s", rec2.Code, rec2.Body.String())
@@ -284,6 +287,9 @@ func TestTapLinksNeedsMeQuestionFreshMintAndEndToEnd(t *testing.T) {
 				if resp1.Links[i].URL == resp2.Links[i].URL {
 					t.Fatalf("second call reused link[%d]: %s", i, resp1.Links[i].URL)
 				}
+			}
+			if resp2.FreeText == nil || resp2.FreeText.URL == resp1.FreeText.URL {
+				t.Fatalf("second call reused or dropped free_text: %+v vs %+v", resp1.FreeText, resp2.FreeText)
 			}
 
 			// First set still works through GET confirm and POST answer.
@@ -582,14 +588,14 @@ func TestTapLinksNonLiveTargetsReturn404(t *testing.T) {
 			wantPart: "gone",
 		},
 		{
-			name: "needs_me free text without OPTIONS",
+			name: "needs_me empty notes",
 			env: func() promptEnv {
 				f := newFakeQuestion("idle")
 				f.bead.ID = "task-1"
-				f.bead.Notes = "Should we rename this flag before shipping?"
+				f.bead.Notes = ""
 				return f.env()
 			},
-			wantPart: "OPTIONS",
+			wantPart: "no live prompt or question",
 		},
 		{
 			name: "in_progress worker with no prompt showing",
@@ -742,6 +748,14 @@ func TestTapLinksMintedURLsNeverPersistedOrLogged(t *testing.T) {
 				t.Fatalf("parse minted token: %v", err)
 			}
 			secretsToCheck = append(secretsToCheck, l.URL, tok, claims.Nonce)
+		}
+		if resp.FreeText != nil {
+			tok := tokenFromTapURL(t, resp.FreeText.URL)
+			claims, err := parseTapToken(s.secret, tok, time.Now())
+			if err != nil {
+				t.Fatalf("parse minted free_text token: %v", err)
+			}
+			secretsToCheck = append(secretsToCheck, resp.FreeText.URL, tok, claims.Nonce)
 		}
 	}
 
@@ -901,4 +915,68 @@ func TestTapLinksBaseURLHandlingAndChangedPrompt(t *testing.T) {
 			t.Fatalf("new link POST = %d, want 200", code)
 		}
 	})
+}
+
+func TestTapLinksFreeTextOnlyNeedsMeEndToEnd(t *testing.T) {
+	testTapOwnIP(t)
+	f := newFakeQuestion("idle")
+	f.bead.ID = "task-ft"
+	f.bead.Notes = "Should we rename this flag before shipping?\nCLASS: 2 — cli naming"
+	f.agent.Name = agentName(f.bead.ID)
+
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	s, err := newTapServer(TapConfig{Enabled: true, Devices: []string{"iphone181"}}, f.env())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.whois = func(string) (tapIdentity, error) { return tapIdentity{Device: "iphone181", User: "tj@"}, nil }
+	now := time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+
+	rec1 := tapLinksRequest(s, http.MethodGet, "/tap-links/task-ft", tapPhoneAddr)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first GET = %d %s", rec1.Code, rec1.Body.String())
+	}
+	var resp1 tapLinksResponse
+	if err := json.Unmarshal(rec1.Body.Bytes(), &resp1); err != nil {
+		t.Fatal(err)
+	}
+	if resp1.Bead != "task-ft" || resp1.Kind != questionKindNeedsMe || len(resp1.Links) != 0 {
+		t.Fatalf("resp1 = %+v, want needs_me with 0 option links", resp1)
+	}
+	if resp1.FreeText == nil || resp1.FreeText.MaxChars != tapMaxFreeTextRunes {
+		t.Fatalf("resp1.FreeText = %+v", resp1.FreeText)
+	}
+
+	// Second mint returns a fresh free-text URL.
+	rec2 := tapLinksRequest(s, http.MethodGet, "/tap-links/task-ft", tapPhoneAddr)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second GET = %d %s", rec2.Code, rec2.Body.String())
+	}
+	var resp2 tapLinksResponse
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp2); err != nil {
+		t.Fatal(err)
+	}
+	if resp2.FreeText == nil || resp2.FreeText.URL == resp1.FreeText.URL {
+		t.Fatalf("second mint reused free_text URL: %+v vs %+v", resp1.FreeText, resp2.FreeText)
+	}
+
+	// Answer via first free-text link end-to-end.
+	tok1 := tokenFromTapURL(t, resp1.FreeText.URL)
+	if code, body := tapRequest(s, http.MethodGet, tok1, tapPhoneAddr); code != http.StatusOK || !strings.Contains(body, "Send free-text answer") {
+		t.Fatalf("GET confirm = %d %q", code, body)
+	}
+	answerText := "Keep the existing flag name."
+	if code, body := tapFormRequest(s, http.MethodPost, tok1, url.Values{"text": {answerText}}, tapPhoneAddr); code != http.StatusOK || !strings.Contains(body, "Answered") {
+		t.Fatalf("POST answer = %d %q", code, body)
+	}
+	if f.bead.Status != StatusInProgress || len(f.notes) != 1 || !strings.HasSuffix(f.notes[0], ": "+answerText) || len(f.told) != 1 {
+		t.Fatalf("after answer: status=%s notes=%q told=%q", f.bead.Status, f.notes, f.told)
+	}
+
+	// Second link is now refused.
+	tok2 := tokenFromTapURL(t, resp2.FreeText.URL)
+	if code, _ := tapFormRequest(s, http.MethodPost, tok2, url.Values{"text": {"other"}}, tapPhoneAddr); code != http.StatusConflict {
+		t.Fatalf("second set POST = %d, want 409", code)
+	}
 }

@@ -72,14 +72,15 @@ answer prompts, or approve plans.
 
 Clients on an allowed tailnet device can mint fresh, 15-minute one-time
 `/tap/<token>` links on demand for one bead at a live approval prompt or live
-`needs_me` `OPTIONS:` question:
+`needs_me` question (with or without an `OPTIONS:` block):
 
 - **`GET /tap-links/<bead>`** returns JSON (`bead`, `kind`, `question`,
-  `expires`, `links`) with `Cache-Control: no-store`.
+  `expires`, `links`, plus `free_text: {url, max_chars}` for `needs_me`
+  questions) with `Cache-Control: no-store`.
 - Every call mints fresh nonces without invalidating earlier sets; the one-use
   nonce spend and live re-read keep answering at-most-once.
 - Non-live targets (missing or closed bead, `RUN:` bead, worker already working
-  again, answered question, or no parseable prompt/options) return `404` JSON
+  again, answered question, or no parseable prompt/question) return `404` JSON
   `{"error": …}` and mint nothing. There is no listing route.
 - Minted URLs are bearer credentials returned only in the HTTP response — never
   written to the inbox, logs, bead notes, or `journal.jsonl` (the journal
@@ -101,10 +102,12 @@ The inbox shows four live queues:
      estimate, plan digest, and workflow run links). Missing, malformed, or
      stale card files fall back cleanly to bead notes.
    - **`QUESTION:` / `OPTIONS:` / `CLASS:` / `CRITICAL:` notes**, minting
-     fresh `/tap/<token>` confirm links per option and highlighting detected
-     plan digests or gate plan counts.
-   - **Read-only `RUN:` commands** (with a copyable command block) and
-     **free-text `needs_me` notes** so nothing waiting on TJ is hidden.
+     fresh `/tap/<token>` confirm links per option plus a free-text reply link,
+     and highlighting detected plan digests or gate plan counts.
+   - **Free-text `needs_me` notes** (without an `OPTIONS:` block), minting a
+     fresh `/tap/<token>` free-text confirm link (up to 2,000 characters,
+     recorded verbatim), and **read-only `RUN:` commands** (with a copyable
+     command block, never tappable).
 3. **Pending checked execution plans (`plans/<digest>/`):** checked plans
    waiting for TJ approval (`needs_me`, `expired`, or `checked` with
    `pass == false`, excluding `done`/`failed` runs and closed beads), showing
@@ -189,9 +192,9 @@ inbox item as before, with no links. Covering muse needs a captured muse
 prompt screen as a parser fixture; once `parsePrompt` returns the prompt,
 taps cover it for free, since they key off the parsed prompt and its hash.
 
-`needs_me` questions are covered when the worker writes them with
-enumerated options, in the convention below. Free-text questions keep
-travelling exactly as they always have.
+`needs_me` questions are covered both with and without an `OPTIONS:` block
+(see below); `RUN:` command beads stay read-only and never get taps. Tool
+approval prompts keep enumerated answers only.
 
 Prompts on remote worker hosts work the same as local ones: the answer path
 reads and keys the worker wherever it runs, and only the endpoint's machine
@@ -223,17 +226,26 @@ the same links when no approval prompt is showing. The coordinator's
 context shows the question and its options.
 
 A question tap goes through the same endpoint and the same five checks; the
-link's hash is taken over the question's lines, its options and its class,
-and binds it to that question instance. The confirm page shows the question
-re-read from the bead. Pressing the button does what the coordinator does
-when TJ answers in the coordinator session, in this order:
+link's hash is taken over the question's lines, its options (empty when there
+is no `OPTIONS:` block) and its class, and binds it to that question instance.
+The confirm page shows the question re-read from the bead alongside a free-text
+field (up to 2,000 characters, counted in runes). Three submissions are valid
+for a question with options — an option alone, free text alone, or an option
+with free text — and free-text-only questions show a single text area and
+submit button. Over-limit or empty free-text submissions are refused before the
+nonce is spent so the user can edit and resubmit on the same link. Free text is
+recorded verbatim (stripping at most a single trailing newline added by form
+submission). Pressing the button does what the coordinator does when TJ answers
+in the coordinator session, in this order:
 
 1. Notes the answer on the bead —
-   `NEEDS_ME ANSWERED: 2 One region first… to Ship to all regions… [hash] by TJ via tap (device iphone181)` —
+   `NEEDS_ME ANSWERED: 2 One region first… to Ship to all regions… [hash] by TJ via tap (device iphone181)`
+   (or with `: <text>` appended for option+text, or `NEEDS_ME ANSWERED: free text to … [hash] by TJ via tap (device iphone181): <text>` for free text alone) —
    and journals it.
 2. Returns the bead to `in_progress`.
-3. Prompts the worker with the answer (over its control socket when it has
-   one), so the tap, not a later coordinator message, unblocks it.
+3. Prompts the worker with the answer — option and verbatim text together —
+   (over its control socket when it has one), so the tap, not a later
+   coordinator message, unblocks it.
 
 The stale guards are the needs_me analogues of a changed prompt: the tap is
 refused when the bead has left `needs_me`, when the question's hash has
