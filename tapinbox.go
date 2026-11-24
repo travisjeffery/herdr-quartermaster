@@ -711,8 +711,13 @@ func (s *tapServer) buildInbox(ident tapIdentity, now time.Time) inboxSnapshot {
 	}
 	snap.Plans = plans
 
+	children := openChildCounts(active)
 	for _, b := range active {
 		th := threadFor(s.fullCfg, st, b, byName)
+		if n := children[b.ID]; n > 0 {
+			th.OpenChildren = n
+			th = th.derive()
+		}
 		if th.Agent != nil && th.Agent.Status == "blocked" {
 			if p := s.readLivePrompt(b, th.Agent); p != nil {
 				if item, ok := s.buildPromptItem(th, *p, now); ok {

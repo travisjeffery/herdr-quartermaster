@@ -20,24 +20,26 @@ import (
 )
 
 type TickerState struct {
-	Threads      map[string]Snapshot   `json:"threads"`
-	LastTick     time.Time             `json:"last_tick"`
-	LastGH       time.Time             `json:"last_gh"`
-	PRs          map[string]PR         `json:"prs"`                  // by bead id, from the last gh pass
-	MergedPRs    map[string][]PR       `json:"merged_prs,omitempty"` // each bead's merged PRs, from the last gh pass
-	Runs         map[string][]Run      `json:"runs"`                 // by bead id, from the last gh pass
-	Noted        map[string]PR         `json:"noted_prs,omitempty"`  // by URL: linked PRs outside the listings, from the last gh pass
-	LastNudge    time.Time             `json:"last_nudge"`
-	Login        string                `json:"login"`
-	CoordReady   time.Time             `json:"coord_ready"`
-	CoordSeq     int64                 `json:"coord_seq"`
-	GHFailingFor time.Time             `json:"gh_failing_since"`
-	GHFailingIn  []string              `json:"gh_failing_in"` // repos whose PR listing failed
-	LastVerify   time.Time             `json:"last_verify"`
-	Verified     map[string]VerifyMark `json:"verified"`     // by bead id, from verify passes
-	VerifyRepos  map[string]VerifyRepo `json:"verify_repos"` // by repo path
-	GHLeft       int                   `json:"gh_left"`      // GraphQL points left, as of GHLeftAt
-	GHLeftAt     time.Time             `json:"gh_left_at"`   // when a verify pass last read GHLeft
+	Threads          map[string]Snapshot   `json:"threads"`
+	LastTick         time.Time             `json:"last_tick"`
+	LastGH           time.Time             `json:"last_gh"`
+	PRs              map[string]PR         `json:"prs"`                  // by bead id, from the last gh pass
+	MergedPRs        map[string][]PR       `json:"merged_prs,omitempty"` // each bead's merged PRs, from the last gh pass
+	Runs             map[string][]Run      `json:"runs"`                 // by bead id, from the last gh pass
+	Noted            map[string]PR         `json:"noted_prs,omitempty"`  // by URL: linked PRs outside the listings, from the last gh pass
+	LastNudge        time.Time             `json:"last_nudge"`
+	Login            string                `json:"login"`
+	CoordReady       time.Time             `json:"coord_ready"`
+	CoordSeq         int64                 `json:"coord_seq"`
+	GHFailingFor     time.Time             `json:"gh_failing_since"`
+	GHFailingIn      []string              `json:"gh_failing_in"` // repos whose PR listing failed
+	LastVerify       time.Time             `json:"last_verify"`
+	Verified         map[string]VerifyMark `json:"verified"`     // by bead id, from verify passes
+	VerifyRepos      map[string]VerifyRepo `json:"verify_repos"` // by repo path
+	LastOrphanFinish time.Time             `json:"last_orphan_finish,omitempty"`
+	Orphans          map[string]OrphanMark `json:"orphans,omitempty"`
+	GHLeft           int                   `json:"gh_left"`    // GraphQL points left, as of GHLeftAt
+	GHLeftAt         time.Time             `json:"gh_left_at"` // when a verify pass last read GHLeft
 	// Intervals are the running ticker's, which a config edit since it
 	// started doesn't change: status measures lateness against these.
 	Intervals *Intervals `json:"intervals,omitempty"`
@@ -90,15 +92,16 @@ func saveState(s TickerState) error {
 }
 
 type Ticker struct {
-	cfg      Config
-	herdr    Herdr
-	beads    Beads
-	gh       GH
-	log      *log.Logger
-	side     *sidebar
-	watchEnv *WatchEnv
-	jobEnv   *JobEnv
-	now      func() time.Time
+	cfg       Config
+	herdr     Herdr
+	beads     Beads
+	gh        GH
+	log       *log.Logger
+	side      *sidebar
+	watchEnv  *WatchEnv
+	jobEnv    *JobEnv
+	orphanEnv *orphanFinishEnv
+	now       func() time.Time
 }
 
 func (t Ticker) clock() time.Time {
@@ -114,11 +117,25 @@ func newTicker(cfg Config, logger *log.Logger) Ticker {
 }
 
 // gather joins beads, agents and PRs into threads. Only beads a worker could
-// be on (in_progress, needs_me, blocked) are threads.
+// be on (in_progress, needs_me, blocked) are threads, while open child beads
+// are still counted so parent beads with open children are not classified as
+// merged.
 func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Agent, error) {
-	active, err := t.beads.Active()
+	threads, _, agents, _, err := t.gatherAll(st, now)
+	return threads, agents, err
+}
+
+func (t Ticker) gatherAll(st *TickerState, now time.Time) ([]Thread, []Bead, map[string]Agent, bool, error) {
+	all, err := t.beads.NonClosed()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, false, err
+	}
+	children := openChildCounts(all)
+	var active []Bead
+	for _, b := range all {
+		if isActiveStatus(b.Status) {
+			active = append(active, b)
+		}
 	}
 	agents, agentsComplete, err := t.herdr.observedAgents()
 	if err != nil {
@@ -127,9 +144,9 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 		// transitions against missing agents or treat them as gone.
 		threads := make([]Thread, len(active))
 		for i, b := range active {
-			threads[i] = Thread{Bead: b}
+			threads[i] = Thread{Bead: b, OpenChildren: children[b.ID]}
 		}
-		return threads, nil, err
+		return threads, all, nil, false, err
 	}
 	byName := map[string]Agent{}
 	for _, a := range agents {
@@ -145,10 +162,11 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 	threads := make([]Thread, 0, len(active))
 	for _, b := range active {
 		th := threadForAt(t.cfg, *st, b, byName, now)
+		th.OpenChildren = children[b.ID]
 		th.AgentUnknown = !agentsComplete && th.Agent == nil
-		threads = append(threads, th)
+		threads = append(threads, th.derive())
 	}
-	return threads, byName, nil
+	return threads, all, byName, agentsComplete, nil
 }
 
 // threadFor joins one bead with its agent, by name, and what the last gh pass
@@ -417,7 +435,7 @@ func rank(g Group, id string) string { return fmt.Sprintf("%d-%s", int(g), id) }
 // coordinator, and closing up beads that left the active set.
 func (t Ticker) once(st *TickerState) error {
 	now := t.clock()
-	threads, agents, err := t.gather(st, now)
+	threads, allBeads, agents, agentsComplete, err := t.gatherAll(st, now)
 	if err != nil {
 		if threads != nil { // canonical Beads read succeeded; agents are unknown
 			if notifyErr := reconcileDesktopWith(threads, nil, t.cfg.Desktop, now, submitDesktopMessage); notifyErr != nil {
@@ -591,6 +609,9 @@ func (t Ticker) once(st *TickerState) error {
 	}
 	if verifyDue(t.cfg, *st, now) {
 		t.verify(st, now)
+	}
+	if orphanFinishDue(t.cfg, *st, now) {
+		t.orphanFinish(st, allBeads, agents, agentsComplete, now)
 	}
 	t.advanceWorkflows(st, threads, now)
 	t.processJobs(st, threads, agents, now)

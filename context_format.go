@@ -292,6 +292,32 @@ func renderContextWith(cfg Config, threads []Thread, next, ready []Bead, inbox [
 
 func buildContextDoc(cfg Config, rawThreads []Thread, next, ready []Bead, inbox []InboxItem, st TickerState, worktreed map[string]bool, now time.Time, opts ContextOptions) contextDoc {
 	threads := slices.Clone(rawThreads)
+	seenBeads := make(map[string]Bead, len(threads)+len(next)+len(ready))
+	for _, t := range threads {
+		seenBeads[t.Bead.ID] = t.Bead
+	}
+	for _, b := range next {
+		if _, ok := seenBeads[b.ID]; !ok {
+			seenBeads[b.ID] = b
+		}
+	}
+	for _, b := range ready {
+		if _, ok := seenBeads[b.ID]; !ok {
+			seenBeads[b.ID] = b
+		}
+	}
+	allSeen := make([]Bead, 0, len(seenBeads))
+	for _, b := range seenBeads {
+		allSeen = append(allSeen, b)
+	}
+	if children := openChildCounts(allSeen); len(children) > 0 {
+		for i := range threads {
+			if n := children[threads[i].Bead.ID]; n > threads[i].OpenChildren {
+				threads[i].OpenChildren = n
+				threads[i] = threads[i].derive()
+			}
+		}
+	}
 	sort.SliceStable(threads, func(i, j int) bool {
 		gi, gj := classify(threads[i]), classify(threads[j])
 		if gi != gj {

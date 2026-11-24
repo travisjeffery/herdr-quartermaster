@@ -92,6 +92,7 @@ func buildRows(cfg Config, data boardData, mode sortMode) []boardRow {
 	for _, b := range data.Beads {
 		live[b.ID] = true
 	}
+	children := openChildCounts(data.Beads)
 	sections := map[Group][]boardRow{}
 	for _, b := range data.Beads {
 		if b.Status != StatusOpen && b.Status != StatusInProgress && b.Status != StatusNeedsMe && b.Status != StatusBlocked {
@@ -99,6 +100,7 @@ func buildRows(cfg Config, data boardData, mode sortMode) []boardRow {
 		}
 		th := threadFor(cfg, data.State, b, byName)
 		th.Blockers = waitsOn(b, live)
+		th.OpenChildren = children[b.ID]
 		th = th.derive()
 		r := threadRow(data.State, th)
 		if th.derived().Kind == ThreadQueued || b.Status == StatusOpen && th.derived().Kind == ThreadBlocked {

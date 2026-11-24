@@ -43,10 +43,11 @@ func (g Group) String() string { return groupNames[g] }
 // Thread is one bead with whatever is working on it and delivering it.
 type Thread struct {
 	// state is derived once after gathering, then shared by all view adapters.
-	state    *ThreadState
-	Blockers []string
-	Bead     Bead
-	Agent    *Agent
+	state        *ThreadState
+	Blockers     []string
+	OpenChildren int
+	Bead         Bead
+	Agent        *Agent
 	// AgentUnknown means a partial discovery could not observe this worker.
 	AgentUnknown bool
 	PR           *PR
@@ -263,6 +264,7 @@ const (
 	EventRunFailed       EventKind = "run_failed"
 	EventLikelyStale     EventKind = "likely_stale"
 	EventAutoClosed      EventKind = "auto_closed"
+	EventOrphanFinish    EventKind = "orphan_finish"
 	EventAutoMergeOff    EventKind = "auto_merge_off"
 	EventUnsafeAutoMerge EventKind = "unsafe_auto_merge"
 	EventLeaseExpired    EventKind = "lease_expired"
@@ -770,6 +772,8 @@ func transitionWith(t Thread, prev Snapshot, first bool, now time.Time, opts tra
 				what, id, LabelRollingOut))
 		case t.PR != nil && t.PR.State == "OPEN":
 			// Another of the bead's PRs is still open; closing waits for it.
+		case t.OpenChildren > 0:
+			// Open child beads remain; closing waits for them.
 		case t.Bead.Status != StatusClosed:
 			o.Prompts = append(o.Prompts, fmt.Sprintf(
 				"[quartermaster: automated, not the user] %s merged. Verify what needs verifying after merge, then close the bead with `quartermaster close %s --by worker --reason \"<what shipped and how it was verified>\"` and stop.",

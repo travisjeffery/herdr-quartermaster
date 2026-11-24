@@ -190,6 +190,11 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   evidence; closing is class 3 (`+"`--action close`"+`), so close it with
   `+"`quartermaster close`"+` and a reason when the check passes, else offer TJ to; an "auto_closed" item was
   closed by the ticker, so tell TJ and reopen it if the evidence is wrong.
+- An "orphan_finish" inbox item is an agentless merged or completed rolling-out
+  bead that the ticker's orphan finisher sweep could not close automatically
+  (requires verification, rolling-out runs, work remaining, autonomy below 3, or
+  a failed close). Follow its suggested `+"`quartermaster close`"+` or
+  `+"`quartermaster resume`"+` command so the bead does not stall.
 - Resumable threads (`+"`quartermaster resume <bead>...`"+`, `+"`--action resume`"+`) and stale claims
   (`+"`quartermaster stale --release`"+`, `+"`--class 3`"+`) follow the dial like any other action.
 - Lessons worth keeping across threads go to `+"`bd remember`"+`.

@@ -46,6 +46,8 @@ const (
 	// journalStallRetry is a bounded ticker auto-retry or escalation after a
 	// transient ACP stall (stallretry.go).
 	journalStallRetry = "stall_retry"
+	// journalOrphanFinish is an orphan finisher sweep outcome (orphanfinish.go).
+	journalOrphanFinish = "orphan_finish"
 )
 
 type journalRecord struct {

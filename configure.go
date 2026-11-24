@@ -96,7 +96,7 @@ func configTemplate(repo string) string {
 	return fmt.Sprintf(`repo = %q
 # See the README for everything else: branch_prefix, worker_agent, repos,
 # linear_prefixes, tick_seconds, idle_seconds, prompt_debounce_seconds,
-# review_bump_hours, nudge, [autonomy], [stall_retry].
+# review_bump_hours, nudge, [autonomy], [stall_retry], [orphan_finish].
 `, repo)
 }
 
