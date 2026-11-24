@@ -44,6 +44,67 @@ fat-fingered notification tap is one extra press away from releasing
 anything. The link is still one tap target per option; the page it opens is
 the review, and its button is the answer.
 
+## Tailnet Web Inbox (`/inbox`)
+
+The same Tailscale-bound tap server also hosts a persistent, mobile-first
+**Tailnet Web Inbox** with zero external assets (inline HTML/CSS only):
+
+- **`GET /`** redirects to `/inbox` after authentication.
+- **`GET /inbox`** renders a bookmarkable mobile/desktop queue page with a
+  manual Refresh button, an opt-in 30s auto-refresh toggle, summary counts,
+  and a `Viewing as TJ from <device>` identity footer.
+- **`GET /inbox.json`** returns the same live queues as JSON (keeping tool
+  prompt hashes separate from `needs_me` question hashes, and never exposing
+  `tap/secret`).
+- **`quartermaster tap url`** prints `http://<tailscale-ip>:<port>/inbox` when
+  `[tap]` is enabled with a valid `devices` allowlist and Tailscale resolves;
+  it fails closed otherwise.
+
+Every route (`/`, `/inbox`, `/inbox.json`, `/inbox/plan/<digest>`, and
+`/tap/<token>`) enforces the exact same fail-closed auth guard: tailnet source
+IP, `tailscale whois` lookup, and explicit membership in `[tap] devices`. Any
+non-tailnet source, failed `whois`, or disallowed device — including the host
+machine itself — receives `403` and is journalled as `TAP REFUSED: …` before
+any state is read or touched. `GET` requests never mutate state, spend nonces,
+answer prompts, or approve plans.
+
+The inbox shows four live queues:
+
+1. **Approval prompts:** blocked workers with a parsed prompt (or pi control
+   ask), displaying bead id/title, autonomy level, prompt hash, the **actual
+   command/prompt lines**, and fresh server-minted one-time `/tap/<token>`
+   links per option (opening the standard confirm+POST page).
+2. **`needs_me` questions and structured cards:**
+   - **Structured cards** from `<state dir>/cards/<bead>/question.json` (plus
+     optional recent timeline from `<state dir>/cards/<bead>/milestones.jsonl`),
+     rendering class badges (`C0`–`C9`, highlighting `C7`–`C9` and `CRITICAL`),
+     recommendation callouts, option descriptions, and review cards (IaC
+     create/update/replace/delete counts and preview excerpt, PR link, cost
+     estimate, plan digest, and workflow run links). Missing, malformed, or
+     stale card files fall back cleanly to bead notes.
+   - **`QUESTION:` / `OPTIONS:` / `CLASS:` / `CRITICAL:` notes**, minting
+     fresh `/tap/<token>` confirm links per option and highlighting detected
+     plan digests or gate plan counts.
+   - **Read-only `RUN:` commands** (with a copyable command block) and
+     **free-text `needs_me` notes** so nothing waiting on TJ is hidden.
+3. **Pending checked execution plans (`plans/<digest>/`):** checked plans
+   waiting for TJ approval (`needs_me`, `expired`, or `checked` with
+   `pass == false`, excluding `done`/`failed` runs and closed beads), showing
+   steps, classes, and IaC preview counts when readable. Clicking **Review &
+   Approve Plan** opens `GET /inbox/plan/<digest>` (a read-only review page
+   carrying a freshly minted, HMAC-signed, one-time token bound to the exact
+   digest, bead, and `tailscale whois` device); submitting `POST
+   /inbox/plan/<digest>` verifies signature, expiry, digest, device, and
+   atomic one-time nonce consumption before approving the plan via the same
+   `--by TJ` path and journalling the approval with device identity.
+4. **Ready-to-merge PRs:** read-only list of active threads currently in
+   `ready to merge` state with PR link, short head SHA, checks summary,
+   review state, autonomy level, and merge class (no unconfirmed merge
+   buttons).
+
+All existing `/tap/<token>` links and `quartermaster tap links <bead>`
+behavior stay unchanged.
+
 ## What makes a tap TJ's
 
 A tap changes something only when all of these hold, checked in this order —
@@ -175,8 +236,9 @@ for TJ, and a tap *is* TJ. The coordinator's own rules for answering
 ## Rollback and failure modes
 
 - **Off switch:** set `[tap] enabled = false` (or delete the section) and
-  restart the ticker. No listener, no links minted, `quartermaster tap
-  links` refuses. Outstanding links die with the listener.
+  restart the ticker. No listener, no `/inbox`, no links minted, and
+  `quartermaster tap links` / `quartermaster tap url` refuse. Outstanding
+  links die with the listener.
 - **Revoke everything now:** delete `~/.local/state/quartermaster/tap/secret`;
   every outstanding link's signature stops verifying. A new key is made on
   next use.

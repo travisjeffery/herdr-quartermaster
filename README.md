@@ -337,8 +337,16 @@ lifecycle action.
   `QUESTION:` / `OPTIONS:` / `CLASS:` convention gets the same links on its
   inbox item; tapping one notes `NEEDS_ME ANSWERED: … by TJ via tap
   (device …)`, returns the bead to `in_progress`, and prompts its worker
-  with the answer. Free-text questions are unchanged. See
-  [docs/approval-taps.md](docs/approval-taps.md).
+  with the answer. Free-text questions are unchanged. The same listener also
+  serves a bookmarkable, mobile-first **Tailnet Web Inbox** at `/inbox` (and
+  `/inbox.json`, with `/` redirecting to `/inbox`; `quartermaster tap url`
+  prints the URL) behind the exact same fail-closed tailnet IP +
+  `tailscale whois` `[tap] devices` allowlist, showing live approval prompts,
+  `needs_me` questions (including `RUN:` commands, free-text notes, and
+  optional structured review cards under `cards/<bead>/`), pending checked
+  execution plans (approved via two-step confirm+POST with signed one-time
+  nonces bound to digest and device), and ready-to-merge PRs. `GET` never
+  mutates state. See [docs/approval-taps.md](docs/approval-taps.md).
 - **Commands only you can run** (a classifier denial, an interactive login, a
   production change) come back as a `RUN: <command>` note on a `needs_me`
   bead. The sidebar shows `needs you · run command`, the coordinator relays it
@@ -1182,6 +1190,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster prompt <bead>` | The approval prompt the bead's worker is showing: its text, options, auto-deny countdown, and a hash that names it; for a pi worker, the ask-gate waiting on its control socket. Exits 1 when none is showing. |
 | `quartermaster answer <bead> <choice> --expect HASH [--by WHO]` | Answer that prompt with an option number or label, only if it is still the prompt with `HASH`. Waits for it to clear and notes the answer on the bead, crediting `WHO` (default `coordinator`). |
 | `quartermaster tap links <bead>` | One signed one-time link per option of the bead's current prompt — or of its `needs_me` `OPTIONS:` question when no prompt is showing — for answering it as TJ from an allowed phone. Needs `[tap]` enabled; the ticker serves the links and adds them to the prompt's or question's inbox item. `tap serve` runs the endpoint in the foreground. |
+| `quartermaster tap url` | Print the bookmarkable Tailnet Web Inbox URL (`http://<tailscale-ip>:<port>/inbox`) when `[tap]` is enabled with allowed devices and Tailscale resolves; fails closed otherwise. |
 | `quartermaster gate plan <file\|-> [--expect op=N,...] [--target T]` | Print the plan's impact class on target `T`: 6 or 7 by the `[autonomy] prod` patterns (no target or no patterns means production), 8 for a delete or replace in production or of a stateful resource anywhere, 9 past `widespread` deletes or for an unknown operation. Exit 0 only if a `pulumi preview --json` or `tofu show -json` plan creates, updates or reads, with no delete, replace or unknown operation, and with `--expect`, exactly those counts. A plan that doesn't parse, or differs from `--expect`, gets no class and fails. |
 | `quartermaster plan check <file\|->` | Classify an execution plan ([design](docs/design/execution-plan.md)): JSON naming a `bead` and `steps`, each an `op` (`github.pr.merge`, `github.pr.automerge`, `iac.apply`, or anything else, which is `opaque`), a canonical `target` (`github:owner/repo#N`, `pulumi:<stack>`, `tofu:<name>`), `args` and `pre` (`head_sha` for a merge; an apply's `args.preview` is gate-checked against `args.expect` and its digest bound in as `pre.plan_digest`; an apply without `args.expect` is one class up). A step's class is the highest of the op table's, `gate plan`'s and its own stated `class`; opaque is 9. Stores the plan under its SHA-256 digest and approves it by the dial for 1h if the bead's level and budgets reach its class; else exits nonzero naming the digest. Journaled as a check. Advisory until the executor holds the credentials. |
 | `quartermaster plan approve <digest> --by TJ [--for D]` | TJ's approval of a checked plan, by digest or a unique prefix of 8+; lasts 1h unless `--for`. |

@@ -278,7 +278,10 @@ func tailscaleIPv4() (string, error) {
 
 type tapServer struct {
 	cfg     TapConfig
+	fullCfg Config
 	env     promptEnv
+	inbox   *tapInboxEnv
+	base    string // "http://<tailnet-ip>:<port>" when known from listener bind
 	secret  []byte
 	whois   func(ip string) (tapIdentity, error)
 	consume func(nonce string, exp time.Time, now time.Time) (bool, error)
@@ -291,12 +294,16 @@ type tapServer struct {
 }
 
 func newTapServer(cfg TapConfig, env promptEnv) (*tapServer, error) {
+	return newTapServerWithConfig(Config{Tap: cfg}, env, nil)
+}
+
+func newTapServerWithConfig(cfg Config, env promptEnv, inbox *tapInboxEnv) (*tapServer, error) {
 	secret, err := tapSecret()
 	if err != nil {
 		return nil, err
 	}
 	return &tapServer{
-		cfg: cfg, env: env, secret: secret,
+		cfg: cfg.Tap, fullCfg: cfg, env: env, inbox: inbox, secret: secret,
 		whois: tailscaleWhois, consume: consumeTapNonce,
 		now:  time.Now,
 		logf: func(string, ...any) {},
@@ -306,22 +313,69 @@ func newTapServer(cfg TapConfig, env promptEnv) (*tapServer, error) {
 func (s *tapServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tap/", s.handleTap)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		tapPage(w, http.StatusNotFound, "Nothing here", "Approval links arrive with the prompt they answer; there is no index.")
-	})
+	mux.HandleFunc("/inbox", s.handleInbox)
+	mux.HandleFunc("/inbox.json", s.handleInboxJSON)
+	mux.HandleFunc("/inbox/plan/", s.handleInboxPlan)
+	mux.HandleFunc("/", s.handleRoot)
 	return mux
+}
+
+// authenticate checks the fail-closed Tailnet identity boundary shared by
+// every tap and Web Inbox route: tailnet source IP, successful `tailscale
+// whois`, and explicit membership in [tap] devices.
+func (s *tapServer) authenticate(r *http.Request) (tapIdentity, string, bool) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || !isTailnetIP(net.ParseIP(host)) {
+		return tapIdentity{}, "the tap did not come over the tailnet", false
+	}
+	ident, err := s.whois(host)
+	if err != nil {
+		return tapIdentity{}, "the tapping device could not be identified (" + err.Error() + ")", false
+	}
+	if !tapDeviceAllowed(s.cfg.Devices, ident.Device) {
+		return tapIdentity{}, fmt.Sprintf("device %s is not allowed to tap", ident.Device), false
+	}
+	return ident, "", true
+}
+
+func (s *tapServer) journalRefusal(bead, reason string) {
+	rec := journalRecord{At: s.now(), Kind: journalTap, Bead: bead, Class: -1, Text: "TAP REFUSED: " + reason}
+	if err := appendJournal(rec); err != nil {
+		s.logf("tap: journal a refusal: %v", err)
+	}
+	s.logf("tap refused: %s", reason)
 }
 
 // refuse journals why a tap changed nothing, then says so. A refusal after
 // the signature checked out names its bead; a forged or garbled link has no
 // bead to name.
 func (s *tapServer) refuse(w http.ResponseWriter, status int, bead, reason string) {
-	rec := journalRecord{At: s.now(), Kind: journalTap, Bead: bead, Class: -1, Text: "TAP REFUSED: " + reason}
-	if err := appendJournal(rec); err != nil {
-		s.logf("tap: journal a refusal: %v", err)
-	}
-	s.logf("tap refused: %s", reason)
+	s.journalRefusal(bead, reason)
 	tapPage(w, status, "Not answered", reason+".")
+}
+
+func (s *tapServer) refuseJSON(w http.ResponseWriter, status int, bead, reason string) {
+	s.journalRefusal(bead, reason)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(struct {
+		Error string `json:"error"`
+	}{Error: reason})
+}
+
+// requireAuth runs authenticate and writes + journals a 403 refusal on failure.
+func (s *tapServer) requireAuth(w http.ResponseWriter, r *http.Request, bead string, jsonResp bool) (tapIdentity, bool) {
+	ident, reason, ok := s.authenticate(r)
+	if !ok {
+		if jsonResp {
+			s.refuseJSON(w, http.StatusForbidden, bead, reason)
+		} else {
+			s.refuse(w, http.StatusForbidden, bead, reason)
+		}
+		return tapIdentity{}, false
+	}
+	return ident, true
 }
 
 func (s *tapServer) handleTap(w http.ResponseWriter, r *http.Request) {
@@ -335,18 +389,8 @@ func (s *tapServer) handleTap(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, status, claims.Bead, err.Error())
 		return
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || !isTailnetIP(net.ParseIP(host)) {
-		s.refuse(w, http.StatusForbidden, claims.Bead, "the tap did not come over the tailnet")
-		return
-	}
-	ident, err := s.whois(host)
-	if err != nil {
-		s.refuse(w, http.StatusForbidden, claims.Bead, "the tapping device could not be identified ("+err.Error()+")")
-		return
-	}
-	if !tapDeviceAllowed(s.cfg.Devices, ident.Device) {
-		s.refuse(w, http.StatusForbidden, claims.Bead, fmt.Sprintf("device %s is not allowed to tap", ident.Device))
+	ident, ok := s.requireAuth(w, r, claims.Bead, false)
+	if !ok {
 		return
 	}
 	switch r.Method {
@@ -383,6 +427,7 @@ func (s *tapServer) confirm(w http.ResponseWriter, c tapClaims, ident tapIdentit
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	data := struct {
 		Bead, Summary, Text, Option, Device string
 		Number                              int
@@ -416,6 +461,7 @@ func (s *tapServer) confirmQuestion(w http.ResponseWriter, c tapClaims, ident ta
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	data := struct {
 		Bead, Summary, Text, Option, Device string
 		Number                              int
@@ -465,25 +511,30 @@ var tapConfirmTmpl = template.Must(template.New("confirm").Parse(`<!DOCTYPE html
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Answer {{.Bead}}?</title>
-<style>body{font-family:system-ui;margin:1.2em}pre{white-space:pre-wrap;background:#f4f4f4;padding:.8em;border-radius:.5em}button{font-size:1.2em;padding:.7em 1.2em;width:100%}</style>
+<style>body{font-family:system-ui;margin:1.2em;max-width:44rem}pre{white-space:pre-wrap;word-break:break-word;background:#f4f4f4;padding:.8em;border-radius:.5em}button{font-size:1.15em;padding:.75em 1.2em;width:100%;cursor:pointer}.nav{margin-top:1em;font-size:.95em}@media (prefers-color-scheme:dark){body{background:#111418;color:#e6edf3}pre{background:#1b2129;color:#e6edf3}a{color:#79c0ff}}</style>
 </head><body>
 <h1>{{.Bead}}: {{.Summary}}</h1>
 <pre>{{.Text}}</pre>
 <form method="post"><button type="submit">Answer {{.Number}}. {{.Option}}</button></form>
 <p>You are answering as TJ from {{.Device}}. Anything else: close this page.</p>
+<p class="nav"><a href="/inbox">Back to Inbox</a></p>
 </body></html>`))
 
 var tapPageTmpl = template.Must(template.New("page").Parse(`<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
-<style>body{font-family:system-ui;margin:1.2em}</style>
-</head><body><h1>{{.Title}}</h1><p>{{.Body}}</p></body></html>`))
+<style>body{font-family:system-ui;margin:1.2em;max-width:44rem}@media (prefers-color-scheme:dark){body{background:#111418;color:#e6edf3}a{color:#79c0ff}}</style>
+</head><body><h1>{{.Title}}</h1><p>{{.Body}}</p>{{if .ShowInbox}}<p><a href="/inbox">Back to Inbox</a></p>{{end}}</body></html>`))
 
 func tapPage(w http.ResponseWriter, status int, title, body string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	_ = tapPageTmpl.Execute(w, struct{ Title, Body string }{title, body})
+	_ = tapPageTmpl.Execute(w, struct {
+		Title, Body string
+		ShowInbox   bool
+	}{Title: title, Body: body, ShowInbox: status != http.StatusForbidden})
 }
 
 // tapBaseURL is where tap links point: this machine's tailnet address. It is
@@ -667,21 +718,29 @@ func (t Ticker) tapQuestionEventSuffix(th Thread) string {
 // Binding happens here, not in the goroutine, so a failure is the caller's
 // to log at once.
 func startTapServer(cfg TapConfig, env promptEnv, logf func(format string, args ...any)) (net.Listener, error) {
-	if !cfg.Enabled {
+	return startTapServerWithConfig(Config{Tap: cfg}, env, nil, logf)
+}
+
+func startTapServerWithConfig(cfg Config, env promptEnv, inbox *tapInboxEnv, logf func(format string, args ...any)) (net.Listener, error) {
+	if !cfg.Tap.Enabled {
 		return nil, errors.New("approval taps are off")
+	}
+	if err := cfg.validateTap(); err != nil {
+		return nil, err
 	}
 	ip, err := tapOwnIP()
 	if err != nil {
 		return nil, err
 	}
-	s, err := newTapServer(cfg, env)
+	s, err := newTapServerWithConfig(cfg, env, inbox)
 	if err != nil {
 		return nil, err
 	}
+	s.base = fmt.Sprintf("http://%s:%d", ip, cfg.Tap.port())
 	if logf != nil {
 		s.logf = logf
 	}
-	ln, err := net.Listen("tcp", net.JoinHostPort(ip, strconv.Itoa(cfg.port())))
+	ln, err := net.Listen("tcp", net.JoinHostPort(ip, strconv.Itoa(cfg.Tap.port())))
 	if err != nil {
 		return nil, err
 	}
@@ -691,14 +750,30 @@ func startTapServer(cfg TapConfig, env promptEnv, logf func(format string, args 
 			s.logf("tap: serve: %v", err)
 		}
 	}()
-	s.logf("tap: listening on http://%s (devices %s)", ln.Addr(), strings.Join(cfg.Devices, ", "))
+	s.logf("tap: listening on http://%s (devices %s)", ln.Addr(), strings.Join(cfg.Tap.Devices, ", "))
 	return ln, nil
 }
 
-// tapCmd is `quartermaster tap links|serve`.
+// tapInboxURL returns the bookmarkable Tailnet Web Inbox URL when [tap] is
+// enabled, valid, and this machine's Tailscale IPv4 address resolves.
+func tapInboxURL(cfg Config) (string, error) {
+	if !cfg.Tap.Enabled {
+		return "", errors.New("approval taps are off: set [tap] enabled with devices in config.toml (docs/approval-taps.md)")
+	}
+	if err := cfg.validateTap(); err != nil {
+		return "", err
+	}
+	base, err := tapBaseURL(cfg.Tap)
+	if err != nil {
+		return "", err
+	}
+	return base + "/inbox", nil
+}
+
+// tapCmd is `quartermaster tap links|url|serve`.
 func tapCmd(cfg Config, env promptEnv, pos []string) error {
 	if len(pos) == 0 {
-		return errors.New("usage: quartermaster tap links <bead> | quartermaster tap serve")
+		return errors.New("usage: quartermaster tap links <bead> | quartermaster tap url | quartermaster tap serve")
 	}
 	switch pos[0] {
 	case "links":
@@ -711,11 +786,21 @@ func tapCmd(cfg Config, env promptEnv, pos []string) error {
 		}
 		fmt.Print(out)
 		return nil
+	case "url":
+		if len(pos) != 1 {
+			return errors.New("usage: quartermaster tap url")
+		}
+		u, err := tapInboxURL(cfg)
+		if err != nil {
+			return err
+		}
+		fmt.Println(u)
+		return nil
 	case "serve":
 		if len(pos) != 1 {
 			return errors.New("usage: quartermaster tap serve")
 		}
-		ln, err := startTapServer(cfg.Tap, env, func(format string, args ...any) {
+		ln, err := startTapServerWithConfig(cfg, env, liveTapInboxEnv(cfg, newHerdr().on(cfg.coordSocket())), func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "quartermaster: "+format+"\n", args...)
 		})
 		if err != nil {
@@ -727,6 +812,6 @@ func tapCmd(cfg Config, env promptEnv, pos []string) error {
 		<-sig // the ticker runs this itself when [tap] is on; serve is for a staged run
 		return nil
 	default:
-		return fmt.Errorf("unknown tap command %q (links or serve)", pos[0])
+		return fmt.Errorf("unknown tap command %q (links, url or serve)", pos[0])
 	}
 }

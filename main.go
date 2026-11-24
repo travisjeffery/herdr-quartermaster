@@ -100,6 +100,8 @@ Usage:
                                                        TJ when tapped from an allowed phone (needs [tap]
                                                        enabled; the ticker serves them, and adds them to
                                                        the prompt's or question's inbox event)
+  quartermaster tap url                                bookmarkable Tailnet Web Inbox URL (/inbox) when [tap]
+                                                       is enabled and Tailscale resolves (fails closed otherwise)
   quartermaster tap serve                              run the tap endpoint in the foreground (the ticker
                                                        runs it too when [tap] is on)
   quartermaster gate plan <file|-> [--expect op=N,...] print a pulumi preview --json or tofu show -json

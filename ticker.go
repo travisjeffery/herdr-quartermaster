@@ -909,7 +909,7 @@ func tickerRun(cfg Config) error {
 	if cfg.Tap.Enabled {
 		// The tap endpoint rides the ticker: no new daemon. A bind failure
 		// (no tailnet, port taken) leaves the ticker running and taps off.
-		if ln, err := startTapServer(cfg.Tap, livePromptEnv(cfg, t.herdr), logger.Printf); err != nil {
+		if ln, err := startTapServerWithConfig(cfg, livePromptEnv(cfg, t.herdr), liveTapInboxEnv(cfg, t.herdr), logger.Printf); err != nil {
 			logger.Printf("tap: %v (approval taps unavailable)", err)
 		} else {
 			defer ln.Close()
