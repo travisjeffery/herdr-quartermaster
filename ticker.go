@@ -97,6 +97,7 @@ type Ticker struct {
 	log      *log.Logger
 	side     *sidebar
 	watchEnv *WatchEnv
+	jobEnv   *JobEnv
 }
 
 func newTicker(cfg Config, logger *log.Logger) Ticker {
@@ -556,6 +557,7 @@ func (t Ticker) once(st *TickerState) error {
 		t.verify(st, now)
 	}
 	t.advanceWorkflows(st, threads, now)
+	t.processJobs(st, threads, agents, now)
 	t.nudgeCoordinator(st, agents, now)
 	return nil
 }

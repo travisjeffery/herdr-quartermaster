@@ -41,6 +41,8 @@ const (
 	journalCard = "card"
 	// journalWorkflow is a durable rollout workflow transition (workflow.go).
 	journalWorkflow = "workflow"
+	// journalJob is a durable async coordinator job event (job.go).
+	journalJob = "job"
 )
 
 type journalRecord struct {

@@ -133,6 +133,11 @@ Usage:
   quartermaster workflow approve <id> --step N --by TJ [--for 1h]
                                                        record a digest-bound TJ approval for a waiting step and resume
   quartermaster workflow cancel <id> [--reason R]      cancel an active workflow
+  quartermaster job submit [--key K] [--by WHO] [--why W] [--json] -- <VERB> [<target> ...]
+                                                       durably enqueue an async coordinator request; returns job ID immediately
+  quartermaster job status|result|cancel <id> [--json] inspect a job's state, fetch its qm-status result, or cancel before execution
+  quartermaster job list [--bead B] [--state S] [--json]
+                                                       list recent async jobs (newest first) with age; needs no daemon
   quartermaster executor run|install|uninstall|status  the daemon that runs approved plans, durably; install sets
                                                        up its systemd user unit; it resumes unfinished plans on start
   quartermaster run -- gh|pulumi|tofu <args>           what the shims on a worker's PATH run: gh pr merge, gh api
@@ -233,9 +238,14 @@ func run(args []string) error {
 		fmt.Fprintln(os.Stderr, "quartermaster:", msg)
 	}
 	cfg, err := loadConfig()
-	// configure is how a first-time install gets its config.
-	if err != nil && !(errors.Is(err, errNoRepo) && len(args) > 0 && args[0] == "configure") {
-		return err
+	// configure is how a first-time install gets its config; job reads and
+	// submissions operate on stateDir() and can run without a configured repo.
+	if err != nil {
+		if errors.Is(err, errNoRepo) && len(args) > 0 && args[0] == "job" {
+			cfg = defaultConfig()
+		} else if !(errors.Is(err, errNoRepo) && len(args) > 0 && args[0] == "configure") {
+			return err
+		}
 	}
 	h := newHerdr()
 	if args[0] == "watch" {
@@ -247,6 +257,8 @@ func run(args []string) error {
 		return cardCmd(cfg, liveCardEnv(), rest, os.Stdin, os.Stdout)
 	case "workflow":
 		return workflowCmd(cfg, liveWorkflowEnv(cfg), rest, os.Stdin, os.Stdout)
+	case "job":
+		return jobCmd(cfg, liveJobEnv(cfg, h.on(cfg.coordSocket()), nil, nil, time.Time{}, nil), rest, os.Stdout)
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	kind := fs.String("agent", "", "agent kind: claude, codex, muse, pi, agy or auto")
