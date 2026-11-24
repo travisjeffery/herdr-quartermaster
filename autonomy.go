@@ -274,7 +274,7 @@ func (c Config) beadMark(b Bead) string {
 var actionClasses = map[string]int{
 	"push":     2,
 	"dispatch": 3, "resume": 3, "close": 3, "resolve": 3, "install": 3, "release": 3,
-	"steer": 3, "fork": 3,
+	"steer": 3, "fork": 3, "wake": 3,
 	"merge": 4,
 	// decide is the pre-dial brief's check before a worker takes its own
 	// recommendation, read as the default dial's reach until briefs carry

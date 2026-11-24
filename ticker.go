@@ -38,6 +38,7 @@ type TickerState struct {
 	VerifyRepos      map[string]VerifyRepo `json:"verify_repos"` // by repo path
 	LastOrphanFinish time.Time             `json:"last_orphan_finish,omitempty"`
 	Orphans          map[string]OrphanMark `json:"orphans,omitempty"`
+	Blockers         BlockerState          `json:"blockers,omitempty"`
 	GHLeft           int                   `json:"gh_left"`    // GraphQL points left, as of GHLeftAt
 	GHLeftAt         time.Time             `json:"gh_left_at"` // when a verify pass last read GHLeft
 	// Intervals are the running ticker's, which a config edit since it
@@ -92,16 +93,17 @@ func saveState(s TickerState) error {
 }
 
 type Ticker struct {
-	cfg       Config
-	herdr     Herdr
-	beads     Beads
-	gh        GH
-	log       *log.Logger
-	side      *sidebar
-	watchEnv  *WatchEnv
-	jobEnv    *JobEnv
-	orphanEnv *orphanFinishEnv
-	now       func() time.Time
+	cfg        Config
+	herdr      Herdr
+	beads      Beads
+	gh         GH
+	log        *log.Logger
+	side       *sidebar
+	watchEnv   *WatchEnv
+	jobEnv     *JobEnv
+	orphanEnv  *orphanFinishEnv
+	blockerEnv *blockerWakeEnv
+	now        func() time.Time
 }
 
 func (t Ticker) clock() time.Time {
@@ -121,14 +123,14 @@ func newTicker(cfg Config, logger *log.Logger) Ticker {
 // are still counted so parent beads with open children are not classified as
 // merged.
 func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Agent, error) {
-	threads, _, agents, _, err := t.gatherAll(st, now)
+	threads, _, agents, _, _, _, _, err := t.gatherAll(st, now)
 	return threads, agents, err
 }
 
-func (t Ticker) gatherAll(st *TickerState, now time.Time) ([]Thread, []Bead, map[string]Agent, bool, error) {
+func (t Ticker) gatherAll(st *TickerState, now time.Time) ([]Thread, []Bead, map[string]Agent, bool, map[string]PR, map[string]PR, bool, error) {
 	all, err := t.beads.NonClosed()
 	if err != nil {
-		return nil, nil, nil, false, err
+		return nil, nil, nil, false, nil, nil, false, err
 	}
 	children := openChildCounts(all)
 	var active []Bead
@@ -146,7 +148,7 @@ func (t Ticker) gatherAll(st *TickerState, now time.Time) ([]Thread, []Bead, map
 		for i, b := range active {
 			threads[i] = Thread{Bead: b, OpenChildren: children[b.ID]}
 		}
-		return threads, all, nil, false, err
+		return threads, all, nil, false, nil, nil, false, err
 	}
 	byName := map[string]Agent{}
 	for _, a := range agents {
@@ -154,10 +156,13 @@ func (t Ticker) gatherAll(st *TickerState, now time.Time) ([]Thread, []Bead, map
 			byName[a.Name] = a
 		}
 	}
+	var freshPRs, knownPRs map[string]PR
+	ghRefreshed := false
 	if now.Sub(st.LastGH) >= t.cfg.ghEvery() {
-		t.refreshPRs(st, active)
+		freshPRs, knownPRs = t.refreshPRs(st, active)
 		t.refreshRuns(st, active)
 		st.LastGH = now
+		ghRefreshed = true
 	}
 	threads := make([]Thread, 0, len(active))
 	for _, b := range active {
@@ -166,7 +171,7 @@ func (t Ticker) gatherAll(st *TickerState, now time.Time) ([]Thread, []Bead, map
 		th.AgentUnknown = !agentsComplete && th.Agent == nil
 		threads = append(threads, th.derive())
 	}
-	return threads, all, byName, agentsComplete, nil
+	return threads, all, byName, agentsComplete, freshPRs, knownPRs, ghRefreshed, nil
 }
 
 // threadFor joins one bead with its agent, by name, and what the last gh pass
@@ -207,7 +212,7 @@ func threadForAt(cfg Config, st TickerState, b Bead, byName map[string]Agent, no
 	return th.derive()
 }
 
-func (t Ticker) refreshPRs(st *TickerState, active []Bead) {
+func (t Ticker) refreshPRs(st *TickerState, active []Bead) (map[string]PR, map[string]PR) {
 	if st.Login == "" {
 		st.Login = t.gh.Login()
 	}
@@ -258,6 +263,24 @@ func (t Ticker) refreshPRs(st *TickerState, active []Bead) {
 	}
 	t.gatePRs(prs)
 	st.PRs = prs
+	fresh := map[string]PR{}
+	mergePRMap(fresh, inList)
+	mergePRMap(fresh, noted)
+	known := map[string]PR{}
+	mergePRMap(known, fresh)
+	for _, list := range st.MergedPRs {
+		for _, p := range list {
+			if p.URL != "" {
+				mergePRMap(known, map[string]PR{p.URL: p})
+			}
+		}
+	}
+	for _, p := range st.PRs {
+		if p.URL != "" {
+			mergePRMap(known, map[string]PR{p.URL: p})
+		}
+	}
+	return fresh, known
 }
 
 // beadPR is the PR b is delivered through, in full detail when open, and b's
@@ -435,7 +458,7 @@ func rank(g Group, id string) string { return fmt.Sprintf("%d-%s", int(g), id) }
 // coordinator, and closing up beads that left the active set.
 func (t Ticker) once(st *TickerState) error {
 	now := t.clock()
-	threads, allBeads, agents, agentsComplete, err := t.gatherAll(st, now)
+	threads, allBeads, agents, agentsComplete, freshPRs, knownPRs, ghRefreshed, err := t.gatherAll(st, now)
 	if err != nil {
 		if threads != nil { // canonical Beads read succeeded; agents are unknown
 			if notifyErr := reconcileDesktopWith(threads, nil, t.cfg.Desktop, now, submitDesktopMessage); notifyErr != nil {
@@ -490,6 +513,7 @@ func (t Ticker) once(st *TickerState) error {
 	var alertThreads []Thread
 	var desktopMilestones []desktopMilestone
 	current := map[string]bool{}
+	promptedThisTick := map[string]bool{}
 	for i, th := range threads {
 		id := th.Bead.ID
 		current[id] = true
@@ -576,10 +600,13 @@ func (t Ticker) once(st *TickerState) error {
 					snap.Pending = nil
 					snap.ReadySince = time.Time{}
 					pendingDelivered = true
+					promptedThisTick[id] = true
 				}
 			}
 		}
-		t.applyStallRetry(th, &snap, stallPlan, pendingDelivered, now)
+		if t.applyStallRetry(th, &snap, stallPlan, pendingDelivered, now) {
+			promptedThisTick[id] = true
+		}
 		if th.Agent != nil {
 			tokens := map[string]string{"sh_state": stateLine(th), "sh_rank": rank(classify(th), id)}
 			rows = append(rows, sidebarRow{Name: id, Pane: th.Agent.PaneID, Tokens: tokens})
@@ -592,7 +619,7 @@ func (t Ticker) once(st *TickerState) error {
 	if err := reconcileDesktopWith(alertThreads, desktopMilestones, t.cfg.Desktop, now, submitDesktopMessage); err != nil {
 		t.log.Printf("desktop notifications: %v", err)
 	}
-	t.checkWatches(threads, agents, now)
+	watchOutcomes := t.checkWatches(threads, agents, now)
 	if coord, ok := agents[t.cfg.CoordinatorName]; ok {
 		inbox, _ := readInbox()
 		tokens := map[string]string{"sh_rank": coordinatorRank, "sh_state": coordinatorLine(threads, len(inbox))}
@@ -613,6 +640,7 @@ func (t Ticker) once(st *TickerState) error {
 	if orphanFinishDue(t.cfg, *st, now) {
 		t.orphanFinish(st, allBeads, agents, agentsComplete, now)
 	}
+	t.checkBlockers(st, allBeads, threads, agents, agentsComplete, freshPRs, knownPRs, ghRefreshed, promptedThisTick, relaunch, watchOutcomes, now)
 	t.advanceWorkflows(st, threads, now)
 	t.processJobs(st, threads, agents, now)
 	t.nudgeCoordinator(st, agents, now)
@@ -771,7 +799,7 @@ func (t Ticker) leftActive(st *TickerState, id string, prev Snapshot, agents map
 	delete(st.Threads, id)
 }
 
-func (t Ticker) checkWatches(threads []Thread, agents map[string]Agent, now time.Time) {
+func (t Ticker) checkWatches(threads []Thread, agents map[string]Agent, now time.Time) []watchCheckOutcome {
 	var env WatchEnv
 	if t.watchEnv != nil {
 		env = *t.watchEnv
@@ -787,7 +815,7 @@ func (t Ticker) checkWatches(threads []Thread, agents map[string]Agent, now time
 	outcomes, err := runWatchesPass(t.cfg, env, threads, agents, "", false)
 	if err != nil {
 		t.log.Printf("watches: %v", err)
-		return
+		return nil
 	}
 	for _, o := range outcomes {
 		switch o.Action {
@@ -801,6 +829,7 @@ func (t Ticker) checkWatches(threads []Thread, agents map[string]Agent, now time
 			t.log.Printf("watch %s (%s) error (%d): %v", o.Watch.ID, o.Watch.Bead, o.Watch.ConsecutiveErrors, o.Err)
 		}
 	}
+	return outcomes
 }
 
 func (t Ticker) nudgeCoordinator(st *TickerState, agents map[string]Agent, now time.Time) {

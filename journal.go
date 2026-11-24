@@ -48,6 +48,8 @@ const (
 	journalStallRetry = "stall_retry"
 	// journalOrphanFinish is an orphan finisher sweep outcome (orphanfinish.go).
 	journalOrphanFinish = "orphan_finish"
+	// journalUnblocked is a blocker-cleared wakeup or inbox notice (unblocked.go).
+	journalUnblocked = "unblocked"
 )
 
 type journalRecord struct {

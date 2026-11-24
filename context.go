@@ -195,6 +195,11 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   (requires verification, rolling-out runs, work remaining, autonomy below 3, or
   a failed close). Follow its suggested `+"`quartermaster close`"+` or
   `+"`quartermaster resume`"+` command so the bead does not stall.
+- An "unblocked" inbox item means a blocking dependency bead closed or a
+  referenced upstream/watched PR merged. If the summary says the ticker already
+  woke an idle worker (at autonomy level 3+), no extra nudge is needed; if the
+  worker was not woken (no live worker, open bead, working/needs_me, or below
+  level 3), dispatch, resume, or notify it once safe.
 - Resumable threads (`+"`quartermaster resume <bead>...`"+`, `+"`--action resume`"+`) and stale claims
   (`+"`quartermaster stale --release`"+`, `+"`--class 3`"+`) follow the dial like any other action.
 - Lessons worth keeping across threads go to `+"`bd remember`"+`.
