@@ -80,8 +80,8 @@ class up if none is given.
 | 2 | Its own branch and PR (unmerged, reviewed before it lands) | `git push` to its own branch, opening or updating its PR, replying on its PR's threads, `/plan`-style trigger comments (unless the trigger itself applies: then the class of the apply), retargeting a stacked PR, moving its own Linear issue's status. A choice that only shapes its own PR (a design option, naming, test approach) |
 | 3 | TJ's machine and the shared bead state | Dispatching a bead TJ selected (`next`), resuming a thread, closing a `likely_stale` bead on strong evidence, releasing a stale claim, `resolve` of a merged worktree without `--force`, installing a merged herdr-quartermaster PR (pull, build, ticker restart). Creating beads for discovered work |
 | 4 | The shared repo's main branch | Merging its own PR, or enabling auto-merge, **with the required review and checks green**; resolving review threads on its own PR after a fix or a reply. **Spending up to $500, as one charge or per month for a recurring cost (D7, revised 2026-11-18)** |
-| 5 | Internal messages | Posting to the team's internal channels (review requests, status), commenting on Linear issues or PRs other than its own |
-| 6 | Non-production infrastructure | An apply to a dev or staging stack that passes `gate plan`; a deploy or rollout step to a non-prod environment; dispatching a bead TJ didn't select (Muse: choosing the queue spends TJ's attention) |
+| 5 | Internal messages, and configured dev targets | Posting to the team's internal channels (review requests, status), commenting on Linear issues or PRs other than its own; an apply, deploy or rollout to a configured `[autonomy] dev` target that passes `gate plan` (only when `[autonomy] prod` is configured and does not match; `prod` always wins over `dev`) |
+| 6 | Other non-production infrastructure | An apply to a non-prod stack not matched by `[autonomy] dev` (such as staging) that passes `gate plan`; a deploy or rollout step to another non-prod environment; dispatching a bead TJ didn't select (Muse: choosing the queue spends TJ's attention) |
 | 7 | Production, additive or in place | A prod apply that passes `gate plan` with no delete or replace, matches the change noted beforehand, and names its rollback; a prod deploy; the next step of a prod rollout once the previous one verified. **Spending more than $500, as one charge or per month, or an amount that can't be estimated or bounded (D7, revised 2026-11-18)** |
 | 8 | Scoped deletion, and outside our systems | One delete or replace in a prod stack, or a stateful replace anywhere; deleting a non-prod database, bucket or volume; force-pushing to a shared branch; merging without the required review; **reading or writing a secret; a message to someone outside the team; approving a PR (D7)** |
 | 9 | Widespread, irreversible, or control of the dial itself | Deletes across stacks or past the `widespread` threshold; deleting prod data; object lock or KMS key deletion; **answering a classifier denial and loosening agent settings or hooks (D7)**; raising its own level; disabling gates, checks or the journal; **any action whose impact is unknown** |
@@ -214,7 +214,7 @@ The class is the **highest** of three classifiers, so none can lower
 another's call:
 
 1. **Mechanical, where a tool can tell.** `gate plan` prints a class instead
-   of only passing or failing: 6 or 7 by target, 8 for a delete or replace
+   of only passing or failing: 5, 6 or 7 by target, 8 for a delete or replace
    in prod or a stateful replace anywhere, 9 past `widespread`; a plan it
    can't parse, or a mismatch with `--expect`, can't be classified, so it
    stops. The action table (D6) gives the fixed class of `merge`, `dispatch`
@@ -224,12 +224,14 @@ another's call:
 3. **The coordinator**, which reads that line before it answers and may
    raise the class, never lower it.
 
-- **(R) a.** Production by config patterns on the target the worker passes,
-  **unmatched means production**:
+- **(R) a.** Production and optional class-5 dev targets by config patterns on
+  the target the worker passes, **unmatched (or unset `prod`) fails closed to
+  production**, and **`prod` always wins over `dev`**:
 
   ```toml
   [autonomy]
-  prod = ["*prod*", "*-production"]   # stacks, workspaces, environments
+  prod = ["*prod*", "*-production"]   # stacks, workspaces, environments (required to classify below 7)
+  dev = ["dev", "*-dev"]              # optional class-5 dev targets (applied only when prod is set and doesn't match)
   widespread = 5                      # deletes past this, or in more than one stack, are class 9
   merge_class = { infra = 7 }         # repos whose main deploys on merge
   ```
@@ -300,7 +302,9 @@ quartermaster autonomy on|off
 - `check` passes when the action's class is at most the bead's effective
   level and its budget isn't spent. `--action` looks the class up: `push` 2,
   `dispatch`/`resume`/`close`/`resolve`/`install` 3, `merge` 4 (or the repo's
-  `merge_class`), `post` 5, `apply`/`deploy`/`rollout` 6 or 7 by `--target`,
+  `merge_class`), `post` 5, `apply`/`deploy`/`rollout` 5, 6 or 7 by `--target`
+  (5 for configured `[autonomy] dev` targets when `prod` is set and does not
+  match, 6 for other non-prod, 7 for prod or when `target` or `prod` is empty),
   `spend` 4 or 7 by `--amount` (7 without one), `delete`, `secret`,
   `message-external` and `approve` 8, `classifier` and `loosen-settings` 9. `--class N` covers the rest, from
   the worker's `CLASS:` line. An unknown action fails.
@@ -519,3 +523,18 @@ and approving a PR.
   the same `AUTO:` step three times running) slow a loop of small spends
   but don't add them up, so a bead can pass $500 in a month, or in an hour,
   without TJ.
+
+2026-11-24, revising **D3** to allow configurable Class-5 dev targets under
+`[autonomy]`:
+
+- Optional `[autonomy] dev = [...]` accepts glob patterns matched against the
+  whole target or any non-empty `/`-separated segment, validated with
+  `filepath.Match` just like `prod`.
+- `targetClass(target)` enforces strict fail-closed precedence:
+  1. Empty `target` or empty `prod` → **7** (never classify below 7 unless
+     production patterns are explicitly configured).
+  2. Any `prod` pattern matches → **7** (`prod` always wins over `dev`, even
+     when both match, and carried production env selectors still elevate to 7
+     without allowing dev env selectors to downgrade a non-dev stack).
+  3. Any `dev` pattern matches → **5** (allowed at level 5).
+  4. Otherwise → **6** (other non-prod targets such as staging).

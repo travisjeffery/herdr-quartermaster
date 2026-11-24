@@ -130,6 +130,7 @@ func TestParsePlanRefuses(t *testing.T) {
 func TestStepClass(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Autonomy.Prod = []string{"*prod*"}
+	cfg.Autonomy.Dev = []string{"dev"}
 	cfg.Autonomy.Widespread = 5
 	cfg.Autonomy.MergeClass = map[string]int{"infra": 7, "docs": 1}
 	tofu, pulumi := copyPreview(t, "tofu-update.json"), copyPreview(t, "pulumi-update.json")
@@ -139,6 +140,11 @@ func TestStepClass(t *testing.T) {
 		if expect != "" {
 			s.Args["expect"] = expect
 		}
+		return s
+	}
+	applyEnv := func(target, preview, expect, envJSON string) Step {
+		s := apply(target, preview, expect)
+		s.Args["env"] = envJSON
 		return s
 	}
 	merge := func(op, repo string) Step {
@@ -156,6 +162,10 @@ func TestStepClass(t *testing.T) {
 		{"merge_class can't lower", merge("github.pr.merge", "docs"), 4, "merge"},
 		{"stated class raises", Step{Op: "github.pr.merge", Target: "github:acme/app#5", Pre: map[string]string{"head_sha": sha}, Class: 6}, 6, "raised to 6 as stated"},
 		{"stated class can't lower", Step{Op: "opaque", Text: "x", Class: 2}, 9, "opaque"},
+		{"apply in dev", apply("tofu:org/app/dev", tofu, "create=1,update=1"), 5, "org/app/dev: dev, preview create 1, update 1, as expected"},
+		{"apply in dev, no expected counts is one class up", apply("tofu:org/app/dev", tofu, ""), 6, "no expected counts, so one class up"},
+		{"dev env selector cannot downgrade staging", applyEnv("tofu:org/app/staging", tofu, "create=1,update=1", `{"AWS_PROFILE":"dev"}`), 6, "not production"},
+		{"prod env selector overrides dev target", applyEnv("tofu:org/app/dev", tofu, "create=1,update=1", `{"AWS_PROFILE":"prod"}`), 7, "production"},
 		{"apply off prod", apply("tofu:org/app/staging", tofu, "create=1,update=1"), 6, "not production, preview create 1, update 1, as expected"},
 		{"apply in prod", apply("tofu:org/app/prod", tofu, "create=1,update=1"), 7, "production"},
 		{"no expected counts is one class up", apply("tofu:org/app/staging", tofu, ""), 7, "no expected counts, so one class up"},

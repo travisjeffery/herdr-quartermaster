@@ -76,6 +76,7 @@ func TestCoordinatorGuidePointsAtCheck(t *testing.T) {
 	for _, want := range []string{
 		"quartermaster autonomy check <bead> --action A [--target T]",
 		"4 main\n  (merging an approved, green PR) and spending up to $500 (one charge, or per month for a recurring cost)",
+		"5 internal messages and configured dev targets (`[autonomy] dev`, when\n  `prod` is set and does not match)",
 		"7 production additive or in place and spending more, or an amount\n  no one can estimate (`--action spend --amount <USD>[/month]`)",
 		"AUTO: [coordinator L<n> C<c>]",
 		"never lower than the worker's `CLASS:`",

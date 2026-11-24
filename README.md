@@ -865,8 +865,9 @@ bypass_args = ["--dangerously-skip-permissions"]   # after args, only for a work
 level = 4                 # the global level for beads without an autonomy:N label; 3+ also auto-closes
                           # and auto-resolves (was auto_close/auto_resolve)
 max = 7                   # the ceiling for standing levels; 8 and 9 only by lease (`autonomy level 8 <bead> --for 4h`)
-prod = []                 # globs naming production targets; an apply elsewhere is class 6, here (or with
-                          # no target or no patterns) 7
+prod = []                 # globs naming production targets; unmatched targets are class 6 (or 5 if matching
+                          # dev), here (or with no target or no prod patterns) 7; prod always beats dev
+dev = []                  # optional globs naming class-5 dev targets (only when prod is set and doesn't match)
 widespread = 5            # deletes past this are class 9
 merge_class = {}          # e.g. { infra = 7 }: a repo whose main deploys on merge
 
@@ -994,8 +995,8 @@ most the bead's level goes ahead without you; anything above it stops at
 | 2 | Its own branch and PR: pushing, replies, a choice that only shapes its PR |
 | 3 | Your machine and bead state: dispatching a `next` bead, resuming, closing on strong evidence, creating beads, installing a merged herdr-quartermaster PR |
 | 4 | Main: merging its own PR with the required review and checks green. Spending up to $500, as one charge or per month for a recurring cost |
-| 5 | Internal messages: team channels, others' PRs and issues |
-| 6 | Non-production infrastructure: an apply or deploy that passes `gate plan` |
+| 5 | Internal messages (team channels, others' PRs and issues), and configured `[autonomy] dev` targets (when `prod` is set and does not match) that pass `gate plan` |
+| 6 | Other non-production infrastructure: an apply or deploy that passes `gate plan` |
 | 7 | Production, additive or in place: passes `gate plan`, change noted beforehand, rollback named. Spending more than $500, as one charge or per month, or an amount that can't be estimated |
 | 8 | One prod delete or replace, a stateful replace, force-pushing a shared branch, merging without the required review, a secret, a message outside the team, approving a PR |
 | 9 | Widespread or irreversible, answering a classifier denial, loosening agent settings or hooks, raising its own level, anything whose impact is unknown |
@@ -1215,7 +1216,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster answer <bead> <choice> --expect HASH [--by WHO]` | Answer that prompt with an option number or label, only if it is still the prompt with `HASH`. Waits for it to clear and notes the answer on the bead, crediting `WHO` (default `coordinator`). |
 | `quartermaster tap links <bead>` | One signed one-time link per option of the bead's current prompt — or of its `needs_me` `OPTIONS:` question when no prompt is showing — for answering it as TJ from an allowed phone. Needs `[tap]` enabled; the ticker serves the links and adds them to the prompt's or question's inbox item. `tap serve` runs the endpoint in the foreground. |
 | `quartermaster tap url` | Print the bookmarkable Tailnet Web Inbox URL (`http://<tailscale-ip>:<port>/inbox`) when `[tap]` is enabled with allowed devices and Tailscale resolves; fails closed otherwise. |
-| `quartermaster gate plan <file\|-> [--expect op=N,...] [--target T]` | Print the plan's impact class on target `T`: 6 or 7 by the `[autonomy] prod` patterns (no target or no patterns means production), 8 for a delete or replace in production or of a stateful resource anywhere, 9 past `widespread` deletes or for an unknown operation. Exit 0 only if a `pulumi preview --json` or `tofu show -json` plan creates, updates or reads, with no delete, replace or unknown operation, and with `--expect`, exactly those counts. A plan that doesn't parse, or differs from `--expect`, gets no class and fails. |
+| `quartermaster gate plan <file\|-> [--expect op=N,...] [--target T]` | Print the plan's impact class on target `T`: 5, 6 or 7 by the `[autonomy] prod` and `dev` patterns (no target or no `prod` patterns means production; `prod` always beats `dev`), 8 for a delete or replace in production or of a stateful resource anywhere, 9 past `widespread` deletes or for an unknown operation. Exit 0 only if a `pulumi preview --json` or `tofu show -json` plan creates, updates or reads, with no delete, replace or unknown operation, and with `--expect`, exactly those counts. A plan that doesn't parse, or differs from `--expect`, gets no class and fails. |
 | `quartermaster plan check <file\|->` | Classify an execution plan ([design](docs/design/execution-plan.md)): JSON naming a `bead` and `steps`, each an `op` (`github.pr.merge`, `github.pr.automerge`, `iac.apply`, or anything else, which is `opaque`), a canonical `target` (`github:owner/repo#N`, `pulumi:<stack>`, `tofu:<name>`), `args` and `pre` (`head_sha` for a merge; an apply's `args.preview` is gate-checked against `args.expect` and its digest bound in as `pre.plan_digest`; an apply without `args.expect` is one class up). A step's class is the highest of the op table's, `gate plan`'s and its own stated `class`; opaque is 9. Stores the plan under its SHA-256 digest and approves it by the dial for 1h if the bead's level and budgets reach its class; else exits nonzero naming the digest. Journaled as a check. Advisory until the executor holds the credentials. |
 | `quartermaster plan approve <digest> --by TJ [--for D]` | TJ's approval of a checked plan, by digest or a unique prefix of 8+; lasts 1h unless `--for`. |
 | `quartermaster plan status <digest>` | A checked plan's steps and classes, whether it is approved, expired or waiting for TJ, and how its run stands (running step N, done, failed, stopped for TJ). |

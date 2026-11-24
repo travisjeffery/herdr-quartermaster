@@ -228,15 +228,18 @@ func (c Config) opClass(b Bead, s Step) (int, string) {
 		}
 		// The selectors the step carries (AWS_PROFILE, KUBECONFIG, ...) choose
 		// what it reaches too, so a production pattern matching one of them
-		// makes it production.
+		// makes it production. Selectors can only raise the class to
+		// production, never lower a non-dev target to dev.
 		var env map[string]string
 		_ = json.Unmarshal([]byte(s.Args["env"]), &env)
 		maps.DeleteFunc(env, func(k, _ string) bool { return !slices.Contains(iacEnv, k) })
-		where := stack
+		pc.classify(c.Autonomy, stack)
 		for _, k := range sortedKeys(env) {
-			where += "/" + env[k]
+			if matchesTarget(env[k], c.Autonomy.Prod) {
+				pc.classify(c.Autonomy, env[k])
+				break
+			}
 		}
-		pc.classify(c.Autonomy, where)
 		pc.Target = stack
 		why := "apply on " + targetWord(pc) + ", preview " + counts(pc)
 		if len(env) > 0 {

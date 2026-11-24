@@ -162,16 +162,23 @@ func tofuDeletes(n int) string {
 
 func TestPlanClass(t *testing.T) {
 	a := AutonomyConfig{Prod: []string{"*prod*"}, Widespread: 5}
+	aDev := AutonomyConfig{Prod: []string{"*prod*"}, Dev: []string{"dev", "*-dev"}, Widespread: 5}
 	for _, tc := range []struct {
 		name, plan, target string
 		a                  AutonomyConfig
 		class              int
 		pass               bool
 	}{
+		{"update in dev", "tofu-update.json", "org/app/dev", aDev, 5, true},
+		{"update dev-prod overlap is prod", "tofu-update.json", "org/dev/prod", aDev, 7, true},
+		{"update dev with no prod patterns fails closed", "tofu-update.json", "org/app/dev", AutonomyConfig{Dev: []string{"dev"}, Widespread: 5}, 7, true},
 		{"update off prod", "tofu-update.json", "org/app/staging", a, 6, true},
+		{"update off prod with dev configured", "tofu-update.json", "org/app/staging", aDev, 6, true},
 		{"update in prod", "tofu-update.json", "org/app/prod", a, 7, true},
 		{"no target is prod", "pulumi-update.json", "", a, 7, true},
 		{"no patterns is prod", "pulumi-update.json", "staging", AutonomyConfig{Widespread: 5}, 7, true},
+		{"delete in dev", tofuDeletes(1), "dev", aDev, 7, false},
+		{"stateful replace in dev", "pulumi-replace.json", "dev", aDev, 8, false},
 		{"delete off prod", tofuDeletes(1), "staging", a, 7, false},
 		{"delete in prod", tofuDeletes(1), "prod", a, 8, false},
 		{"stateful replace off prod", "pulumi-replace.json", "staging", a, 8, false},

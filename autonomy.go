@@ -50,6 +50,10 @@ type AutonomyConfig struct {
 	// Prod are glob patterns naming production targets for apply, deploy and
 	// rollout.
 	Prod []string `toml:"prod"`
+	// Dev are optional glob patterns naming class-5 dev targets for apply,
+	// deploy and rollout (applied only when Prod is configured and does not
+	// match).
+	Dev []string `toml:"dev"`
 	// Widespread is how many deletes make an action class 9.
 	Widespread int `toml:"widespread"`
 	// MergeClass raises merging in a repo, by directory name, whose main
@@ -91,6 +95,11 @@ func (a AutonomyConfig) validate() error {
 	for _, p := range a.Prod {
 		if _, err := filepath.Match(p, ""); err != nil {
 			return fmt.Errorf("[autonomy] prod %q: %w", p, err)
+		}
+	}
+	for _, p := range a.Dev {
+		if _, err := filepath.Match(p, ""); err != nil {
+			return fmt.Errorf("[autonomy] dev %q: %w", p, err)
 		}
 	}
 	return nil
@@ -313,22 +322,42 @@ func (c Config) actionClass(b Bead, action, target, amount string) (int, error) 
 	return actionClasses[action], nil
 }
 
-// targetClass is 6 for a target that no prod pattern matches, else 7. With no
-// target, or no patterns, nothing tells it isn't production, so it is. A
-// pattern matches the whole target or one of its /-separated parts, so
-// "*prod*" catches the stack org/app/prod.
+// targetClass is 5 for a target that matches a dev pattern (and no prod
+// pattern), 6 for any other target that no prod pattern matches, else 7. With
+// no target, or no prod patterns, nothing tells it isn't production, so it is
+// 7 (fail closed). Prod patterns always win over dev patterns. A pattern
+// matches the whole target or one of its /-separated parts, so "*prod*"
+// catches the stack org/app/prod and "dev*" catches org/app/dev-east.
 func (a AutonomyConfig) targetClass(target string) int {
 	if target == "" || len(a.Prod) == 0 {
 		return 7
 	}
+	if matchesTarget(target, a.Prod) {
+		return 7
+	}
+	if matchesTarget(target, a.Dev) {
+		return 5
+	}
+	return 6
+}
+
+// matchesTarget reports whether any glob in patterns matches the whole target
+// or one of its non-empty /-separated parts.
+func matchesTarget(target string, patterns []string) bool {
+	if target == "" || len(patterns) == 0 {
+		return false
+	}
 	for _, part := range append(strings.Split(target, "/"), target) {
-		for _, p := range a.Prod {
+		if part == "" {
+			continue
+		}
+		for _, p := range patterns {
 			if ok, _ := filepath.Match(p, part); ok {
-				return 7
+				return true
 			}
 		}
 	}
-	return 6
+	return false
 }
 
 // spendLimitText is spendLimit as the brief and guide state it.
@@ -686,7 +715,7 @@ func dialBrief(id string) string {
 	}
 	return `
 Autonomy: this bead has a level from 0 to 9, and every step has an impact class by where its output lands. A step whose class is at most the level may go ahead without the user; anything above it stops for them. Classes:
-  0 read-only · 1 your worktree and scratch · 2 your own branch and PR (pushing, PR updates, replies, a choice that only shapes your PR) · 3 the user's machine and bead state (creating beads, closing, installing a merged ` + selfRepo + ` PR) · 4 main: merging your own PR with the required review and checks green; spending up to ` + spendLimitText + ` · 5 internal messages (team channels, others' PRs or issues) · 6 non-prod infrastructure: an apply or deploy that passes ` + "`gate plan`" + ` · 7 production, additive or in place: passes ` + "`gate plan`" + `, change noted beforehand, rollback named; a prod deploy or the next rollout step once the last verified; spending more than ` + spendLimitText + `, or an amount you can't estimate · 8 one prod delete or replace, a stateful replace, force-pushing a shared branch, merging without the required review, reading or writing a secret, a message outside the team, approving a PR · 9 widespread or irreversible, answering a classifier denial, loosening agent settings or hooks, raising your own level, anything whose impact you can't place.
+  0 read-only · 1 your worktree and scratch · 2 your own branch and PR (pushing, PR updates, replies, a choice that only shapes your PR) · 3 the user's machine and bead state (creating beads, closing, installing a merged ` + selfRepo + ` PR) · 4 main: merging your own PR with the required review and checks green; spending up to ` + spendLimitText + ` · 5 internal messages (team channels, others' PRs or issues), and configured dev targets (` + "`[autonomy] dev`" + `, when ` + "`prod`" + ` is set and does not match) that pass ` + "`gate plan`" + ` · 6 other non-prod infrastructure: an apply or deploy that passes ` + "`gate plan`" + ` · 7 production, additive or in place: passes ` + "`gate plan`" + `, change noted beforehand, rollback named; a prod deploy or the next rollout step once the last verified; spending more than ` + spendLimitText + `, or an amount you can't estimate · 8 one prod delete or replace, a stateful replace, force-pushing a shared branch, merging without the required review, reading or writing a secret, a message outside the team, approving a PR · 9 widespread or irreversible, answering a classifier denial, loosening agent settings or hooks, raising your own level, anything whose impact you can't place.
 A step takes the highest class among its effects, including what it sets off (a trigger comment that runs an apply is the apply's class); a decision takes the class of what the chosen option does. Missing a precondition puts a step in the class given for that, or one class up.
 - Before your first push, run ` + check("--class 2") + `; if it fails, stop for the user before pushing.
 - Before every step of class 3 or more, and every decision you would otherwise ask the user, run its check: ` + check("--action A [--target T]") + ` (actions: merge, apply, deploy, rollout, install, close, post, spend, delete, secret, ...) or ` + check("--class N") + `. If it passes, go ahead on your own recommendation and ` + "`bd note " + id + " \"AUTO: [worker L<level> C<class>] <what> — <evidence>\"`" + `, naming the alternatives for a decision; the check prints the level. For class 6 and up write that note before the step, with the change you expect, and a second one with the result. When the bead has an issue in Linear, comment there for a decision, an apply or a merge. If the check fails or the command is missing, stop for the user as the rules above say.
