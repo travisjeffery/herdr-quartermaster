@@ -1151,7 +1151,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster dispatch <bead> [--agent K] [--focus] [--host H] [--force]` | Claim a bead, create its worktree and branch, start a worker and brief it, on host `H` (default: the bead's `host:` label, else local). |
 | `quartermaster host list` | The worker hosts: herdr machine, slots, labels, repos. |
 | `quartermaster focus [<bead>] [--agent K]` | Focus the bead's worker, or dispatch one. With no bead, reads the id from the clipboard. |
-| `quartermaster context` | The coordinator's digest: inbox, threads by state, Linear moves, `next` and ready beads. |
+| `quartermaster context [--compact] [--section S,...] [--json]` | The coordinator's digest: inbox, threads by state, Linear moves, `next` and ready beads. `--compact` renders under 4 KB while keeping every `needs_me` bead; `--section` selects from `summary,autonomy,inbox,threads,linear,next,ready`; `--json` emits the same sections as JSON. |
 | `quartermaster show <bead> [--json]` | Read-only wrapper over `bd show` pinned to the configured Beads workspace (works from any cwd or environment). `--json` emits the bead's `bd show --json` fields (`id`, `title`, `status`, `notes`, metadata) plus `notes_tail`. |
 | `quartermaster memory get <key> [--json]` | Read-only wrapper over `bd recall` pinned to the configured Beads workspace: prints a stored `bd remember` memory by exact key, or exits nonzero with a clean not-found error. Writes stay in `bd`. |
 | `quartermaster inbox done [<bead>...]` | Mark inbox items handled (all of them if no bead is given). |
@@ -1163,7 +1163,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster resolve <bead> [--force]` | Remove a finished bead's worktree, and its branch if the PR merged. |
 | `quartermaster sweep [--yes]` | List finished worktrees across every repo; `--yes` removes only the safe ones. |
 | `quartermaster report [--since 24h\|7d\|DATE]` | Markdown summary of what shipped, what's in flight and what needs you. |
-| `quartermaster digest [--deliver T,...] [--always]` | Every open bead by state and what changed since the last run, written to `digest.md`; notifies when something changed or needs you. See [Hourly digest](#hourly-digest). |
+| `quartermaster digest [--deliver T,...] [--always] [--json]` | Every open bead by state and what changed since the last run, written to `digest.md`; notifies when something changed or needs you. `--json` writes the digest sections as JSON to stdout without changing `digest.md` or delivery. See [Hourly digest](#hourly-digest). |
 | `quartermaster digest show\|install\|uninstall` | Page the last digest (the plugin's `digest` action); install or remove the hourly systemd timer. |
 | `quartermaster board` | The board popup (`prefix+j`): every open bead by state, acting on them, and the tidy view. See [The board](#the-board). |
 | `quartermaster ticker run\|start\|stop\|status`, `quartermaster tick` | The background loop, or one pass of it in the foreground. `status` shows the herdr socket it follows. |

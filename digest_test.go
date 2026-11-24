@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -443,5 +444,157 @@ func TestSystemdQuote(t *testing.T) {
 	}
 	if got := systemdQuote(`BEADS_DIR=/my dir/"x"`); got != `"BEADS_DIR=/my dir/\"x\""` {
 		t.Errorf("got %s", got)
+	}
+}
+
+func TestRenderDigestJSON(t *testing.T) {
+	in := fixtureInputs(t)
+	for i := range 7 {
+		in.open = append(in.open, Bead{ID: "app-b" + string(rune('a'+i)), Title: "Backlog item", Status: StatusOpen, Priority: 4})
+	}
+	d, _ := buildDigest(in, digestState{}, nil, t0)
+	d.Warnings = []string{"GitHub: rate limited"}
+
+	raw, err := renderDigestJSON(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		At      time.Time `json:"at"`
+		Summary struct {
+			Total      int    `json:"total"`
+			Stale      int    `json:"stale"`
+			NeedsYou   int    `json:"needs_you"`
+			Waiting    int    `json:"waiting"`
+			Merged     int    `json:"merged"`
+			RollingOut int    `json:"rolling_out"`
+			Blocked    int    `json:"blocked"`
+			InProgress int    `json:"in_progress"`
+			Ready      int    `json:"ready"`
+			Backlog    int    `json:"backlog"`
+			Headline   string `json:"headline"`
+			Quiet      string `json:"quiet"`
+		} `json:"summary"`
+		Warnings   []string         `json:"warnings"`
+		Changes    []string         `json:"changes"`
+		NeedsYou   []digestItemJSON `json:"needs_you"`
+		Waiting    []digestItemJSON `json:"waiting"`
+		Merged     []digestItemJSON `json:"merged"`
+		RollingOut []digestItemJSON `json:"rolling_out"`
+		Blocked    []digestItemJSON `json:"blocked"`
+		InProgress []digestItemJSON `json:"in_progress"`
+		Ready      []digestItemJSON `json:"ready"`
+		Backlog    []digestItemJSON `json:"backlog"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("invalid digest JSON: %v\n%s", err, raw)
+	}
+	if !got.At.Equal(t0) {
+		t.Errorf("at = %v, want %v", got.At, t0)
+	}
+	if got.Summary.Total != 18 || got.Summary.Stale != 3 || got.Summary.NeedsYou != 3 || got.Summary.Backlog != 9 || got.Summary.RollingOut != 1 {
+		t.Errorf("summary = %+v", got.Summary)
+	}
+	if got.Summary.Headline != d.headline() || got.Summary.Quiet != d.quiet() {
+		t.Errorf("headline/quiet mismatch: %+v", got.Summary)
+	}
+	if !slices.Equal(got.Warnings, []string{"GitHub: rate limited"}) {
+		t.Errorf("warnings = %v", got.Warnings)
+	}
+	if got.Changes == nil || len(got.Changes) != 0 {
+		t.Errorf("changes = %#v, want empty non-nil slice", got.Changes)
+	}
+	if got.Waiting == nil || len(got.Waiting) != 0 || got.Merged == nil || len(got.Merged) != 0 {
+		t.Errorf("empty sections should decode as [] not null: waiting=%#v merged=%#v", got.Waiting, got.Merged)
+	}
+	if len(got.NeedsYou) != 3 || got.NeedsYou[0].Bead != "app-ask" || !got.NeedsYou[0].Stale || got.NeedsYou[0].PR == nil || got.NeedsYou[0].PR.Number != 10 {
+		t.Errorf("needs_you = %+v", got.NeedsYou)
+	}
+	if len(got.Backlog) != 9 {
+		t.Errorf("backlog len = %d, want all 9 items", len(got.Backlog))
+	}
+	if len(got.Ready) != 1 || got.Ready[0].Bead != "app-next" || got.Ready[0].PR != nil {
+		t.Errorf("ready = %+v", got.Ready)
+	}
+}
+
+func TestRunDigestJSONPreservesMarkdownAndDelivery(t *testing.T) {
+	runOnce := func(t *testing.T, asJSON bool) (stdout, md string, desktopCalls [][2]string, slackCalls []string) {
+		t.Helper()
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		in := fixtureInputs(t)
+		env := digestEnv{
+			open: func() ([]Bead, error) { return in.open, nil },
+			agents: func() ([]Agent, error) {
+				var out []Agent
+				for _, a := range in.agents {
+					out = append(out, a)
+				}
+				return out, nil
+			},
+			ticker: func() TickerState {
+				return TickerState{PRs: map[string]PR{"app-run": {URL: pr + "6"}}}
+			},
+			lookup: func(urls []string) (map[string]DigestPR, int, error) {
+				out := map[string]DigestPR{}
+				for _, u := range urls {
+					if p, ok := in.prs[u]; ok {
+						out[u] = p
+					}
+				}
+				return out, 1, nil
+			},
+		}
+		deliv := digestDelivery{
+			desktop: func(title, body string) error {
+				// Strip temp path suffix so the two runs can be compared directly.
+				body, _, _ = strings.Cut(body, "\n\nFull digest: ")
+				desktopCalls = append(desktopCalls, [2]string{title, body})
+				return nil
+			},
+			slack: func(msg string) error {
+				msg, _, _ = strings.Cut(msg, "\n\nFull digest: ")
+				slackCalls = append(slackCalls, msg)
+				return nil
+			},
+		}
+		var buf bytes.Buffer
+		if err := runDigestWith(Config{Repo: "/r"}, env, deliv, "desktop,slack", false, asJSON, t0, &buf); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(digestPath())
+		if err != nil {
+			t.Fatalf("digest.md not written: %v", err)
+		}
+		if _, err := os.Stat(digestStatePath()); err != nil {
+			t.Fatalf("digest-state.json not written: %v", err)
+		}
+		return buf.String(), string(b), desktopCalls, slackCalls
+	}
+
+	textOut, textMD, textDesktop, textSlack := runOnce(t, false)
+	jsonOut, jsonMD, jsonDesktop, jsonSlack := runOnce(t, true)
+
+	if textMD != jsonMD {
+		t.Errorf("digest.md changed under --json:\n--- text ---\n%s\n--- json ---\n%s", textMD, jsonMD)
+	}
+	if !slices.Equal(textDesktop, jsonDesktop) {
+		t.Errorf("desktop delivery changed: text=%v json=%v", textDesktop, jsonDesktop)
+	}
+	if !slices.Equal(textSlack, jsonSlack) {
+		t.Errorf("slack delivery changed: text=%v json=%v", textSlack, jsonSlack)
+	}
+	if !strings.Contains(textOut, "wrote ") {
+		t.Errorf("non-json stdout should keep status line, got %q", textOut)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(jsonOut), &parsed); err != nil {
+		t.Fatalf("digest --json stdout is not valid JSON: %v\n%s", err, jsonOut)
+	}
+	for _, key := range []string{"at", "summary", "changes", "needs_you", "waiting", "merged", "rolling_out", "blocked", "in_progress", "ready", "backlog"} {
+		if _, ok := parsed[key]; !ok {
+			t.Errorf("digest --json missing key %q", key)
+		}
 	}
 }

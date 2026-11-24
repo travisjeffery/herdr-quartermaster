@@ -54,21 +54,35 @@ func defaultDeliver() string {
 	return "desktop"
 }
 
+type digestDelivery struct {
+	desktop func(title, body string) error
+	slack   func(msg string) error
+}
+
 // runDigest builds the digest, writes it to digest.md, remembers this run
 // and delivers it. The file is written every run; notifications only when
 // something changed or something needs the user, unless always is set.
-func runDigest(cfg Config, deliver string, always bool, stdout io.Writer) error {
+// When asJSON is true, the digest sections are written as JSON to stdout
+// without changing digest.md or delivery behavior.
+func runDigest(cfg Config, deliver string, always, asJSON bool, stdout io.Writer) error {
+	return runDigestWith(cfg, liveDigestEnv(cfg), digestDelivery{
+		desktop: notifyDesktop,
+		slack:   func(msg string) error { return sendSlack(msg, os.Getenv, httpPost) },
+	}, deliver, always, asJSON, time.Now(), stdout)
+}
+
+func runDigestWith(cfg Config, env digestEnv, delivery digestDelivery, deliver string, always, asJSON bool, now time.Time, stdout io.Writer) error {
 	targets, err := parseDeliver(deliver)
 	if err != nil {
 		return err
 	}
 	start := time.Now()
 	prev := loadDigestState()
-	in, warnings, err := gatherDigest(liveDigestEnv(cfg), prev)
+	in, warnings, err := gatherDigest(env, prev)
 	if err != nil {
 		return err
 	}
-	d, next := buildDigest(in, prev, cfg.LinearPrefixes, time.Now())
+	d, next := buildDigest(in, prev, cfg.LinearPrefixes, now)
 	d.Warnings = warnings
 	text := renderDigest(d)
 	if err := writeAtomic(digestPath(), []byte(text)); err != nil {
@@ -77,7 +91,15 @@ func runDigest(cfg Config, deliver string, always bool, stdout io.Writer) error 
 	if err := saveDigestState(next); err != nil {
 		return err
 	}
-	if targets["stdout"] {
+	if asJSON {
+		b, err := renderDigestJSON(d)
+		if err != nil {
+			return err
+		}
+		if _, err := stdout.Write(b); err != nil {
+			return err
+		}
+	} else if targets["stdout"] {
 		fmt.Fprint(stdout, text)
 	}
 	// From 7 up the digest is all TJ hears, so it arrives even when empty:
@@ -87,7 +109,7 @@ func runDigest(cfg Config, deliver string, always bool, stdout io.Writer) error 
 	var errs []string
 	if notify && targets["desktop"] {
 		title, body := d.summary(3)
-		if err := notifyDesktop(title, body+"\n\nFull digest: "+digestPath()); err != nil {
+		if err := delivery.desktop(title, body+"\n\nFull digest: "+digestPath()); err != nil {
 			errs = append(errs, "desktop: "+err.Error())
 		} else {
 			sent = append(sent, "desktop")
@@ -96,7 +118,7 @@ func runDigest(cfg Config, deliver string, always bool, stdout io.Writer) error 
 	if notify && targets["slack"] {
 		title, body := d.summary(10)
 		msg := title + "\n" + body + "\n\nFull digest: " + digestPath()
-		if err := sendSlack(msg, os.Getenv, httpPost); err != nil {
+		if err := delivery.slack(msg); err != nil {
 			errs = append(errs, "slack: "+err.Error())
 		} else {
 			sent = append(sent, "slack")
@@ -108,7 +130,7 @@ func runDigest(cfg Config, deliver string, always bool, stdout io.Writer) error 
 	} else if notify {
 		status = "no notification target"
 	}
-	if !targets["stdout"] {
+	if !asJSON && !targets["stdout"] {
 		fmt.Fprintf(stdout, "%s · %d changes · %d PRs in %d GraphQL queries · %s · wrote %s in %s\n",
 			d.headline(), len(d.Changes), in.asked, in.queries, status, digestPath(), time.Since(start).Round(10*time.Millisecond))
 	}
@@ -198,7 +220,7 @@ func httpPost(url string, header http.Header, body []byte) ([]byte, error) {
 // is the plugin's digest pane.
 func showDigest(cfg Config) error {
 	if _, err := os.Stat(digestPath()); err != nil {
-		if err := runDigest(cfg, "none", false, io.Discard); err != nil {
+		if err := runDigest(cfg, "none", false, false, io.Discard); err != nil {
 			return err
 		}
 	}

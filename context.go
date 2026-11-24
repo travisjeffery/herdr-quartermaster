@@ -3,9 +3,7 @@ package main
 import (
 	"fmt"
 	"maps"
-	"os"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 )
@@ -23,140 +21,8 @@ func lastNote(notes string, n int) string {
 // every turn. Files and bd are the record; this is a digest of them.
 // worktreed holds the no-agent threads that have a worktree; nil means unknown.
 func renderContext(cfg Config, threads []Thread, next, ready []Bead, inbox []InboxItem, st TickerState, worktreed map[string]bool, now time.Time) string {
-	var s strings.Builder
-	sort.SliceStable(threads, func(i, j int) bool {
-		gi, gj := classify(threads[i]), classify(threads[j])
-		if gi != gj {
-			return gi < gj
-		}
-		return threads[i].Bead.ID < threads[j].Bead.ID
-	})
-	counts := map[Group]int{}
-	for _, t := range threads {
-		counts[classify(t)]++
-	}
-	fmt.Fprintf(&s, "# quartermaster context (%s)\n\n", now.Format("2006-01-02 15:04 MST"))
-	var summary []string
-	for g := GroupNeedsYou; g <= GroupNoAgent; g++ {
-		if counts[g] > 0 {
-			summary = append(summary, fmt.Sprintf("%d %s", counts[g], g))
-		}
-	}
-	if len(summary) == 0 {
-		summary = []string{"no active threads"}
-	}
-	fmt.Fprintf(&s, "%s\n", strings.Join(summary, " · "))
-	if !st.GHFailingFor.IsZero() {
-		fmt.Fprintf(&s, "\nWARNING: gh has been failing since %s (%s); PR state below is stale.\n", st.GHFailingFor.Format(time.Kitchen), strings.Join(st.GHFailingIn, ", "))
-	}
-	for _, w := range unknownRepos(cfg, threads, next, ready) {
-		fmt.Fprintf(&s, "\nWARNING: %s\n", w)
-	}
-	if pid := runningPID(); pid == 0 {
-		s.WriteString("\nWARNING: the ticker is not running (`quartermaster ticker start`); nothing follows PRs or updates the sidebar.\n")
-	} else if w := socketWarning(runningSocket(), cfg.coordSocket(), os.Getenv("HERDR_SOCKET_PATH")); w != "" {
-		fmt.Fprintf(&s, "\nWARNING: %s.\n", w)
-	}
-
-	s.WriteString("\n## Autonomy (`quartermaster autonomy level`)\n")
-	s.WriteString(dialContext(cfg.Autonomy, now))
-
-	s.WriteString("\n## Inbox (unhandled; `quartermaster inbox done <file>` for one item, [bead...] for bulk)\n")
-	if len(inbox) == 0 {
-		s.WriteString("(empty)\n")
-	}
-	for _, it := range inbox {
-		fmt.Fprintf(&s, "- %s %s [%s] %s\n", it.At.Local().Format("15:04"), it.Bead, it.Kind, it.Summary)
-		if it.File != "" {
-			fmt.Fprintf(&s, "  file: %s\n", it.File)
-		}
-	}
-
-	s.WriteString("\n## Threads (bead · state · agent)\n")
-	if len(threads) == 0 {
-		s.WriteString("(none)\n")
-	}
-	watchesByBead := activeWatchesByBead()
-	shownWatches := map[string]bool{}
-	var resumable, stale, bare []string
-	for _, t := range threads {
-		// Claimed beads nobody is on are summarized, resumable or stale; listing each
-		// buries the threads that are live.
-		if classify(t) == GroupNoAgent {
-			switch {
-			case worktreed[t.Bead.ID]:
-				resumable = append(resumable, t.Bead.ID)
-			case worktreed != nil && len(staleClaims([]Bead{t.Bead}, st.PRs, now, staleAge)) > 0:
-				stale = append(stale, t.Bead.ID)
-			default:
-				bare = append(bare, t.Bead.ID)
-			}
-			continue
-		}
-		agent := "no agent"
-		if t.Agent != nil {
-			agent = t.Agent.Kind + " " + t.Agent.Status
-		}
-		fmt.Fprintf(&s, "- %s%s · %s · %s · %s\n", t.Bead.ID, repoTag(cfg, t.Bead), stateLine(t), agent, shortTitle(t.Bead.Title, 70))
-		if classify(t) == GroupNeedsYou && t.Bead.Status == StatusNeedsMe {
-			cmd := runCommand(t)
-			if cmd != "" {
-				fmt.Fprintf(&s, "  run: %s\n", cmd)
-			}
-			if q, ok := liveQuestion(t); ok {
-				fmt.Fprintf(&s, "  question: %s\n  options: %s\n", shortTitle(strings.Join(q.Lines, " "), 200), q.Choices())
-			} else if q := lastNote(t.Bead.Notes, 200); cmd == "" || !strings.HasPrefix(q, "RUN:") {
-				fmt.Fprintf(&s, "  question: %s\n", q)
-			}
-		}
-		if t.PR != nil {
-			fmt.Fprintf(&s, "  %s\n", t.PR.URL)
-		}
-		if ws := watchesByBead[t.Bead.ID]; len(ws) > 0 {
-			fmt.Fprintf(&s, "  watches: %s\n", formatThreadWatches(ws))
-			shownWatches[t.Bead.ID] = true
-		}
-	}
-	if len(resumable) > 0 {
-		fmt.Fprintf(&s, "- resumable (%d): %s  → quartermaster resume\n", len(resumable), strings.Join(resumable, ", "))
-	}
-	if len(stale) > 0 {
-		fmt.Fprintf(&s, "- stale claims (%d): %s — no agent, no worktree, no PR, untouched %dd+  → quartermaster stale\n", len(stale), strings.Join(stale, ", "), int(staleAge.Hours()/24))
-	}
-	if len(bare) > 0 {
-		fmt.Fprintf(&s, "- claimed, no agent (%d): %s\n", len(bare), strings.Join(bare, ", "))
-	}
-	for _, id := range slices.Sorted(maps.Keys(watchesByBead)) {
-		if !shownWatches[id] {
-			fmt.Fprintf(&s, "- %s · watches: %s\n", id, formatThreadWatches(watchesByBead[id]))
-		}
-	}
-
-	if moves := linearMoves(threads); len(moves) > 0 {
-		s.WriteString("\n## Linear (expected issue status)\n")
-		for _, m := range moves {
-			fmt.Fprintf(&s, "- %s\n", m)
-		}
-	}
-
-	s.WriteString("\n## Selected next (open, label `next`)\n")
-	writeBeads(&s, next)
-	s.WriteString("\n## Ready (open, unblocked)\n")
-	nextIDs := map[string]bool{}
-	for _, b := range next {
-		nextIDs[b.ID] = true
-	}
-	var rest []Bead
-	for _, b := range ready {
-		if !nextIDs[b.ID] && b.Status == StatusOpen {
-			rest = append(rest, b)
-		}
-	}
-	if len(rest) > 15 {
-		rest = rest[:15]
-	}
-	writeBeads(&s, rest)
-	return s.String()
+	out, _ := renderContextWith(cfg, threads, next, ready, inbox, st, worktreed, now, ContextOptions{})
+	return out
 }
 
 // repoTag names a bead's repository when it is not the default one.
@@ -184,15 +50,6 @@ func unknownRepos(cfg Config, threads []Thread, beadLists ...[]Bead) []string {
 		}
 	}
 	return out
-}
-
-func writeBeads(s *strings.Builder, beads []Bead) {
-	if len(beads) == 0 {
-		s.WriteString("(none)\n")
-	}
-	for _, b := range beads {
-		fmt.Fprintf(s, "- %s P%d %s: %s\n", b.ID, b.Priority, b.Type, shortTitle(b.Title, 80))
-	}
 }
 
 func coordinatorGuide(cfg Config) string {
