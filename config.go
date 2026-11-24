@@ -37,6 +37,11 @@ type Config struct {
 	// that clears sooner (a judge transient) never surfaces. 0 disables the
 	// debounce: prompts surface on the tick they are first seen.
 	PromptDebounceSeconds int `toml:"prompt_debounce_seconds"`
+	// ReviewBumpHours is how long an open, non-draft, green, mergeable
+	// REVIEW_REQUIRED PR with zero unresolved review threads may stay on the
+	// same head SHA without a new human review before the ticker emits one
+	// bounded review_bump inbox reminder. 0 disables review_bump reminders.
+	ReviewBumpHours int `toml:"review_bump_hours"`
 	// Only keys with these team prefixes count as Linear issues; empty accepts
 	// any key outside a small denylist.
 	LinearPrefixes []string `toml:"linear_prefixes"`
@@ -406,6 +411,7 @@ func defaultConfig() Config {
 		IdleSeconds:           60,
 		Nudge:                 true,
 		PromptDebounceSeconds: 90,
+		ReviewBumpHours:       4,
 		VerifyMinutes:         60,
 		StaleDays:             3,
 		VerifyMax:             20,
@@ -576,6 +582,9 @@ func loadConfig() (Config, error) {
 	if cfg.PromptDebounceSeconds < 0 {
 		return cfg, fmt.Errorf("prompt_debounce_seconds %d is negative; use 0 to disable the prompt debounce", cfg.PromptDebounceSeconds)
 	}
+	if cfg.ReviewBumpHours < 0 {
+		return cfg, fmt.Errorf("review_bump_hours %d is negative; use 0 to disable review bump reminders", cfg.ReviewBumpHours)
+	}
 	if err := cfg.validateStallRetry(); err != nil {
 		return cfg, err
 	}
@@ -675,6 +684,17 @@ func (c Config) promptDebounce() time.Duration {
 // absence is a cleared prompt; the same prompt showing again after it is a
 // new instance with a fresh window.
 func (c Config) promptFlap() time.Duration { return 2 * c.tick() }
+
+// reviewBumpAfter is how long a ready_for_review PR head may stay green and
+// REVIEW_REQUIRED without a new human review before emitting one review_bump
+// reminder; 0 (or a zero Config that never went through defaultConfig)
+// disables it.
+func (c Config) reviewBumpAfter() time.Duration {
+	if c.ReviewBumpHours <= 0 {
+		return 0
+	}
+	return time.Duration(c.ReviewBumpHours) * time.Hour
+}
 
 func instructionsPath() string { return filepath.Join(configDir(), "instructions.md") }
 

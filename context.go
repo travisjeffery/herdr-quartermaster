@@ -165,6 +165,17 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
 - A "ready to merge" thread's PR is approved (or needs no review) with its
   required checks green; the ticker has told its worker. Its worker merges it when
   `+"`autonomy check <bead> --action merge`"+` passes; otherwise tell TJ it is ready to merge.
+- A "ready_for_review" inbox item means an open, non-draft PR is green,
+  mergeable, `+"`REVIEW_REQUIRED`"+`, and has zero unresolved review threads (emitted once
+  per head commit). Posting to an internal team review channel is class 5
+  (`+"`quartermaster autonomy check <bead> --action post`"+`): if the check passes and
+  this head has not already been posted (check the bead's notes), post the PR
+  link once to the team review channel and note
+  `+"`bd note <bead> \"AUTO: [coordinator L<n> C5] posted PR #<N> (<head>) for review — <channel/link>\"`"+`;
+  if the check fails, tell TJ it is ready for review. On a "review_bump" inbox
+  item (the same head stayed green and `+"`REVIEW_REQUIRED`"+` past `+"`review_bump_hours`"+`
+  with no new human review), run the same `+"`--action post`"+` check and post at most
+  one polite follow-up for that head, noting `+"`AUTO:`"+` on the bead (never spam).
 - After a PR merges the ticker tells the worker to verify and close its bead
   with `+"`quartermaster close`"+`.
   Once closed, run `+"`quartermaster resolve <bead>`"+` to remove the worktree (it asks

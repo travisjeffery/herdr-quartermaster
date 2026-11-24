@@ -144,7 +144,7 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 	}
 	threads := make([]Thread, 0, len(active))
 	for _, b := range active {
-		th := threadFor(t.cfg, *st, b, byName)
+		th := threadForAt(t.cfg, *st, b, byName, now)
 		th.AgentUnknown = !agentsComplete && th.Agent == nil
 		threads = append(threads, th)
 	}
@@ -154,6 +154,10 @@ func (t Ticker) gather(st *TickerState, now time.Time) ([]Thread, map[string]Age
 // threadFor joins one bead with its agent, by name, and what the last gh pass
 // knows of its PRs and runs.
 func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thread {
+	return threadForAt(cfg, st, b, byName, time.Now())
+}
+
+func threadForAt(cfg Config, st TickerState, b Bead, byName map[string]Agent, now time.Time) Thread {
 	th := Thread{Bead: b, Linear: linearKey(b, cfg.LinearPrefixes)}
 	th.Level = cfg.beadMark(b)
 	if a, ok := byName[agentName(b.ID)]; ok {
@@ -167,7 +171,7 @@ func threadFor(cfg Config, st TickerState, b Bead, byName map[string]Agent) Thre
 		// observation between polls, but never indefinitely (or after a
 		// failed refresh, which clears the gate in gatePRs).
 		if pr.Gate != nil {
-			age := time.Since(pr.Gate.At)
+			age := now.Sub(pr.Gate.At)
 			if age < 0 || age > 2*cfg.ghEvery() {
 				pr.Gate, pr.DetailsFresh = nil, false
 			}
@@ -349,12 +353,14 @@ func eachLimit(n, limit int, f func(int)) {
 }
 
 // gatePRs fetches, in one query, the merge gate of every PR that is otherwise
-// mergeable. A failed query clears the gate; cached approvals or thread
-// counts are not evidence that the current PR is still safe to merge.
+// mergeable or a candidate for ready_for_review. A failed query clears the
+// gate; cached approvals or thread counts are not evidence that the current PR
+// is still safe to merge or free of unresolved review threads.
 func (t Ticker) gatePRs(prs map[string]PR) {
 	var want []PR
 	for _, pr := range prs {
-		if pr.DetailsFresh && mergeable(&pr, summarizeChecks(pr.Checks)) {
+		c := summarizeChecks(pr.Checks)
+		if pr.DetailsFresh && (mergeable(&pr, c) || reviewGateCandidate(&pr, c)) {
 			want = append(want, pr)
 		}
 	}
@@ -362,7 +368,7 @@ func (t Ticker) gatePRs(prs map[string]PR) {
 		applyGates(prs, nil)
 		return
 	}
-	now := time.Now()
+	now := t.clock()
 	gates, err := t.gh.Gates(want, now)
 	if err != nil {
 		t.log.Printf("gh merge gates: %v", err)
@@ -483,7 +489,12 @@ func (t Ticker) once(st *TickerState) error {
 			}
 		}
 		th = th.derive()
-		out := transitionDebounced(th, prev, !seen, now, t.cfg.promptDebounce(), t.cfg.promptFlap())
+		opts := transitionOpts{
+			debounce:   t.cfg.promptDebounce(),
+			flap:       t.cfg.promptFlap(),
+			reviewBump: t.cfg.reviewBumpAfter(),
+		}
+		out := transitionWith(th, prev, !seen, now, opts)
 		if out.Resume {
 			if err := t.resume(id); err != nil {
 				t.log.Printf("resume %s: %v", id, err)
@@ -494,11 +505,16 @@ func (t Ticker) once(st *TickerState) error {
 			}
 		}
 		threads[i] = th
-		snap := snapshotDebounced(th, prev, now, t.cfg.promptDebounce(), t.cfg.promptFlap(), !seen)
+		snap := snapshotWith(th, prev, now, opts, !seen)
 		if out.Resume {
-			// transition saw needs_me and withheld the ready event. A
-			// successful resume must not baseline it away before next pass.
+			// transition saw needs_me and withheld ready events. A
+			// successful resume must not baseline them away before next pass.
 			snap.ReadyKey = ""
+			snap.ReviewReadyKey = prev.ReviewReadyKey
+			snap.ReviewReadyAt = prev.ReviewReadyAt
+			snap.ReviewReadyReviews = prev.ReviewReadyReviews
+			snap.ReviewReadyReviewed = prev.ReviewReadyReviewed
+			snap.ReviewBumpKey = prev.ReviewBumpKey
 		}
 		t.journalAuto(th, prev, seen, &snap, now)
 		snap.Pending = append(snap.Pending, out.Prompts...)

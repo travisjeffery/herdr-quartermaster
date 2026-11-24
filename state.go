@@ -182,6 +182,20 @@ type Snapshot struct {
 	// baseline without announcing already-green PRs.
 	GreenKey     string `json:"green_key,omitempty"`
 	GreenTracked bool   `json:"green_tracked,omitempty"`
+	// ReviewReadyKey is the PR and head commit last seen ready for review
+	// (reviewReadyKey), so ready_for_review fires once per (bead, PR, head).
+	// ReviewReadyTracked marks a snapshot that kept it; pre-upgrade snapshots
+	// baseline without announcing already-ready PRs. ReviewReadyAt records
+	// when ReviewReadyKey entered ready-for-review, ReviewReadyReviews is the
+	// human review count at that time, ReviewReadyReviewed latches once a
+	// newer human review arrives on that head, and ReviewBumpKey records the
+	// head that already received its single bounded review_bump reminder.
+	ReviewReadyKey      string    `json:"review_ready_key,omitempty"`
+	ReviewReadyTracked  bool      `json:"review_ready_tracked,omitempty"`
+	ReviewReadyAt       time.Time `json:"review_ready_at,omitempty"`
+	ReviewReadyReviews  int       `json:"review_ready_reviews,omitempty"`
+	ReviewReadyReviewed bool      `json:"review_ready_reviewed,omitempty"`
+	ReviewBumpKey       string    `json:"review_bump_key,omitempty"`
 	// Merged holds the URL of every PR of the bead's already announced as
 	// merged, so a bead with several PRs hears of each merge once.
 	// MergedTracked marks a snapshot that kept it; older ones knew only their
@@ -240,6 +254,8 @@ const (
 	EventReview          EventKind = "new_review"
 	EventMerged          EventKind = "merged"
 	EventReady           EventKind = "ready_to_merge"
+	EventReadyForReview  EventKind = "ready_for_review"
+	EventReviewBump      EventKind = "review_bump"
 	EventFinished        EventKind = "finished"
 	EventAgentGone       EventKind = "agent_gone"
 	EventResumed         EventKind = "resumed"
@@ -465,30 +481,47 @@ func trackPrompt(t Thread, prev Snapshot, now time.Time, debounce, flap time.Dur
 	return tr
 }
 
+type transitionOpts struct {
+	debounce   time.Duration
+	flap       time.Duration
+	reviewBump time.Duration
+}
+
 func snapshot(t Thread, prev Snapshot, now time.Time) Snapshot {
-	return snapshotDebounced(t, prev, now, 0, 0, false)
+	return snapshotWith(t, prev, now, transitionOpts{}, false)
 }
 
 func snapshotDebounced(t Thread, prev Snapshot, now time.Time, debounce, flap time.Duration, first bool) Snapshot {
+	return snapshotWith(t, prev, now, transitionOpts{debounce: debounce, flap: flap}, first)
+}
+
+func snapshotWith(t Thread, prev Snapshot, now time.Time, opts transitionOpts, first bool) Snapshot {
+	debounce, flap := opts.debounce, opts.flap
 	s := Snapshot{
-		Unprompted:     t.Unprompted,
-		Group:          classify(t),
-		Reviews:        t.Reviews,
-		BotReviews:     len(t.BotReviews),
-		ReviewsSplit:   true,
-		Runs:           runStates(t.Runs),
-		Failing:        t.Checks.Failing,
-		Pending:        freshPending(t, prev.Pending),
-		NeedsMe:        t.Bead.Status == StatusNeedsMe,
-		ReadyKey:       prev.ReadyKey,
-		GreenKey:       prev.GreenKey,
-		GreenTracked:   true,
-		Relaunch:       prev.Relaunch,
-		StallRetries:   prev.StallRetries,
-		StallTurnID:    prev.StallTurnID,
-		StallNextAt:    prev.StallNextAt,
-		StallError:     prev.StallError,
-		StallEscalated: prev.StallEscalated,
+		Unprompted:          t.Unprompted,
+		Group:               classify(t),
+		Reviews:             t.Reviews,
+		BotReviews:          len(t.BotReviews),
+		ReviewsSplit:        true,
+		Runs:                runStates(t.Runs),
+		Failing:             t.Checks.Failing,
+		Pending:             freshPending(t, prev.Pending),
+		NeedsMe:             t.Bead.Status == StatusNeedsMe,
+		ReadyKey:            prev.ReadyKey,
+		GreenKey:            prev.GreenKey,
+		GreenTracked:        true,
+		ReviewReadyKey:      prev.ReviewReadyKey,
+		ReviewReadyTracked:  true,
+		ReviewReadyAt:       prev.ReviewReadyAt,
+		ReviewReadyReviews:  prev.ReviewReadyReviews,
+		ReviewReadyReviewed: reviewReadyReviewed(t, prev),
+		ReviewBumpKey:       prev.ReviewBumpKey,
+		Relaunch:            prev.Relaunch,
+		StallRetries:        prev.StallRetries,
+		StallTurnID:         prev.StallTurnID,
+		StallNextAt:         prev.StallNextAt,
+		StallError:          prev.StallError,
+		StallEscalated:      prev.StallEscalated,
 	}
 	if t.Agent != nil {
 		s.AgentStatus, s.AgentSeq = t.Agent.Status, t.Agent.Seq
@@ -561,16 +594,52 @@ func snapshotDebounced(t Thread, prev Snapshot, now time.Time, debounce, flap ti
 			s.AutoMerge = t.PR.URL
 		}
 	}
+	rkReview := ""
+	if t.Bead.Status != StatusNeedsMe {
+		rkReview = reviewReadyKey(t)
+	}
+	switch {
+	case rkReview != "" && rkReview != prev.ReviewReadyKey:
+		// Newly ready for review (or baselined on first sight / pre-upgrade).
+		s.ReviewReadyKey = rkReview
+		s.ReviewReadyAt = now
+		s.ReviewReadyReviews = t.Reviews
+		s.ReviewReadyReviewed = false
+		s.ReviewBumpKey = ""
+	case rkReview != "" && rkReview == prev.ReviewReadyKey:
+		// Still ready for review on the exact same PR and head.
+		if s.ReviewReadyAt.IsZero() {
+			s.ReviewReadyAt = now
+		}
+		if !first && reviewBumpDue(t, prev, rkReview, now, opts.reviewBump) {
+			s.ReviewBumpKey = rkReview
+		}
+	default:
+		// Not currently ready for review. Keep ReviewReadyKey and ReviewBumpKey
+		// so transient blips or later recovery on the same head never duplicate
+		// ready_for_review or review_bump. Keep ReviewReadyAt across transient
+		// observation gaps on the same head, and clear it on confirmed
+		// ineligibility or a head change.
+		sameHead := t.PR == nil || (t.PR.HeadSHA != "" && fmt.Sprintf("%d@%s", t.PR.Number, t.PR.HeadSHA) == prev.ReviewReadyKey)
+		if !sameHead || !reviewReadyTransient(t) {
+			s.ReviewReadyAt = time.Time{}
+		}
+	}
 	return s
 }
 
 // transition compares a thread against its last snapshot. first is true the
 // first time the ticker sees a bead, when nothing counts as a change.
 func transition(t Thread, prev Snapshot, first bool, now time.Time) Outcome {
-	return transitionDebounced(t, prev, first, now, 0, 0)
+	return transitionWith(t, prev, first, now, transitionOpts{})
 }
 
 func transitionDebounced(t Thread, prev Snapshot, first bool, now time.Time, debounce, flap time.Duration) Outcome {
+	return transitionWith(t, prev, first, now, transitionOpts{debounce: debounce, flap: flap})
+}
+
+func transitionWith(t Thread, prev Snapshot, first bool, now time.Time, opts transitionOpts) Outcome {
+	debounce, flap := opts.debounce, opts.flap
 	var o Outcome
 	if first {
 		return o
@@ -665,6 +734,14 @@ func transitionDebounced(t Thread, prev Snapshot, first bool, now time.Time, deb
 				o.Prompts = append(o.Prompts, fmt.Sprintf(
 					readyPrompt+"%d is ready to merge at %s: %s, no review thread is open, and its required checks passed. Finish anything left before merge (the Linear issue, your report), then merge it with `gh pr merge %d --match-head-commit %s` only if you were told to merge; otherwise say it is ready to merge and stop. The ticker tells you when it merges.",
 					t.PR.Number, t.PR.HeadSHA, approval(t.PR), t.PR.Number, t.PR.HeadSHA))
+			}
+		}
+		if k := reviewReadyKey(t); k != "" && prev.ReviewReadyTracked && t.Bead.Status != StatusNeedsMe {
+			switch {
+			case k != prev.ReviewReadyKey:
+				ev(EventReadyForReview, "%s", formatReadyForReviewSummary(*t.PR))
+			case reviewBumpDue(t, prev, k, now, opts.reviewBump):
+				ev(EventReviewBump, "%s", formatReviewBumpSummary(*t.PR, prev.ReviewReadyAt, now))
 			}
 		}
 		// GitHub turns auto-merge off when the base branch changes or someone
@@ -813,6 +890,99 @@ func greenKey(t Thread) string {
 		return ""
 	}
 	return fmt.Sprintf("%d@%s", t.PR.Number, t.PR.HeadSHA)
+}
+
+// reviewReadyKey names the PR and head commit of an open, non-draft, green,
+// mergeable, REVIEW_REQUIRED PR with fresh gate evidence confirming zero
+// unresolved review threads, or "" otherwise.
+func reviewReadyKey(t Thread) string {
+	if !readyForReview(t.PR, t.Checks) {
+		return ""
+	}
+	return fmt.Sprintf("%d@%s", t.PR.Number, t.PR.HeadSHA)
+}
+
+// reviewReadyTransient reports whether a thread currently lacks fresh, settled
+// GitHub observations (API failure, missing/stale gate, or UNKNOWN merge state)
+// rather than being confirmed ineligible for review.
+func reviewReadyTransient(t Thread) bool {
+	if t.Bead.Status == StatusNeedsMe {
+		return false
+	}
+	if t.PR == nil {
+		return true
+	}
+	if t.PR.State != "OPEN" || t.PR.IsDraft || t.PR.HeadSHA == "" {
+		return false
+	}
+	if !t.PR.DetailsFresh {
+		return true
+	}
+	if t.PR.ReviewDecision != "REVIEW_REQUIRED" {
+		return false
+	}
+	if t.Checks.Pending > 0 || len(t.Checks.Failing) > 0 || t.Checks.Passing == 0 {
+		return false
+	}
+	if t.PR.Mergeable == "CONFLICTING" || t.PR.MergeState == "DIRTY" || t.PR.MergeState == "DRAFT" {
+		return false
+	}
+	if t.PR.Mergeable == "UNKNOWN" || t.PR.MergeState == "UNKNOWN" {
+		return true
+	}
+	if t.PR.Gate == nil || t.PR.Gate.Head != t.PR.HeadSHA {
+		return true
+	}
+	return false
+}
+
+func reviewReadyReviewed(t Thread, prev Snapshot) bool {
+	if prev.ReviewReadyReviewed {
+		return true
+	}
+	if t.PR == nil || prev.ReviewReadyKey == "" || !prev.ReviewsSplit {
+		return false
+	}
+	if fmt.Sprintf("%d@%s", t.PR.Number, t.PR.HeadSHA) != prev.ReviewReadyKey {
+		return false
+	}
+	return t.Reviews > prev.ReviewReadyReviews
+}
+
+func reviewBumpDue(t Thread, prev Snapshot, k string, now time.Time, after time.Duration) bool {
+	if after <= 0 || k == "" || !prev.ReviewReadyTracked || k != prev.ReviewReadyKey {
+		return false
+	}
+	if t.Bead.Status == StatusNeedsMe {
+		return false
+	}
+	if prev.ReviewBumpKey == k || prev.ReviewReadyAt.IsZero() {
+		return false
+	}
+	if reviewReadyReviewed(t, prev) {
+		return false
+	}
+	return now.Sub(prev.ReviewReadyAt) >= after
+}
+
+func formatReadyForReviewSummary(pr PR) string {
+	s := fmt.Sprintf("PR #%d is ready for review at %s (checks green, mergeable, 0 open threads)", pr.Number, short(pr.HeadSHA))
+	if pr.URL != "" {
+		s += ": " + pr.URL
+	}
+	return s
+}
+
+func formatReviewBumpSummary(pr PR, since, now time.Time) string {
+	waited := age(since, now)
+	if waited == "" {
+		waited = "review_bump_hours"
+	}
+	s := fmt.Sprintf("PR #%d is still awaiting review at %s after %s with no new review", pr.Number, short(pr.HeadSHA), waited)
+	if pr.URL != "" {
+		s += ": " + pr.URL
+	}
+	return s
 }
 
 // freshPending drops a queued ready-to-merge prompt once its PR and head are

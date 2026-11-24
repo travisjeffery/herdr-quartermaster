@@ -263,6 +263,12 @@ Every automated message says it isn't from you, and none approves anything.
 | coordinator → worker | Relaying your answer | Whatever it writes with `herdr agent prompt` |
 
 Inbox event kinds: `needs_you`, `checks_failing`, `new_review`,
+`ready_for_review` (open, non-draft PR whose reported checks are passing with
+zero failing and zero pending, mergeable/not conflicting, `REVIEW_REQUIRED`,
+and zero unresolved review threads from fresh current-head gate evidence;
+emitted once per head commit), `review_bump` (at most one follow-up reminder
+per head commit when the exact same PR head stays green and `REVIEW_REQUIRED`
+past `review_bump_hours` with no new human review),
 `ready_to_merge` (task-associated, authorized by the advisory dial and owned
 by the authenticated user, merge state CLEAN, HAS_HOOKS or UNSTABLE, no checks
 running, no unresolved review thread including outdated threads, complete
@@ -829,6 +835,8 @@ gh_seconds = 60           # how often it checks PRs
 idle_seconds = 60         # it only types into an agent idle this long
 prompt_debounce_seconds = 90  # a worker approval prompt must keep showing this long before it
                               # reaches the inbox; one that clears sooner never does. 0 = at once
+review_bump_hours = 4         # emit at most one review_bump per head after this many hours green &
+                              # REVIEW_REQUIRED without a new human review; 0 disables
 nudge = true              # prompt the coordinator when there's news
 repos = { infra = "~/src/infra", model = "~/src/model" }
 linear_prefixes = ["ENG"] # Linear team keys to recognise; empty accepts any KEY-123
