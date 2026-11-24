@@ -1152,6 +1152,8 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster host list` | The worker hosts: herdr machine, slots, labels, repos. |
 | `quartermaster focus [<bead>] [--agent K]` | Focus the bead's worker, or dispatch one. With no bead, reads the id from the clipboard. |
 | `quartermaster context` | The coordinator's digest: inbox, threads by state, Linear moves, `next` and ready beads. |
+| `quartermaster show <bead> [--json]` | Read-only wrapper over `bd show` pinned to the configured Beads workspace (works from any cwd or environment). `--json` emits the bead's `bd show --json` fields (`id`, `title`, `status`, `notes`, metadata) plus `notes_tail`. |
+| `quartermaster memory get <key> [--json]` | Read-only wrapper over `bd recall` pinned to the configured Beads workspace: prints a stored `bd remember` memory by exact key, or exits nonzero with a clean not-found error. Writes stay in `bd`. |
 | `quartermaster inbox done [<bead>...]` | Mark inbox items handled (all of them if no bead is given). |
 | `quartermaster resume [<bead>...] [--agent K]` | Restart exited workers in their worktrees, continuing their last conversation. |
 | `quartermaster stale [--days N] [--release]` | List claims with no agent, worktree or PR untouched N days (7); `--release` reopens them. |
