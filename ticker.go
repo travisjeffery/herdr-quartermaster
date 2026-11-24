@@ -104,6 +104,7 @@ type Ticker struct {
 	jobEnv         *JobEnv
 	orphanEnv      *orphanFinishEnv
 	blockerEnv     *blockerWakeEnv
+	ciRerunEnv     *ciRerunEnv
 	inboxRunnerEnv *inboxRunnerEnv
 	inboxRunnerCtx context.Context
 	inboxRunnerWG  *sync.WaitGroup
@@ -563,14 +564,33 @@ func (t Ticker) once(st *TickerState) error {
 			snap.ReviewBumpKey = prev.ReviewBumpKey
 		}
 		t.journalAuto(th, prev, seen, &snap, now)
-		snap.Pending = append(snap.Pending, out.Prompts...)
+		ciRes := t.handleCIRerun(th, prev, !seen, ghRefreshed, hasEventKind(out.Events, EventFailing), &snap, now)
+		for _, p := range out.Prompts {
+			if ciRes.SuppressFailing && isFailingChecksPrompt(p) {
+				continue
+			}
+			snap.Pending = append(snap.Pending, p)
+		}
+		if ciRes.FailingPrompt != "" {
+			snap.Pending = append(snap.Pending, ciRes.FailingPrompt)
+		}
 		t.relaunch(th, &snap, relaunch[agentName(id)], now)
 		stallGuard := t.stallGuardFor(th, prev, relaunch[agentName(id)] || snap.Relaunch)
 		stallPlan := planStallRetry(t.cfg.StallRetry, th, prev, !seen, now, stallGuard)
+		var threadEvents []Event
 		for _, e := range out.Events {
 			if stallPlan.SuppressFinished && e.Kind == EventFinished {
 				continue
 			}
+			if ciRes.SuppressFailing && e.Kind == EventFailing {
+				continue
+			}
+			threadEvents = append(threadEvents, e)
+		}
+		if ciRes.EmitFailing != nil {
+			threadEvents = append(threadEvents, *ciRes.EmitFailing)
+		}
+		for _, e := range threadEvents {
 			// A parsable approval prompt's event carries its tap links, so
 			// what the coordinator relays to TJ is tappable as it stands;
 			// a needs_me OPTIONS question's event carries its own.

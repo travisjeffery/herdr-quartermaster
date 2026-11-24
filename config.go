@@ -127,6 +127,11 @@ type Config struct {
 	// autonomous coordinator turns for allowlisted inbox events while the
 	// interactive coordinator is idle or closed (inboxrunner.go, docs/inbox-runner.md).
 	InboxRunner InboxRunnerConfig `toml:"inbox_runner"`
+
+	// CIRerun configures bounded automatic reruns of failed GitHub Actions jobs
+	// when a tracked PR fails solely on transient infrastructure flakes
+	// (cirerun.go).
+	CIRerun CIRerunConfig `toml:"ci_rerun"`
 }
 
 // DesktopConfig is [desktop]: controls event-driven desktop notifications
@@ -444,6 +449,9 @@ func defaultConfig() Config {
 			MaxAttempts:     defaultInboxRunnerMaxAttempts,
 			Kinds:           slices.Clone(defaultInboxRunnerKinds),
 		},
+		CIRerun: CIRerunConfig{
+			MaxReruns: defaultCIRerunMaxReruns,
+		},
 	}
 }
 
@@ -621,6 +629,9 @@ func loadConfig() (Config, error) {
 		return cfg, err
 	}
 	if err := cfg.validateInboxRunner(); err != nil {
+		return cfg, err
+	}
+	if err := cfg.validateCIRerun(); err != nil {
 		return cfg, err
 	}
 	if cfg.Repo == "" {

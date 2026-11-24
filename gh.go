@@ -81,11 +81,44 @@ type MergeGate struct {
 const approvalMaxAge = 7 * 24 * time.Hour
 
 type Check struct {
+	Name         string `json:"name"`
+	Context      string `json:"context"`
+	Status       string `json:"status"`
+	Conclusion   string `json:"conclusion"`
+	State        string `json:"state"`
+	DetailsURL   string `json:"detailsUrl,omitempty"`
+	TargetURL    string `json:"targetUrl,omitempty"`
+	WorkflowName string `json:"workflowName,omitempty"`
+	Description  string `json:"description,omitempty"`
+	CompletedAt  string `json:"completedAt,omitempty"`
+	StartedAt    string `json:"startedAt,omitempty"`
+}
+
+// RunDetail is the workflow run and job summary returned by `gh run view --json`.
+type RunDetail struct {
+	ID           int64    `json:"databaseId"`
+	Status       string   `json:"status"`
+	Conclusion   string   `json:"conclusion"`
+	Attempt      int      `json:"attempt"`
+	WorkflowName string   `json:"workflowName"`
+	URL          string   `json:"url"`
+	Jobs         []RunJob `json:"jobs"`
+}
+
+// RunJob is one job in a GitHub Actions workflow run.
+type RunJob struct {
+	ID         int64  `json:"databaseId"`
 	Name       string `json:"name"`
-	Context    string `json:"context"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
-	State      string `json:"state"`
+	URL        string `json:"url"`
+}
+
+// CheckAnnotation is one annotation from the GitHub check-runs annotations API.
+type CheckAnnotation struct {
+	Title           string `json:"title"`
+	Message         string `json:"message"`
+	AnnotationLevel string `json:"annotation_level"`
 }
 
 type Review struct {
@@ -123,6 +156,21 @@ func (c Check) label() string {
 	return c.Context
 }
 
+func checkFailed(c Check) bool {
+	if strings.ToUpper(c.Status) != "" && strings.ToUpper(c.Status) != "COMPLETED" {
+		return false
+	}
+	result := strings.ToUpper(c.Conclusion)
+	if result == "" {
+		result = strings.ToUpper(c.State)
+	}
+	switch result {
+	case "FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED":
+		return true
+	}
+	return false
+}
+
 func summarizeChecks(checks []Check) Checks {
 	var s Checks
 	seen := map[string]bool{}
@@ -136,7 +184,7 @@ func summarizeChecks(checks []Check) Checks {
 			s.Pending++
 		case result == "PENDING" || result == "EXPECTED":
 			s.Pending++
-		case result == "FAILURE" || result == "ERROR" || result == "TIMED_OUT" || result == "STARTUP_FAILURE" || result == "ACTION_REQUIRED":
+		case checkFailed(c):
 			if !seen[c.label()] {
 				seen[c.label()] = true
 				s.Failing = append(s.Failing, c.label())
@@ -371,6 +419,110 @@ func (g GH) run(args ...string) ([]byte, error) {
 		return stdout.Bytes(), fmt.Errorf("gh %s: %v: %s", strings.Join(args[:min(2, len(args))], " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
+}
+
+// headTailBuffer bounds captured output to headCap + tailCap bytes while
+// keeping both the beginning (startup errors) and end (exit codes / kills).
+type headTailBuffer struct {
+	headCap int
+	tailCap int
+	head    []byte
+	tail    []byte
+}
+
+func (b *headTailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if rem := b.headCap - len(b.head); rem > 0 {
+		take := min(rem, len(p))
+		b.head = append(b.head, p[:take]...)
+		p = p[take:]
+	}
+	if len(p) > 0 && b.tailCap > 0 {
+		if len(p) >= b.tailCap {
+			b.tail = append(b.tail[:0], p[len(p)-b.tailCap:]...)
+		} else {
+			if over := len(b.tail) + len(p) - b.tailCap; over > 0 {
+				copy(b.tail, b.tail[over:])
+				b.tail = b.tail[:len(b.tail)-over]
+			}
+			b.tail = append(b.tail, p...)
+		}
+	}
+	return n, nil
+}
+
+func (b *headTailBuffer) String() string {
+	if len(b.tail) == 0 {
+		return string(b.head)
+	}
+	return string(b.head) + "\n" + string(b.tail)
+}
+
+func (g GH) runBounded(maxBytes int, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd.Dir = g.repo
+	headCap := min(64*1024, maxBytes/4)
+	tailCap := max(0, maxBytes-headCap)
+	stdout := &headTailBuffer{headCap: headCap, tailCap: tailCap}
+	var stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("gh %s: %v: %s", strings.Join(args[:min(2, len(args))], " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
+const runDetailFields = "databaseId,status,conclusion,attempt,workflowName,url,jobs"
+
+// RunDetail fetches a workflow run's status, attempt number, and jobs.
+func (g GH) RunDetail(repo, runID string) (RunDetail, error) {
+	args := []string{"run", "view", runID, "--json", runDetailFields}
+	if repo != "" {
+		args = []string{"run", "view", runID, "-R", repo, "--json", runDetailFields}
+	}
+	out, err := g.run(args...)
+	if err != nil {
+		return RunDetail{}, err
+	}
+	var d RunDetail
+	return d, json.Unmarshal(out, &d)
+}
+
+// CheckRunAnnotations fetches annotations attached to a GitHub Actions job.
+func (g GH) CheckRunAnnotations(repo string, jobID int64) ([]CheckAnnotation, error) {
+	out, err := g.run("api", fmt.Sprintf("repos/%s/check-runs/%d/annotations", repo, jobID))
+	if err != nil {
+		return nil, err
+	}
+	var anns []CheckAnnotation
+	return anns, json.Unmarshal(out, &anns)
+}
+
+// RunFailedLog fetches bounded failed-step logs for one job (when jobID > 0) or
+// for the entire run (when jobID == 0).
+func (g GH) RunFailedLog(repo, runID string, jobID int64) (string, error) {
+	args := []string{"run", "view", runID}
+	if repo != "" {
+		args = append(args, "-R", repo)
+	}
+	if jobID > 0 {
+		args = append(args, "--job", fmt.Sprintf("%d", jobID))
+	}
+	args = append(args, "--log-failed")
+	return g.runBounded(ciRerunMaxLogBytes, args...)
+}
+
+// RunRerunFailed triggers `gh run rerun <runID> -R <repo> --failed`.
+func (g GH) RunRerunFailed(repo, runID string) error {
+	args := []string{"run", "rerun", runID}
+	if repo != "" {
+		args = append(args, "-R", repo)
+	}
+	args = append(args, "--failed")
+	_, err := g.run(args...)
+	return err
 }
 
 // graphql runs a query and keeps a partial answer: GitHub answers every alias
