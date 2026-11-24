@@ -421,6 +421,19 @@ lifecycle action.
   (closed bead ID or merged PR URL and commit SHA) and records an `AUTO:` note;
   otherwise it surfaces `unblocked` to the coordinator inbox. Deduplication
   state persists in `state.json` across ticker restarts.
+- **Headless inbox runner (opt-in).** When `[inbox_runner] enabled = true`
+  (default `false`), the ticker asynchronously launches a single-flight
+  headless coordinator turn for allowlisted non-human-gated inbox items
+  (`ready_for_review`, `review_bump`, `orphan_finish`, `merged`, `closed`,
+  `unblocked`, `checks_failing`, `likely_stale`) once items age past
+  `idle_seconds` and the interactive coordinator is idle past `idle_seconds`
+  or closed — skipping safely whenever the interactive TUI is working or had
+  recent input. Enforces an exclusive `flock` (`inbox-runner.lock`), cooldown,
+  process-group timeout, and persisted per-file `max_attempts` cap
+  (`inbox-runner.json`). Inspect or trigger with
+  `quartermaster inbox-runner status [--json]` and
+  `quartermaster inbox-runner run [--dry-run]`; disable anytime with
+  `enabled = false`. See [docs/inbox-runner.md](docs/inbox-runner.md).
 - **Bot reviews** (Codex, CodeRabbit and other GitHub Apps) are told apart from
   human ones. Both go to the worker; only a human review notifies you.
 - **Resume.** Herdr restarts don't relaunch agents. `quartermaster resume` restarts
@@ -956,6 +969,16 @@ backoff_seconds = 30      # base cooldown before retrying; doubles per attempt (
 interval_seconds = 300    # how often the sweep runs; 0 disables
 grace_seconds = 600       # untouched grace window after bead update / merge / run start
 max_per_pass = 5          # max orphan beads acted on per sweep pass; 0 disables
+
+[inbox_runner]            # opt-in headless coordinator turns for allowlisted inbox events (docs/inbox-runner.md)
+enabled = false           # opt-in; set false and restart ticker to roll back
+idle_seconds = 120        # min eligible item age and interactive coordinator idle window
+cooldown_seconds = 120    # min interval between completed ticker-triggered runs
+timeout_seconds = 300     # hard wall-clock deadline (kills child process group on timeout)
+max_attempts = 2          # max runner invocations per inbox filename before capping
+kinds = ["ready_for_review", "review_bump", "orphan_finish", "merged", "closed", "unblocked", "checks_failing", "likely_stale"]
+# command = ["pi", "--no-approve", "--print", "--no-session", ...]  # optional override (prompt on stdin)
+notify = true             # emit privacy-safe desktop summary via notify-send on handled items or failure
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts
@@ -1238,6 +1261,8 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster memory get <key> [--json]` | Read-only wrapper over `bd recall` pinned to the configured Beads workspace: prints a stored `bd remember` memory by exact key, or exits nonzero with a clean not-found error. Writes stay in `bd`. |
 | `quartermaster inbox done [<bead>...]` | Mark inbox items handled (all of them if no bead is given). |
 | `quartermaster inbox --questions [--json]` | List live worker approval prompts and active `needs_me` `OPTIONS:` questions (read-only; excludes `RUN:` beads, parked/snoozed beads, and already-answered questions, never mints tap links; `hash` carries the `--expect` hash for `prompt` and `null` for `needs_me`). |
+| `quartermaster inbox-runner run [--dry-run]` | Run one single-flight headless coordinator turn for allowlisted non-human-gated inbox items while the interactive coordinator is idle or closed (`--dry-run` evaluates eligibility and prints what would run without executing or mutating state). See [docs/inbox-runner.md](docs/inbox-runner.md). |
+| `quartermaster inbox-runner status [--json]` | Inspect `[inbox_runner]` enabled state, lock state, interactive coordinator check, cooldown, inbox eligibility counts, last run status/diagnostics, and persisted per-file attempt counts. |
 | `quartermaster snooze <bead> <duration> [--reason R]` | Temporarily park a `needs_me` bead out of the Active list (`30m`, `4h`, `3d`, `1w`) until expiry or fresh bead activity; `quartermaster snooze <bead> --clear` removes it, and bare `quartermaster snooze [--json]` lists active snoozes. |
 | `quartermaster resume [<bead>...] [--agent K]` | Restart exited workers in their worktrees, continuing their last conversation. |
 | `quartermaster stale [--days N] [--release]` | List claims with no agent, worktree or PR untouched N days (7); `--release` reopens them. |

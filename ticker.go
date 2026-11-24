@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,17 +94,20 @@ func saveState(s TickerState) error {
 }
 
 type Ticker struct {
-	cfg        Config
-	herdr      Herdr
-	beads      Beads
-	gh         GH
-	log        *log.Logger
-	side       *sidebar
-	watchEnv   *WatchEnv
-	jobEnv     *JobEnv
-	orphanEnv  *orphanFinishEnv
-	blockerEnv *blockerWakeEnv
-	now        func() time.Time
+	cfg            Config
+	herdr          Herdr
+	beads          Beads
+	gh             GH
+	log            *log.Logger
+	side           *sidebar
+	watchEnv       *WatchEnv
+	jobEnv         *JobEnv
+	orphanEnv      *orphanFinishEnv
+	blockerEnv     *blockerWakeEnv
+	inboxRunnerEnv *inboxRunnerEnv
+	inboxRunnerCtx context.Context
+	inboxRunnerWG  *sync.WaitGroup
+	now            func() time.Time
 }
 
 func (t Ticker) clock() time.Time {
@@ -644,6 +648,7 @@ func (t Ticker) once(st *TickerState) error {
 	t.advanceWorkflows(st, threads, now)
 	t.processJobs(st, threads, agents, now)
 	t.nudgeCoordinator(st, agents, now)
+	t.triggerInboxRunner(st, agents, now)
 	return nil
 }
 
@@ -994,6 +999,11 @@ func tickerRun(cfg Config) error {
 	logger := log.New(f, "", log.LstdFlags)
 	logger.Printf("ticker %s started, every %s, on %s", version, cfg.tick(), cfg.coordSocket())
 	t := newTicker(cfg, logger)
+	runnerCtx, cancelRunner := context.WithCancel(context.Background())
+	defer cancelRunner()
+	var runnerWG sync.WaitGroup
+	t.inboxRunnerCtx = runnerCtx
+	t.inboxRunnerWG = &runnerWG
 	if cfg.Tap.Enabled {
 		// The tap endpoint rides the ticker: no new daemon. A bind failure
 		// (no tailnet, port taken) leaves the ticker running and taps off.
@@ -1031,6 +1041,8 @@ func tickerRun(cfg Config) error {
 		select {
 		case <-sig:
 			logger.Printf("ticker stopping")
+			cancelRunner()
+			runnerWG.Wait()
 			return nil
 		case <-timer.C:
 		}
