@@ -1,10 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 )
 
 // InboxCondition identifies the observation that keeps an item actionable.
@@ -192,4 +196,256 @@ func inboxDoneFiles(files []string) (int, error) {
 		}
 	}
 	return n, errors.Join(errs...)
+}
+
+const (
+	questionKindNeedsMe = "needs_me"
+	questionKindPrompt  = "prompt"
+)
+
+// InboxQuestion is one live decision waiting on a human: either a worker's
+// parseable approval prompt or a needs_me bead's OPTIONS question.
+// Pointer fields omit omitempty so JSON always emits explicit nulls.
+type InboxQuestion struct {
+	Bead           string                `json:"bead"`
+	Kind           string                `json:"kind"`
+	Question       string                `json:"question"`
+	Recommendation *int                  `json:"recommendation"`
+	Options        []InboxQuestionOption `json:"options"`
+	Class          *int                  `json:"class"`
+	BeadStatus     string                `json:"bead_status"`
+	Hash           *string               `json:"hash"`
+	Expires        *string               `json:"expires"`
+}
+
+// InboxQuestionOption is one numbered choice of an InboxQuestion.
+type InboxQuestionOption struct {
+	N     int    `json:"n"`
+	Label string `json:"label"`
+}
+
+type inboxQuestionsEnv struct {
+	active func() ([]Bead, error)
+	agents func(host string) ([]Agent, error)
+	prompt promptEnv
+	state  func() TickerState
+	warnf  func(format string, args ...any)
+}
+
+func liveInboxQuestionsEnv(cfg Config, h Herdr, errOut io.Writer) inboxQuestionsEnv {
+	hh := h.on(cfg.coordSocket())
+	return inboxQuestionsEnv{
+		active: Beads{}.Active,
+		agents: func(host string) ([]Agent, error) {
+			if host != localHost {
+				hc, ok := cfg.host(host)
+				if !ok || !hc.enabled() {
+					return nil, fmt.Errorf("host %q is not configured or enabled", host)
+				}
+			}
+			return cfg.herdrOn(hh, host).Agents()
+		},
+		prompt: livePromptEnv(cfg, hh),
+		state:  loadState,
+		warnf: func(format string, args ...any) {
+			if errOut != nil {
+				fmt.Fprintf(errOut, format+"\n", args...)
+			}
+		},
+	}
+}
+
+// inboxQuestions gathers the two live question sources — parseable worker
+// approval prompts and live needs_me OPTIONS questions — without minting tap
+// links or modifying inbox state. RUN: beads and already-answered questions
+// never appear.
+func inboxQuestions(env inboxQuestionsEnv) ([]InboxQuestion, error) {
+	beads, err := env.active()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]InboxQuestion, 0)
+	if len(beads) == 0 {
+		return out, nil
+	}
+	var st TickerState
+	if env.state != nil {
+		st = env.state()
+	}
+	hostSeen := map[string]bool{}
+	var hosts []string
+	for _, b := range beads {
+		host := beadHost(b)
+		if host == "" {
+			host = localHost
+		}
+		if !hostSeen[host] {
+			hostSeen[host] = true
+			hosts = append(hosts, host)
+		}
+	}
+	sort.Strings(hosts)
+	byHost := make(map[string]map[string]Agent, len(hosts))
+	if env.agents != nil {
+		for _, host := range hosts {
+			list, err := env.agents(host)
+			if err != nil {
+				if env.warnf != nil {
+					env.warnf("quartermaster: list agents on %s: %v", host, err)
+				}
+				continue
+			}
+			m := make(map[string]Agent, len(list))
+			for _, a := range list {
+				if a.Name != "" {
+					m[a.Name] = a
+				}
+			}
+			byHost[host] = m
+		}
+	}
+	for _, b := range beads {
+		host := beadHost(b)
+		if host == "" {
+			host = localHost
+		}
+		var a *Agent
+		if ag, ok := byHost[host][agentName(b.ID)]; ok {
+			agCopy := ag
+			a = &agCopy
+		}
+		th := restoreThreadEvidence(Thread{Bead: b, Agent: a}, st.Threads[b.ID]).derive()
+		if runCommand(th) != "" {
+			continue
+		}
+		if a != nil && a.Status == "blocked" {
+			if p, err := readAgentPrompt(env.prompt, host, a); err == nil {
+				out = append(out, promptInboxQuestion(b, p))
+				continue
+			}
+		}
+		if q, ok := liveQuestion(th); ok {
+			out = append(out, needsMeInboxQuestion(b, q))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Bead < out[j].Bead })
+	return out, nil
+}
+
+func promptInboxQuestion(b Bead, p ApprovalPrompt) InboxQuestion {
+	h := p.Hash
+	return InboxQuestion{
+		Bead:       b.ID,
+		Kind:       questionKindPrompt,
+		Question:   promptQuestionText(p),
+		Options:    questionOptions(p.Options),
+		BeadStatus: b.Status,
+		Hash:       &h,
+	}
+}
+
+func needsMeInboxQuestion(b Bead, q NeedsMeQuestion) InboxQuestion {
+	var class *int
+	if q.ClassN >= 0 {
+		c := q.ClassN
+		class = &c
+	}
+	// Hash stays nil for needs_me: its hash lives only bound inside signed
+	// tap tokens, never exposed as an --expect equivalent here.
+	return InboxQuestion{
+		Bead:           b.ID,
+		Kind:           questionKindNeedsMe,
+		Question:       strings.Join(q.Lines, "\n"),
+		Recommendation: q.recommendation(),
+		Options:        questionOptions(q.Options),
+		Class:          class,
+		BeadStatus:     b.Status,
+	}
+}
+
+// promptQuestionText formats a parsed approval prompt's header lines without
+// dropping the actual command behind a tool description or truncating it.
+func promptQuestionText(p ApprovalPrompt) string {
+	var lines []string
+	for _, l := range p.Lines {
+		if !strings.HasPrefix(l, "Tip:") {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) == 0 {
+		lines = p.Lines
+	}
+	if len(lines) == 0 {
+		return p.Summary()
+	}
+	return strings.Join(lines, "\n")
+}
+
+func questionOptions(opts []PromptOption) []InboxQuestionOption {
+	out := make([]InboxQuestionOption, len(opts))
+	for i, o := range opts {
+		out[i] = InboxQuestionOption{N: o.Number, Label: o.Label}
+	}
+	return out
+}
+
+func writeInboxQuestions(w io.Writer, qs []InboxQuestion, asJSON bool) error {
+	if qs == nil {
+		qs = []InboxQuestion{}
+	}
+	if asJSON {
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		return enc.Encode(qs)
+	}
+	if len(qs) == 0 {
+		_, err := fmt.Fprintln(w, "(none)")
+		return err
+	}
+	for _, q := range qs {
+		meta := []string{q.Kind}
+		if q.Hash != nil {
+			meta = append(meta, *q.Hash)
+		}
+		if q.Class != nil {
+			meta = append(meta, fmt.Sprintf("C%d", *q.Class))
+		}
+		if q.Recommendation != nil {
+			meta = append(meta, fmt.Sprintf("rec %d", *q.Recommendation))
+		}
+		opts := make([]string, len(q.Options))
+		for i, o := range q.Options {
+			opts[i] = fmt.Sprintf("%d %s", o.N, shortTitle(o.Label, 50))
+		}
+		if _, err := fmt.Fprintf(w, "- %s [%s] %s (%s)\n", q.Bead, strings.Join(meta, " · "), shortTitle(q.Question, 140), strings.Join(opts, " · ")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func inboxCmd(cfg Config, h Herdr, pos []string, questions, asJSON bool, out, errOut io.Writer) error {
+	if questions {
+		if len(pos) != 0 {
+			return errors.New("usage: quartermaster inbox --questions [--json]")
+		}
+		qs, err := inboxQuestions(liveInboxQuestionsEnv(cfg, h, errOut))
+		if err != nil {
+			return err
+		}
+		return writeInboxQuestions(out, qs, asJSON)
+	}
+	if asJSON {
+		return errors.New("--json applies to `quartermaster inbox --questions`, not `inbox done`")
+	}
+	if len(pos) == 0 || pos[0] != "done" {
+		return errors.New("usage: quartermaster inbox done [<bead>|<file>...] | quartermaster inbox --questions [--json]")
+	}
+	n, err := inboxDone(pos[1:])
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "%d item(s) marked done\n", n)
+	return nil
 }

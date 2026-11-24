@@ -461,6 +461,38 @@ const promptReadLines = 200
 
 var errNoPrompt = errors.New("no prompt showing")
 
+// readAgentPrompt reads the approval prompt a is showing: a pi worker's ask
+// over its control socket when it has one, else the prompt parsed from its
+// pane. Shared by workerPrompt and inbox --questions so both agree on what
+// prompt is live and what --expect hash identifies it.
+func readAgentPrompt(env promptEnv, host string, a *Agent) (ApprovalPrompt, error) {
+	// A pi worker with a control socket asks there, not on screen.
+	if env.piAsk != nil {
+		ask, ok, err := env.piAsk(host, a)
+		if ok {
+			if err != nil {
+				return ApprovalPrompt{}, fmt.Errorf("ask %s over its control socket: %w", a.Name, err)
+			}
+			if ask == nil {
+				return ApprovalPrompt{}, fmt.Errorf("%s (%s): %w", a.Name, a.Status, errNoPrompt)
+			}
+			return ask.prompt(), nil
+		}
+	}
+	if env.read == nil {
+		return ApprovalPrompt{}, fmt.Errorf("%s (%s): %w", a.Name, a.Status, errNoPrompt)
+	}
+	screen, err := env.read(host, a.PaneID)
+	if err != nil {
+		return ApprovalPrompt{}, err
+	}
+	p, ok := parsePrompt(screen)
+	if !ok {
+		return ApprovalPrompt{}, fmt.Errorf("%s (%s): %w", a.Name, a.Status, errNoPrompt)
+	}
+	return p, nil
+}
+
 // workerPrompt reads the prompt a bead's worker is showing.
 func workerPrompt(env promptEnv, id string) (ApprovalPrompt, string, *Agent, error) {
 	b, err := env.show(id)
@@ -478,26 +510,9 @@ func workerPrompt(env promptEnv, id string) (ApprovalPrompt, string, *Agent, err
 	if a == nil {
 		return ApprovalPrompt{}, host, nil, fmt.Errorf("%s has no worker running%s", id, onHost(host))
 	}
-	// A pi worker with a control socket asks there, not on screen.
-	if env.piAsk != nil {
-		ask, ok, err := env.piAsk(host, a)
-		if ok {
-			if err != nil {
-				return ApprovalPrompt{}, host, a, fmt.Errorf("ask %s over its control socket: %w", name, err)
-			}
-			if ask == nil {
-				return ApprovalPrompt{}, host, a, fmt.Errorf("%s (%s): %w", name, a.Status, errNoPrompt)
-			}
-			return ask.prompt(), host, a, nil
-		}
-	}
-	screen, err := env.read(host, a.PaneID)
+	p, err := readAgentPrompt(env, host, a)
 	if err != nil {
 		return ApprovalPrompt{}, host, a, err
-	}
-	p, ok := parsePrompt(screen)
-	if !ok {
-		return ApprovalPrompt{}, host, a, fmt.Errorf("%s (%s): %w", name, a.Status, errNoPrompt)
 	}
 	return p, host, a, nil
 }
