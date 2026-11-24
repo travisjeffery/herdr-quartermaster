@@ -42,13 +42,14 @@ Usage:
                                                        (no bead: read it from the clipboard)
   quartermaster headless enroll|run|pause|takeover|resume|status|watch|reports|ack
                                                        opt-in fenced native coordinator (docs/pi-headless.md)
-  quartermaster context                                the coordinator's per-turn digest
+  quartermaster context [--compact] [--section S,...] [--json]  the coordinator's per-turn digest
+                                                       (S: summary,autonomy,inbox,threads,linear,next,ready)
   quartermaster show <bead> [--json]                   show one bead from the configured Beads workspace (read-only)
   quartermaster memory get <key> [--json]              read one stored bd remember memory by key (read-only)
   quartermaster report [--since 24h|7d|YYYY-MM-DD]     Markdown of what shipped, merged, is in flight, needs you
-  quartermaster digest [--deliver T,...] [--always]    every open bead by state, what changed since the last run;
+  quartermaster digest [--deliver T,...] [--always] [--json]    every open bead by state, what changed since the last run;
                                                        writes digest.md, notifies when something changed or needs you
-                                                       (T: desktop, slack, stdout, none; default desktop)
+                                                       (T: desktop, slack, stdout, none; default desktop; --json writes JSON to stdout)
   quartermaster digest show|install|uninstall          page the last digest; set up or remove the hourly timer
   quartermaster inbox done [<bead>|<file>...]          mark inbox items handled (all if none given)
   quartermaster inbox --questions [--json]             list live approval prompts and needs_me OPTIONS questions
@@ -238,6 +239,9 @@ func run(args []string) error {
 	release := fs.Bool("release", false, "stale: set each stale claim back to open")
 	deliver := fs.String("deliver", defaultDeliver(), "digest: where to send it: desktop, slack, stdout, none (comma-separated)")
 	always := fs.Bool("always", false, "digest: notify even when nothing changed and nothing needs you")
+	compactFlag := fs.Bool("compact", false, "context: compact output under 4KB")
+	sectionFlag := &sectionList{}
+	fs.Var(sectionFlag, "section", "context: sections to render: summary,autonomy,inbox,threads,linear,next,ready (comma-separated, repeatable)")
 	actionFlag := fs.String("action", "", "autonomy check: the kind of step, from the action table (merge, apply, ...)")
 	classFlag := fs.Int("class", -1, "autonomy check: the step's impact class, 0-9; answer: the class of the command the answer releases")
 	targetFlag := fs.String("target", "", "autonomy check: the stack or environment an apply, deploy or rollout lands on")
@@ -245,10 +249,9 @@ func run(args []string) error {
 	forFlag := fs.Duration("for", 0, "autonomy level: how long a level 8 or 9 lease lasts (8 defaults to 4h); plan approve: how long the approval lasts (default 1h)")
 	expect := fs.String("expect", "", "answer: the hash of the prompt being answered, from quartermaster prompt")
 	questionsFlag := fs.Bool("questions", false, "inbox: list live approval prompts and needs_me OPTIONS questions")
-	jsonFlag := fs.Bool("json", false, "emit JSON output")
+	jsonFlag := fs.Bool("json", false, "context, digest, inbox, show, memory: emit JSON output")
 	reasonFlag := fs.String("reason", "", "close: what shipped and how it was verified")
 	by := fs.String("by", "coordinator", "dispatch, focus, resume, stale --release, answer, close: who decided; anyone but TJ needs the bead's autonomy level to reach the step's class")
-	jsonOut := fs.Bool("json", false, "show, memory: output in JSON format")
 	pos, err := interspersed(fs, rest)
 	if err != nil {
 		return err
@@ -295,24 +298,58 @@ func run(args []string) error {
 		h.Notify("quartermaster: "+id, msg)
 		fmt.Println(msg)
 	case "context":
-		st := loadState()
-		t := newTicker(cfg, log.New(os.Stderr, "", 0))
-		// The ticker refreshes PRs; context reads its last pass unless it is down.
-		if runningPID() != 0 {
-			st.LastGH = time.Now()
+		if len(pos) > 0 {
+			return fmt.Errorf("usage: quartermaster context [--compact] [--section %s] [--json]", strings.Join(contextSectionNames, ","))
 		}
-		threads, _, err := t.gather(&st, time.Now())
+		sections, err := parseContextSections(sectionFlag.values, sectionFlag.set)
 		if err != nil {
 			return err
 		}
-		next, _ := Beads{}.Next()
-		ready, _ := Beads{}.Ready()
-		inbox, _ := readInbox()
-		fmt.Print(renderContext(cfg, threads, next, ready, inbox, st, worktreed(cfg, h, threads, st.PRs), time.Now()))
+		var (
+			st      TickerState
+			threads []Thread
+			next    []Bead
+			ready   []Bead
+			inbox   []InboxItem
+			wt      map[string]bool
+		)
+		if sections.has(ctxSummary) || sections.has(ctxThreads) || sections.has(ctxLinear) {
+			st = loadState()
+			t := newTicker(cfg, log.New(os.Stderr, "", 0))
+			// The ticker refreshes PRs; context reads its last pass unless it is down.
+			if runningPID() != 0 {
+				st.LastGH = time.Now()
+			}
+			threads, _, err = t.gather(&st, time.Now())
+			if err != nil {
+				return err
+			}
+			if sections.has(ctxThreads) && !*compactFlag {
+				wt = worktreed(cfg, h, threads, st.PRs)
+			}
+		}
+		if sections.has(ctxNext) || sections.has(ctxReady) || (sections.has(ctxSummary) && !*compactFlag) {
+			next, _ = Beads{}.Next()
+		}
+		if sections.has(ctxReady) || (sections.has(ctxSummary) && !*compactFlag) {
+			ready, _ = Beads{}.Ready()
+		}
+		if sections.has(ctxInbox) {
+			inbox, _ = readInbox()
+		}
+		out, err := renderContextWith(cfg, threads, next, ready, inbox, st, wt, time.Now(), ContextOptions{
+			Compact:  *compactFlag,
+			Sections: sections,
+			JSON:     *jsonFlag,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Print(out)
 	case "show":
-		return showCmd(cfg.readBeads().Show, pos, *jsonOut, os.Stdout)
+		return showCmd(cfg.readBeads().Show, pos, *jsonFlag, os.Stdout)
 	case "memory":
-		return memoryCmd(cfg.readBeads().Recall, pos, *jsonOut, os.Stdout)
+		return memoryCmd(cfg.readBeads().Recall, pos, *jsonFlag, os.Stdout)
 	case "report":
 		now := time.Now()
 		since, err := parseSince(*sinceFlag, now)
@@ -331,7 +368,7 @@ func run(args []string) error {
 		}
 		switch sub {
 		case "":
-			return runDigest(cfg, *deliver, *always, os.Stdout)
+			return runDigest(cfg, *deliver, *always, *jsonFlag, os.Stdout)
 		case "show":
 			return showDigest(cfg)
 		case "install":
@@ -343,7 +380,7 @@ func run(args []string) error {
 			fmt.Print(strings.Join(append(lines, ""), "\n"))
 			return err
 		default:
-			return fmt.Errorf("usage: quartermaster digest [show|install|uninstall] [--deliver desktop,slack,stdout,none] [--always]")
+			return fmt.Errorf("usage: quartermaster digest [show|install|uninstall] [--deliver desktop,slack,stdout,none] [--always] [--json]")
 		}
 	case "inbox":
 		return inboxCmd(cfg, h, pos, *questionsFlag, *jsonFlag, os.Stdout, os.Stderr)

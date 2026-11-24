@@ -695,6 +695,114 @@ func renderDigest(d Digest) string {
 	return s.String()
 }
 
+type digestSummaryJSON struct {
+	Total      int    `json:"total"`
+	Stale      int    `json:"stale"`
+	NeedsYou   int    `json:"needs_you"`
+	Waiting    int    `json:"waiting"`
+	Merged     int    `json:"merged"`
+	RollingOut int    `json:"rolling_out"`
+	Blocked    int    `json:"blocked"`
+	InProgress int    `json:"in_progress"`
+	Ready      int    `json:"ready"`
+	Backlog    int    `json:"backlog"`
+	Headline   string `json:"headline"`
+	Quiet      string `json:"quiet"`
+}
+
+type digestItemJSON struct {
+	Bead      string    `json:"bead"`
+	Title     string    `json:"title"`
+	Status    string    `json:"status"`
+	Priority  int       `json:"priority"`
+	Assignee  string    `json:"assignee,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
+	Agent     string    `json:"agent,omitempty"`
+	Linear    string    `json:"linear,omitempty"`
+	Stale     bool      `json:"stale,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
+	Blockers  []string  `json:"blockers,omitempty"`
+	PR        *DigestPR `json:"pr"`
+	OpenPRs   int       `json:"open_prs,omitempty"`
+}
+
+type digestJSON struct {
+	At         time.Time         `json:"at"`
+	Summary    digestSummaryJSON `json:"summary"`
+	Warnings   []string          `json:"warnings,omitempty"`
+	Changes    []string          `json:"changes"`
+	NeedsYou   []digestItemJSON  `json:"needs_you"`
+	Waiting    []digestItemJSON  `json:"waiting"`
+	Merged     []digestItemJSON  `json:"merged"`
+	RollingOut []digestItemJSON  `json:"rolling_out"`
+	Blocked    []digestItemJSON  `json:"blocked"`
+	InProgress []digestItemJSON  `json:"in_progress"`
+	Ready      []digestItemJSON  `json:"ready"`
+	Backlog    []digestItemJSON  `json:"backlog"`
+}
+
+// renderDigestJSON encodes the digest sections as JSON, keyed by section name.
+func renderDigestJSON(d Digest) ([]byte, error) {
+	items := func(sec Section) []digestItemJSON {
+		src := d.Sections[sec]
+		out := make([]digestItemJSON, 0, len(src))
+		for _, it := range src {
+			out = append(out, digestItemJSON{
+				Bead:      it.Bead.ID,
+				Title:     it.Bead.Title,
+				Status:    it.Bead.Status,
+				Priority:  it.Bead.Priority,
+				Assignee:  it.Bead.Assignee,
+				UpdatedAt: it.Bead.UpdatedAt,
+				Agent:     it.Agent,
+				Linear:    it.Linear,
+				Stale:     it.Stale,
+				Detail:    itemDetail(it),
+				Blockers:  it.Blockers,
+				PR:        it.PR,
+				OpenPRs:   it.OpenPRs,
+			})
+		}
+		return out
+	}
+	changes := d.Changes
+	if changes == nil {
+		changes = []string{}
+	}
+	doc := digestJSON{
+		At: d.At,
+		Summary: digestSummaryJSON{
+			Total:      d.Total,
+			Stale:      d.stale(),
+			NeedsYou:   d.count(SecNeedsYou),
+			Waiting:    d.count(SecWaiting),
+			Merged:     d.count(SecMerged),
+			RollingOut: d.count(SecRollingOut),
+			Blocked:    d.count(SecBlocked),
+			InProgress: d.count(SecInProgress),
+			Ready:      d.count(SecReady),
+			Backlog:    d.count(SecBacklog),
+			Headline:   d.headline(),
+			Quiet:      d.quiet(),
+		},
+		Warnings:   d.Warnings,
+		Changes:    changes,
+		NeedsYou:   items(SecNeedsYou),
+		Waiting:    items(SecWaiting),
+		Merged:     items(SecMerged),
+		RollingOut: items(SecRollingOut),
+		Blocked:    items(SecBlocked),
+		InProgress: items(SecInProgress),
+		Ready:      items(SecReady),
+		Backlog:    items(SecBacklog),
+	}
+	b, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
 // summary is the notification: the counts as its title, then what changed
 // and the top of needs-you. top caps both lists.
 func (d Digest) summary(top int) (string, string) {
