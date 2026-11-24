@@ -33,34 +33,46 @@ life of the session; each request is dispatched to a physical model, and
 assistant messages record which one answered. One session, one worktree,
 any provider in the chain.
 
-- **Ordered physical model chains.** Both roles prefer
-  `antigravity/gemini-4-neon-xhigh` first, then fail over through Claude
-  (`anthropic/claude-opus-5-5` for workers, `anthropic/claude-fable-5-2`
-  for the coordinator) and OpenAI (`openai-codex/gpt-6.2-astra`).
-  Reasoning models receive the selected thinking level (`xhigh` unless
-  the launch sets another); fixed-tier non-reasoning models such as
-  `antigravity/gemini-4-neon-xhigh` receive `"off"`.
-  `[agents.pi] router_worker_models` and `router_coordinator_models`
-  replace the full ordered chains (and the legacy `router_worker_model`,
-  `router_coordinator_model`, and `router_fallback_model` fields remain
-  supported). Only physical models listed as available in pi are routed
-  to, so environments with a subset of providers (such as Antigravity
-  alone, or Claude and OpenAI without the Antigravity bridge) work
-  without extra configuration.
-- **Per-provider quota gating.** quartermaster writes one normalized
-  quota snapshot, `<state dir>/pi/quota.json`, from the Antigravity
-  statusline observation (`agy-statusline.observation.json`), Claude's
-  statusline observation, and Codex's latest rollout (a reading older
-  than 6h is stale). It is written on every pi launch and refreshed by
-  the ticker each minute, and the router reads it per request. Each
+- **Ordered physical model chains and per-model `:thinking` overrides.**
+  Both roles default to `antigravity/gemini-4-neon-xhigh` first, then fail
+  over through Claude (`anthropic/claude-opus-5-5` for workers,
+  `anthropic/claude-fable-5-2` for the coordinator) and OpenAI
+  (`openai-codex/gpt-6.2-astra`). Entries in `[agents.pi]`
+  `router_worker_models`, `router_coordinator_models`, and the legacy
+  singular `router_worker_model`, `router_coordinator_model`, and
+  `router_fallback_model` fields accept an optional `:thinking` suffix
+  (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`), e.g.
+  `anthropic/claude-opus-5-5:high`. Duplicate entries for the same
+  canonical `provider/model` are deduplicated keeping the first
+  occurrence. Fixed-tier non-reasoning models such as
+  `antigravity/gemini-4-neon-xhigh` always receive `"off"`; reasoning
+  models use the chain entry's `:thinking` override when set, else the
+  selected session thinking level (`xhigh` unless the launch sets
+  another). Only physical models listed as available in pi are routed to
+  (stripping `:thinking` during `pi --list-models` and registry lookup),
+  so environments with a subset of providers work without extra
+  configuration. Virtual-model display labels derive dynamically from the
+  configured provider order in `router.json` with a neutral
+  `(ordered failover)` fallback when no `router.json` is loaded.
+- **Per-provider quota gating and thresholds.** quartermaster writes one
+  normalized quota snapshot, `<state dir>/pi/quota.json`, from the
+  Antigravity statusline observation (`agy-statusline.observation.json`),
+  Claude's statusline observation, and Codex's latest rollout (a reading
+  older than 6h is stale). It is written on every pi launch and refreshed
+  by the ticker each minute, and the router reads it per request. Each
   candidate in the chain is gated **only** by its own provider's reading
-  (`antigravity/*` -> `quota.antigravity`, `anthropic/*` ->
-  `quota.claude`, `openai*/*` -> `quota.openai`), so low headroom on one
-  provider never moves a session off a different healthy provider. When
-  a fresh reading shows at most `router_threshold` percent left in its
-  tightest live window (default 20), new turns step to the next healthy
-  model in the chain; if every non-cooled candidate is low, the one with
-  the most headroom wins.
+  (known aliases `antigravity/*` -> `quota.antigravity`, `anthropic/*` ->
+  `quota.claude`, `openai*/*` -> `quota.openai`, plus generic lookup by
+  provider name for any additional provider key present in `quota.json`,
+  such as `google`, `vertex`, or `openrouter`), so low headroom on one
+  provider never moves a session off a different healthy provider. Global
+  `router_threshold` / `router_recover` (defaults 20 / 30) can be
+  overridden per provider under `[agents.pi.router_providers.<provider>]`
+  with optional `threshold` and `recover` percents (omitted bounds inherit
+  the global setting). When a fresh reading shows at most that provider's
+  threshold percent left in its tightest live window, new turns step to
+  the next healthy model in the chain; if every non-cooled candidate is
+  low, the one with the most headroom wins.
 - **Failover errors, cooldowns, and recovery.** Tool follow-ups stay
   sticky on the turn's physical model. On a retry after quota
   exhaustion, rate limits (`429`, `529`, `ResourceExhausted` /
@@ -70,11 +82,26 @@ any provider in the chain.
   (parsing `resets in <duration>` when present, else defaulting to 15m)
   and steps to the next healthy usable model in the chain. Once switched
   away for low quota, a provider is held out until a fresh reading
-  recovers to `router_recover` percent (default 30) or its tight window
-  resets; a quota cooldown clears when its reset time passes or a
-  strictly newer fresh reading reaches `router_recover`, and an auth
+  recovers to its effective `recover` percent or its tight window resets;
+  a quota cooldown clears when its reset time passes or a strictly newer
+  fresh reading reaches its effective `recover` percent, and an auth
   cooldown clears when its cooldown expires. Context overflow and
   ordinary network errors stay on the same model.
+- **Live reload without restarting the ticker.** On every minute refresh,
+  the ticker reloads `config.toml` before updating `router.json`, so edits
+  take effect on the next turn boundary without restarting the ticker or
+  live pi sessions. If `config.toml` has a transient syntax or validation
+  error while being edited, the ticker logs the error and preserves the
+  last known-good `router.json`.
+- **CLI inspection and updates.** Use `quartermaster router` (or
+  `quartermaster router status`) to inspect the effective worker and
+  coordinator chains, global and per-provider thresholds, `router.json`
+  sync status, and provider headroom/freshness from `quota.json`. Run
+  `quartermaster router sync` to validate `config.toml` and write
+  `router.json` immediately, or
+  `quartermaster router set worker|coordinator <model>...` to update the
+  ordered chain in `config.toml` (preserving comments, formatting, file
+  permissions, and unrelated settings) and sync `router.json` right away.
 - **No fresh quota.** A missing, stale or malformed snapshot never
   triggers a switch and never fails a request over quota data. (A
   provider already held out for low quota stays held until a fresh
@@ -88,24 +115,30 @@ any provider in the chain.
 
 ```toml
 [agents.pi]
-router_threshold = 20   # percent provider headroom left: switch at or below
-router_recover = 30     # percent: switch back at or above
+router_threshold = 20   # global percent provider headroom left: switch at or below
+router_recover = 30     # global percent: switch back at or above
 # router_worker_models = [
 #   "antigravity/gemini-4-neon-xhigh",
-#   "anthropic/claude-opus-5-5",
-#   "openai-codex/gpt-6.2-astra",
+#   "anthropic/claude-opus-5-5:high",
+#   "openai-codex/gpt-6.2-astra:xhigh",
 # ]
 # router_coordinator_models = [
 #   "antigravity/gemini-4-neon-xhigh",
-#   "anthropic/claude-fable-5-2",
-#   "openai-codex/gpt-6.2-astra",
+#   "anthropic/claude-fable-5-2:high",
+#   "openai-codex/gpt-6.2-astra:xhigh",
 # ]
+#
+# [agents.pi.router_providers.antigravity]
+# threshold = 10
+# recover = 25
 ```
 
-The physical chains and thresholds reach the extension as
-`<state dir>/pi/router.json`, named by `--quartermaster-router`, which
-quartermaster writes on each pi start and refreshes from the ticker, and
-the router re-reads per request.
+The physical chains, per-model `:thinking` overrides, and global/per-provider
+thresholds reach the extension as `<state dir>/pi/router.json`, named by
+`--quartermaster-router`, which quartermaster writes on each pi start,
+reloads from `config.toml` on ticker refreshes, and updates immediately on
+`quartermaster router sync` / `quartermaster router set`; the router
+re-reads it per request.
 
 ## Native RPC alternative
 

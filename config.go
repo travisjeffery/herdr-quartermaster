@@ -153,18 +153,29 @@ type AgentConfig struct {
 	// The pi virtual-model router (pi/router.ts, docs/pi.md): the ordered
 	// physical model chains quartermaster/worker-auto and
 	// quartermaster/coordinator-auto route through (defaulting to
-	// Antigravity Neon XHigh, then Claude, then OpenAI), and the per-provider
-	// headroom (percent left in the tightest live window) at or below which
-	// new turns switch to the next model, and at or above which they switch
-	// back. router_worker_model, router_coordinator_model and
-	// router_fallback_model remain supported for backward compatibility.
-	RouterWorkerModels      []string `toml:"router_worker_models"`
-	RouterCoordinatorModels []string `toml:"router_coordinator_models"`
-	RouterWorkerModel       string   `toml:"router_worker_model"`
-	RouterCoordinatorModel  string   `toml:"router_coordinator_model"`
-	RouterFallbackModel     string   `toml:"router_fallback_model"`
-	RouterThreshold         *float64 `toml:"router_threshold"`
-	RouterRecover           *float64 `toml:"router_recover"`
+	// Antigravity Neon XHigh, then Claude, then OpenAI), optional per-model
+	// :thinking suffixes (e.g. anthropic/claude-opus-5-5:high), global
+	// switch/recover headroom thresholds (percent left in the tightest live
+	// window), and optional per-provider threshold/recover overrides under
+	// [agents.pi.router_providers.<provider>]. router_worker_model,
+	// router_coordinator_model and router_fallback_model remain supported
+	// for backward compatibility.
+	RouterWorkerModels      []string                        `toml:"router_worker_models"`
+	RouterCoordinatorModels []string                        `toml:"router_coordinator_models"`
+	RouterWorkerModel       string                          `toml:"router_worker_model"`
+	RouterCoordinatorModel  string                          `toml:"router_coordinator_model"`
+	RouterFallbackModel     string                          `toml:"router_fallback_model"`
+	RouterThreshold         *float64                        `toml:"router_threshold"`
+	RouterRecover           *float64                        `toml:"router_recover"`
+	RouterProviders         map[string]RouterProviderConfig `toml:"router_providers"`
+}
+
+// RouterProviderConfig is [agents.pi.router_providers.<provider>]: optional
+// per-provider headroom thresholds for the pi virtual-model router. Omitted
+// bounds inherit [agents.pi] router_threshold / router_recover.
+type RouterProviderConfig struct {
+	Threshold *float64 `toml:"threshold"`
+	Recover   *float64 `toml:"recover"`
 }
 
 // defaultAgentArgs apply to a kind with no [agents.<kind>] table. Muse's

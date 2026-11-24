@@ -888,6 +888,7 @@ func tickerRun(cfg Config) error {
 	timer := time.NewTicker(cfg.tick())
 	defer timer.Stop()
 	var lastQuota time.Time
+	routerCfg := cfg
 	for {
 		st := loadState()
 		if err := t.once(&st); err != nil {
@@ -895,19 +896,11 @@ func tickerRun(cfg Config) error {
 		}
 		// Keep the pi quota router's extensions, config and snapshot fresh for
 		// sessions already running and new launches; a launch writes them too.
-		// A failed write only leaves the router on older readings, which age
-		// out on their own.
+		// Reload config.toml on each refresh so router edits apply live without
+		// restarting the ticker, keeping the last known-good config on parse error.
 		if now := time.Now(); now.Sub(lastQuota) >= time.Minute {
 			lastQuota = now
-			if _, err := piExtensionFile(); err != nil {
-				logger.Printf("pi extension: %v", err)
-			}
-			if _, err := cfg.writePiRouterConfig(); err != nil {
-				logger.Printf("pi router config: %v", err)
-			}
-			if err := writeQuotaSnapshot(now); err != nil {
-				logger.Printf("quota snapshot: %v", err)
-			}
+			refreshPiRouter(&routerCfg, loadConfig, now, logger.Printf)
 		}
 		if err := saveState(st); err != nil {
 			logger.Printf("state: %v", err)
@@ -918,6 +911,33 @@ func tickerRun(cfg Config) error {
 			return nil
 		case <-timer.C:
 		}
+	}
+}
+
+// refreshPiRouter keeps the embedded pi extension, router.json and quota.json
+// current on the ticker's periodic pass. It reloads config.toml via load before
+// writing router.json so configuration edits take effect without restarting the
+// ticker; if load fails (for example during an in-progress edit), it logs the
+// error, keeps *lastGood intact, and preserves any existing router.json on disk.
+func refreshPiRouter(lastGood *Config, load func() (Config, error), now time.Time, logf func(string, ...any)) {
+	if _, err := piExtensionFile(); err != nil {
+		logf("pi extension: %v", err)
+	}
+	if fresh, err := load(); err != nil {
+		logf("pi router config reload: %v (keeping last known-good config)", err)
+		if _, statErr := os.Stat(piRouterConfigPath()); errors.Is(statErr, fs.ErrNotExist) {
+			if _, werr := lastGood.writePiRouterConfig(); werr != nil {
+				logf("pi router config: %v", werr)
+			}
+		}
+	} else {
+		*lastGood = fresh
+		if _, err := lastGood.writePiRouterConfig(); err != nil {
+			logf("pi router config: %v", err)
+		}
+	}
+	if err := writeQuotaSnapshot(now); err != nil {
+		logf("quota snapshot: %v", err)
 	}
 }
 

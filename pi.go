@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -130,24 +131,79 @@ func isPiVirtualModel(model string) (role string, ok bool) {
 }
 
 // piRouterConfig is router.json beside the extension files: the ordered
-// physical model chains and thresholds pi/router.ts routes with, read on each
+// physical model chains (with optional :thinking suffixes), global thresholds,
+// and optional per-provider thresholds pi/router.ts routes with, read on each
 // request. WorkerModel, CoordinatorModel and FallbackModel stay populated for
 // backward compatibility with older router extensions.
 type piRouterConfig struct {
-	WorkerModels      []string `json:"worker_models"`
-	CoordinatorModels []string `json:"coordinator_models"`
-	WorkerModel       string   `json:"worker_model"`
-	CoordinatorModel  string   `json:"coordinator_model"`
-	FallbackModel     string   `json:"fallback_model"`
-	ThresholdPct      float64  `json:"threshold_pct"`
-	RecoverPct        float64  `json:"recover_pct"`
-	QuotaMaxAgeSecs   int64    `json:"quota_max_age_seconds"`
+	WorkerModels      []string                          `json:"worker_models"`
+	CoordinatorModels []string                          `json:"coordinator_models"`
+	WorkerModel       string                            `json:"worker_model"`
+	CoordinatorModel  string                            `json:"coordinator_model"`
+	FallbackModel     string                            `json:"fallback_model"`
+	ThresholdPct      float64                           `json:"threshold_pct"`
+	RecoverPct        float64                           `json:"recover_pct"`
+	Providers         map[string]piRouterProviderConfig `json:"providers,omitempty"`
+	QuotaMaxAgeSecs   int64                             `json:"quota_max_age_seconds"`
 }
 
+type piRouterProviderConfig struct {
+	ThresholdPct float64 `json:"threshold_pct"`
+	RecoverPct   float64 `json:"recover_pct"`
+}
+
+// piThinkingLevels matches pi's accepted thinking levels for :thinking suffixes.
+var piThinkingLevels = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+func isValidPiThinkingLevel(level string) bool {
+	return slices.Contains(piThinkingLevels, level)
+}
+
+// parsePiPhysicalModel splits a physical model entry ("provider/id" or
+// "provider/id:thinking") into its components. Rejects whitespace, "@",
+// colons in provider, empty segments, multiple colons, or unknown thinking levels.
+func parsePiPhysicalModel(m string) (provider, id, thinking string, ok bool) {
+	if m == "" || strings.ContainsAny(m, " \t\r\n@") {
+		return "", "", "", false
+	}
+	p, rest, hasSlash := strings.Cut(m, "/")
+	if !hasSlash || p == "" || rest == "" || strings.Contains(p, ":") {
+		return "", "", "", false
+	}
+	id = rest
+	if base, suffix, hasColon := strings.Cut(rest, ":"); hasColon {
+		if base == "" || !isValidPiThinkingLevel(suffix) {
+			return "", "", "", false
+		}
+		id, thinking = base, suffix
+	}
+	if id == "" || strings.HasPrefix(id, "/") || strings.HasSuffix(id, "/") || strings.Contains(id, "//") {
+		return "", "", "", false
+	}
+	return p, id, thinking, true
+}
+
+// piModelBase returns the canonical "provider/id" without any :thinking suffix.
+func piModelBase(m string) string {
+	if p, id, _, ok := parsePiPhysicalModel(m); ok {
+		return p + "/" + id
+	}
+	base, _, _ := strings.Cut(m, ":")
+	return base
+}
+
+// dedupePiModels deduplicates physical model entries by canonical provider/id,
+// keeping the first occurrence along with its optional :thinking override.
 func dedupePiModels(models []string) []string {
 	out := make([]string, 0, len(models))
+	seen := make(map[string]bool, len(models))
 	for _, m := range models {
-		if m != "" && !slices.Contains(out, m) {
+		if m == "" {
+			continue
+		}
+		key := piModelBase(m)
+		if !seen[key] {
+			seen[key] = true
 			out = append(out, m)
 		}
 	}
@@ -194,6 +250,29 @@ func (c Config) routerConfig() piRouterConfig {
 	if pc.RouterRecover != nil {
 		rc.RecoverPct = *pc.RouterRecover
 	}
+	if len(pc.RouterProviders) > 0 {
+		providers := make(map[string]piRouterProviderConfig, len(pc.RouterProviders))
+		for rawKey, pcfg := range pc.RouterProviders {
+			key := strings.ToLower(strings.TrimSpace(rawKey))
+			if key == "" {
+				continue
+			}
+			eff := piRouterProviderConfig{
+				ThresholdPct: rc.ThresholdPct,
+				RecoverPct:   rc.RecoverPct,
+			}
+			if pcfg.Threshold != nil {
+				eff.ThresholdPct = *pcfg.Threshold
+			}
+			if pcfg.Recover != nil {
+				eff.RecoverPct = *pcfg.Recover
+			}
+			providers[key] = eff
+		}
+		if len(providers) > 0 {
+			rc.Providers = providers
+		}
+	}
 	return rc
 }
 
@@ -223,24 +302,30 @@ func (c Config) writePiRouterConfig() (string, error) {
 }
 
 func validatePiPhysicalModel(name, m string) error {
-	if p, id, ok := strings.Cut(m, "/"); !ok || p == "" || id == "" || strings.ContainsAny(m, " \t") {
-		return fmt.Errorf("[agents.pi] %s %q: want provider/model", name, m)
+	p, id, _, ok := parsePiPhysicalModel(m)
+	if !ok {
+		return fmt.Errorf("[agents.pi] %s %q: want provider/model or provider/model:thinking (thinking: %s)", name, m, strings.Join(piThinkingLevels, ", "))
 	}
-	if _, virtual := isPiVirtualModel(m); virtual {
+	if _, virtual := isPiVirtualModel(p + "/" + id); virtual {
 		return fmt.Errorf("[agents.pi] %s %q: a virtual model cannot route to another virtual model; name a physical model", name, m)
 	}
 	return nil
 }
 
+func validPercent(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 && v <= 100
+}
+
 // validatePiRouter checks [agents.pi] router_*: physical models are
-// provider/id, thresholds are percents with recover not below threshold
-// (a lower recover would flap back the turn after switching), and the
+// provider/id[:thinking], thresholds are percents with recover not below
+// threshold (a lower recover would flap back the turn after switching),
+// per-provider overrides normalize cleanly without duplicates, and the
 // settings apply only to pi.
 func (c Config) validatePiRouter() error {
 	for kind, a := range c.Agents {
 		set := a.RouterWorkerModels != nil || a.RouterCoordinatorModels != nil ||
 			a.RouterWorkerModel != "" || a.RouterCoordinatorModel != "" || a.RouterFallbackModel != "" ||
-			a.RouterThreshold != nil || a.RouterRecover != nil
+			a.RouterThreshold != nil || a.RouterRecover != nil || len(a.RouterProviders) > 0
 		if kind != "pi" && set {
 			return fmt.Errorf("[agents.%s] router_* applies only to pi", kind)
 		}
@@ -284,12 +369,39 @@ func (c Config) validatePiRouter() error {
 	}
 	rc := c.routerConfig()
 	for name, v := range map[string]float64{"router_threshold": rc.ThresholdPct, "router_recover": rc.RecoverPct} {
-		if v < 0 || v > 100 {
+		if !validPercent(v) {
 			return fmt.Errorf("[agents.pi] %s %v: want a percent from 0 to 100", name, v)
 		}
 	}
 	if rc.RecoverPct < rc.ThresholdPct {
 		return fmt.Errorf("[agents.pi] router_recover %v is below router_threshold %v: it would switch back while still under the threshold", rc.RecoverPct, rc.ThresholdPct)
+	}
+	seenProviders := make(map[string]string, len(pc.RouterProviders))
+	for rawKey, pcfg := range pc.RouterProviders {
+		key := strings.ToLower(strings.TrimSpace(rawKey))
+		if key == "" || strings.ContainsAny(key, " \t\r\n/:@") {
+			return fmt.Errorf("[agents.pi.router_providers] %q: want a non-empty provider name without spaces, '/', ':' or '@'", rawKey)
+		}
+		if prev, dup := seenProviders[key]; dup {
+			return fmt.Errorf("[agents.pi.router_providers] duplicate provider %q (conflicts with %q)", rawKey, prev)
+		}
+		seenProviders[key] = rawKey
+		effTh, effRec := rc.ThresholdPct, rc.RecoverPct
+		if pcfg.Threshold != nil {
+			effTh = *pcfg.Threshold
+		}
+		if pcfg.Recover != nil {
+			effRec = *pcfg.Recover
+		}
+		if !validPercent(effTh) {
+			return fmt.Errorf("[agents.pi.router_providers.%s] threshold %v: want a percent from 0 to 100", key, effTh)
+		}
+		if !validPercent(effRec) {
+			return fmt.Errorf("[agents.pi.router_providers.%s] recover %v: want a percent from 0 to 100", key, effRec)
+		}
+		if effRec < effTh {
+			return fmt.Errorf("[agents.pi.router_providers.%s] effective recover %v is below effective threshold %v", key, effRec, effTh)
+		}
 	}
 	return nil
 }
@@ -370,9 +482,13 @@ func (c Config) checkPiVirtualModel(run piRunner, args []string, role, model, ro
 	rc := c.routerConfig()
 	chain := rc.modelsFor(routerRole)
 	for _, physical := range chain {
-		p, mid, ok := strings.Cut(physical, "/")
+		p, mid, _, ok := parsePiPhysicalModel(physical)
 		if !ok {
-			p, mid = "", physical
+			if pp, mm, hasSlash := strings.Cut(physical, "/"); hasSlash {
+				p, mid = pp, mm
+			} else {
+				p, mid = "", physical
+			}
 		}
 		out, _, err := run(append(slices.Clone(extArgs), "--list-models", mid)...)
 		if err != nil {
@@ -384,11 +500,14 @@ func (c Config) checkPiVirtualModel(run piRunner, args []string, role, model, ro
 	}
 	var errs []string
 	for _, physical := range chain {
-		p, _, ok := strings.Cut(physical, "/")
-		if !ok {
-			p = ""
+		p, mid, _, ok := parsePiPhysicalModel(physical)
+		base := physical
+		if ok {
+			base = p + "/" + mid
+		} else if pp, _, hasSlash := strings.Cut(physical, "/"); hasSlash {
+			p = pp
 		}
-		errs = append(errs, fmt.Sprintf("%s: %v", physical, explainMissingPiModel(run, role, physical, p)))
+		errs = append(errs, fmt.Sprintf("%s: %v", physical, explainMissingPiModel(run, role, base, p)))
 	}
 	return fmt.Errorf("%s has no usable physical model in [%s]: %s", model, strings.Join(chain, ", "), strings.Join(errs, "; "))
 }

@@ -65,6 +65,9 @@ Usage:
                                                        finished work (runs as the plugin popup)
   quartermaster ticker run|start|stop|status|notifications  background loop and desktop delivery receipts
   quartermaster tick                                   one ticker pass in the foreground
+  quartermaster router [status|sync]                   inspect Pi virtual-model router chains, thresholds, sync state
+                                                       and provider headroom; sync router.json from config.toml
+  quartermaster router set worker|coordinator M...     update ordered Pi router models in config.toml and sync router.json
   quartermaster configure [--repo PATH]                first-time setup: config, ~/.local/bin link, agent view
   quartermaster unconfigure                            stop the ticker, remove the view and sidebar tokens
   quartermaster autonomy level                         the dial: global level, max, leases, each active
@@ -445,6 +448,8 @@ func run(args []string) error {
 			return err
 		}
 		return saveState(st)
+	case "router":
+		return routerCmd(cfg, pos, os.Stdout)
 	case "startup":
 		// Herdr runs this when the plugin loads. Views don't survive a server
 		// restart, so the view is set again here.

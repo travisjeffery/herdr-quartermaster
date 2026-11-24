@@ -1,25 +1,30 @@
 // The quota router behind quartermaster's pi virtual models
 // (quartermaster/worker-auto and quartermaster/coordinator-auto), registered
 // by pi/quartermaster.ts. This module is pure: it parses the two JSON files
-// quartermaster writes (router.json: ordered physical model chains and
-// thresholds; quota.json: normalized subscription headroom from quota.go)
-// and decides the physical model for one request. The extension does the
-// file IO and the model-registry lookup, so the decision is testable offline
-// (testdata/pi-router-test.mjs, run by pirouter_test.go).
+// quartermaster writes (router.json: ordered physical model chains, optional
+// per-model :thinking overrides, and global/per-provider thresholds;
+// quota.json: normalized subscription headroom from quota.go) and decides the
+// physical model and thinking override for one request. The extension does
+// the file IO and the model-registry lookup, so the decision is testable
+// offline (testdata/pi-router-test.mjs, run by pirouter_test.go).
 //
 // Routing, at turn boundaries only:
 //   - Walk the role's ordered physical model chain (default: Antigravity
-//     Neon XHigh -> Claude -> OpenAI), optionally filtered to models usable
-//     in pi.
+//     Neon XHigh -> Claude -> OpenAI), deduplicated by canonical provider/id
+//     (first occurrence wins, preserving any :thinking override) and
+//     optionally filtered to models usable in pi.
 //   - Each candidate is gated ONLY by its own provider's quota reading
-//     (antigravity/* -> quota.antigravity, anthropic/* -> quota.claude,
-//     openai*/* -> quota.openai) and its own runtime failure cooldown. Low
-//     headroom on one provider never switches away from a different healthy
-//     provider.
-//   - A fresh provider reading at or below the threshold (default 20% left
-//     in the tightest live window) steps to the next healthy candidate in
+//     (known aliases: antigravity/* -> quota.antigravity, anthropic/* ->
+//     quota.claude, openai*/* -> quota.openai; any other provider key in
+//     quota.json is looked up by provider name) and its own runtime failure
+//     cooldown. Low headroom on one provider never switches away from a
+//     different healthy provider.
+//   - Each provider uses its configured per-provider threshold_pct /
+//     recover_pct when set in router.json's providers map, else the global
+//     threshold_pct / recover_pct (default 20% / 30%). A fresh provider
+//     reading at or below threshold steps to the next healthy candidate in
 //     the chain and holds off the low provider until a fresh reading
-//     recovers to recover_pct (default 30%) or its tight window resets.
+//     recovers to recover_pct or its tight window resets.
 //   - Continuations keep the previous physical model; retries keep the
 //     failed one unless it failed on quota, rate limits, provider
 //     unavailability, or expired/invalid auth tokens, when the retry puts
@@ -29,6 +34,13 @@
 //     never throws.
 //
 // @ts-nocheck
+
+export const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const VALID_THINKING_SET = new Set(VALID_THINKING_LEVELS);
+
+export function isValidThinkingLevel(v) {
+  return typeof v === "string" && VALID_THINKING_SET.has(v);
+}
 
 export const ROUTER_DEFAULTS = {
   worker_models: [
@@ -46,6 +58,7 @@ export const ROUTER_DEFAULTS = {
   fallback_model: "openai-codex/gpt-6.2-astra",
   threshold_pct: 20,
   recover_pct: 30,
+  providers: {},
   quota_max_age_seconds: 6 * 3600,
 };
 
@@ -53,16 +66,62 @@ export const DEFAULT_QUOTA_COOLDOWN_MS = 15 * 60 * 1000;
 export const DEFAULT_AUTH_COOLDOWN_MS = 15 * 60 * 1000;
 const MAX_RESET_DURATION_MS = 30 * 24 * 3600 * 1000;
 
-const MODEL_RE = /^[^/@\s]+\/[^/@\s]+$/;
-
-function modelOr(v, dflt) {
-  return typeof v === "string" && MODEL_RE.test(v) ? v : dflt;
+// parseModelSpec parses "provider/id" or "provider/id:thinking".
+// Rejects whitespace, "@", empty segments, colons in provider, invalid
+// thinking levels, or multiple colons.
+export function parseModelSpec(spec) {
+  if (typeof spec !== "string" || spec === "" || /[\s@]/.test(spec)) return null;
+  const slash = spec.indexOf("/");
+  if (slash <= 0 || slash === spec.length - 1) return null;
+  const provider = spec.slice(0, slash);
+  const rest = spec.slice(slash + 1);
+  if (provider.includes(":")) return null;
+  let id = rest;
+  let thinkingLevel = null;
+  const colon = rest.indexOf(":");
+  if (colon >= 0) {
+    id = rest.slice(0, colon);
+    const suffix = rest.slice(colon + 1);
+    if (!id || !isValidThinkingLevel(suffix)) return null;
+    thinkingLevel = suffix;
+  }
+  if (!id || id.startsWith("/") || id.endsWith("/") || id.includes("//")) return null;
+  const ref = provider + "/" + id;
+  return {
+    ref,
+    provider: provider.toLowerCase(),
+    rawProvider: provider,
+    id,
+    thinkingLevel,
+    raw: thinkingLevel ? ref + ":" + thinkingLevel : ref,
+  };
 }
 
+export function stripThinkingLevel(spec) {
+  const parsed = parseModelSpec(spec);
+  return parsed ? parsed.ref : "";
+}
+
+export function thinkingLevelOf(spec) {
+  const parsed = parseModelSpec(spec);
+  return parsed ? parsed.thinkingLevel : null;
+}
+
+function modelOr(v, dflt) {
+  const parsed = parseModelSpec(v);
+  return parsed ? parsed.raw : dflt;
+}
+
+// Deduplicate by canonical provider/id, keeping the first occurrence (along
+// with its optional :thinking override).
 function dedupeModels(list) {
   const out = [];
+  const seen = new Set();
   for (const m of list) {
-    if (typeof m === "string" && MODEL_RE.test(m) && !out.includes(m)) out.push(m);
+    const parsed = parseModelSpec(m);
+    if (!parsed || seen.has(parsed.ref)) continue;
+    seen.add(parsed.ref);
+    out.push(parsed.raw);
   }
   return out;
 }
@@ -77,12 +136,16 @@ export function providerOf(ref) {
   return i > 0 ? ref.slice(0, i).toLowerCase() : "";
 }
 
-export function quotaKeyForModel(ref) {
-  const p = providerOf(ref);
+function quotaKeyForProvider(p) {
+  if (!p) return null;
   if (p === "antigravity") return "antigravity";
   if (p === "anthropic") return "claude";
   if (p === "openai" || p.startsWith("openai-")) return "openai";
-  return null;
+  return p;
+}
+
+export function quotaKeyForModel(ref) {
+  return quotaKeyForProvider(providerOf(ref));
 }
 
 function sideOf(ref) {
@@ -94,10 +157,66 @@ function resolveRoleChain(rawChain, rawPrimary, fallback, defaultChain) {
     const parsed = dedupeModels(rawChain);
     if (parsed.length > 0) return parsed;
   }
-  if (typeof rawPrimary === "string" && MODEL_RE.test(rawPrimary)) {
+  if (parseModelSpec(rawPrimary)) {
     return dedupeModels([rawPrimary, fallback]);
   }
   return dedupeModels([...defaultChain.slice(0, -1), fallback]);
+}
+
+function parseProviderThresholds(rawProviders, globalThreshold, globalRecover) {
+  const out = {};
+  if (!rawProviders || typeof rawProviders !== "object" || Array.isArray(rawProviders)) return out;
+  for (const [rawKey, entry] of Object.entries(rawProviders)) {
+    const key = String(rawKey || "").trim().toLowerCase();
+    if (!key || !entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const threshold_pct = pctOr(entry.threshold_pct, globalThreshold);
+    let recover_pct = pctOr(entry.recover_pct, globalRecover);
+    if (recover_pct < threshold_pct) recover_pct = threshold_pct;
+    out[key] = { threshold_pct, recover_pct };
+  }
+  return out;
+}
+
+// thresholdsFor returns the effective {threshold_pct, recover_pct} for a
+// model ref or provider name: exact provider override wins, then quota-key
+// alias override (e.g. "openai" for "openai-codex", "claude" for "anthropic"),
+// then global defaults.
+export function thresholdsFor(cfg, refOrProvider) {
+  const globalTh = pctOr(cfg?.threshold_pct, ROUTER_DEFAULTS.threshold_pct);
+  let globalRec = pctOr(cfg?.recover_pct, ROUTER_DEFAULTS.recover_pct);
+  if (globalRec < globalTh) globalRec = globalTh;
+  const providers = cfg?.providers;
+  if (providers && typeof providers === "object") {
+    const prov =
+      typeof refOrProvider === "string" && refOrProvider.includes("/")
+        ? providerOf(refOrProvider)
+        : String(refOrProvider || "").trim().toLowerCase();
+    const alias = quotaKeyForProvider(prov);
+    const entry = (prov && providers[prov]) || (alias && providers[alias]) || null;
+    if (entry && typeof entry === "object") {
+      const th = pctOr(entry.threshold_pct, globalTh);
+      let rec = pctOr(entry.recover_pct, globalRec);
+      if (rec < th) rec = th;
+      return { threshold_pct: th, recover_pct: rec };
+    }
+  }
+  return { threshold_pct: globalTh, recover_pct: globalRec };
+}
+
+// formatVirtualModelName builds a dynamic provider-ordered label when a valid
+// router config is provided, or a clean neutral provider-agnostic label when
+// no config is loaded yet.
+export function formatVirtualModelName(role, cfg) {
+  const prefix = role === "coordinator" ? "Coordinator auto" : "Worker auto";
+  if (!cfg || typeof cfg !== "object") return prefix + " (ordered failover)";
+  const chain = roleChain(cfg, role);
+  const providers = [];
+  for (const spec of chain) {
+    const p = providerOf(spec);
+    if (p && !providers.includes(p)) providers.push(p);
+  }
+  if (providers.length === 0) return prefix + " (ordered failover)";
+  return prefix + " (" + providers.join(" -> ") + ")";
 }
 
 // parseRouterConfig is router.json with defaults for anything missing or
@@ -130,12 +249,14 @@ export function parseRouterConfig(text) {
     fallback_model: fallbackModel,
     threshold_pct: pctOr(raw.threshold_pct, ROUTER_DEFAULTS.threshold_pct),
     recover_pct: pctOr(raw.recover_pct, ROUTER_DEFAULTS.recover_pct),
+    providers: {},
     quota_max_age_seconds:
       typeof raw.quota_max_age_seconds === "number" && raw.quota_max_age_seconds > 0
         ? raw.quota_max_age_seconds
         : ROUTER_DEFAULTS.quota_max_age_seconds,
   };
   if (cfg.recover_pct < cfg.threshold_pct) cfg.recover_pct = cfg.threshold_pct;
+  cfg.providers = parseProviderThresholds(raw.providers, cfg.threshold_pct, cfg.recover_pct);
   return cfg;
 }
 
@@ -156,8 +277,10 @@ function providerReading(raw, nowMs, maxAgeMs) {
   };
 }
 
-// parseQuotaSnapshot is quota.json as {antigravity, claude, openai} readings,
-// each null when absent or malformed.
+// parseQuotaSnapshot parses quota.json into per-provider readings: known keys
+// (antigravity, claude, openai) are always present (null when absent or
+// malformed), and any additional provider keys (e.g. google, vertex,
+// openrouter) are parsed and included by lowercase provider name.
 export function parseQuotaSnapshot(text, nowMs, maxAgeMs) {
   let raw = null;
   try {
@@ -165,12 +288,19 @@ export function parseQuotaSnapshot(text, nowMs, maxAgeMs) {
   } catch {
     raw = null;
   }
-  if (!raw || typeof raw !== "object") return { antigravity: null, claude: null, openai: null };
-  return {
-    antigravity: providerReading(raw.antigravity, nowMs, maxAgeMs),
-    claude: providerReading(raw.claude, nowMs, maxAgeMs),
-    openai: providerReading(raw.openai, nowMs, maxAgeMs),
-  };
+  const out = { antigravity: null, claude: null, openai: null };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [rawKey, val] of Object.entries(raw)) {
+    const k = String(rawKey || "").trim().toLowerCase();
+    if (!k || k === "generated_at") continue;
+    const reading = providerReading(val, nowMs, maxAgeMs);
+    if (k === "antigravity" || k === "claude" || k === "openai") {
+      out[k] = reading;
+    } else if (reading !== null) {
+      out[k] = reading;
+    }
+  }
+  return out;
 }
 
 // quotaFailure reports whether a failed request's error looks like quota,
@@ -297,11 +427,21 @@ function roleChain(cfg, role) {
   return dedupeModels([primary, cfg.fallback_model]);
 }
 
+function freshReadingForProvider(quota, prov) {
+  if (!quota || typeof quota !== "object" || !prov) return null;
+  const p = String(prov).toLowerCase();
+  const direct = quota[p];
+  if (direct && direct.fresh) return direct;
+  const key = quotaKeyForProvider(p);
+  if (key && key !== p) {
+    const aliased = quota[key];
+    if (aliased && aliased.fresh) return aliased;
+  }
+  return null;
+}
+
 function freshReadingFor(quota, ref) {
-  const key = quotaKeyForModel(ref);
-  if (!key) return null;
-  const r = quota?.[key];
-  return r && r.fresh ? r : null;
+  return freshReadingForProvider(quota, providerOf(ref));
 }
 
 function buildState(chosen, why, nowMs, quota, lowQuota, cooldowns) {
@@ -324,7 +464,8 @@ function buildState(chosen, why, nowMs, quota, lowQuota, cooldowns) {
   };
 }
 
-// decideRoute picks the physical model ("provider/id") for one request.
+// decideRoute picks the physical model ("provider/id") and any per-model
+// thinkingLevel override for one request.
 //
 // input: {
 //   role: "worker" | "coordinator",
@@ -336,35 +477,51 @@ function buildState(chosen, why, nowMs, quota, lowQuota, cooldowns) {
 //   failedError: string,              // for retry: its error text
 //   state: router state | null,       // branch state from the last route
 // }
-// Returns {model, why, state?}: state is set only when it changed, so the
-// caller can return it (or undefined) as pi's docs ask.
+// Returns {model, thinkingLevel, why, state?}: model is canonical "provider/id",
+// thinkingLevel is the chain entry's explicit :thinking level or null, and
+// state is set only when it changed, so the caller can return it (or undefined)
+// as pi's docs ask.
 export function decideRoute(input) {
   const cfg = input.config || ROUTER_DEFAULTS;
   const quota = input.quota || { antigravity: null, claude: null, openai: null };
   const state = input.state && typeof input.state === "object" ? input.state : null;
   const nowMs = typeof input.nowMs === "number" ? input.nowMs : Date.now();
-  const fullChain = roleChain(cfg, input.role);
-  const usableSet = Array.isArray(input.usable) && input.usable.length > 0 ? new Set(input.usable) : null;
-  const candidates = usableSet ? fullChain.filter((m) => usableSet.has(m)) : fullChain;
-  const activeChain = candidates.length > 0 ? candidates : fullChain;
+  const fullEntries = roleChain(cfg, input.role)
+    .map((spec) => parseModelSpec(spec))
+    .filter((e) => e !== null);
+  const usableSet =
+    Array.isArray(input.usable) && input.usable.length > 0
+      ? new Set(input.usable.map((u) => stripThinkingLevel(u) || u).filter(Boolean))
+      : null;
+  const candidates = usableSet ? fullEntries.filter((e) => usableSet.has(e.ref)) : fullEntries;
+  const activeChain = candidates.length > 0 ? candidates : fullEntries;
+
+  const entryThinkingFor = (canonicalRef) => {
+    const found =
+      activeChain.find((e) => e.ref === canonicalRef) || fullEntries.find((e) => e.ref === canonicalRef);
+    return found ? found.thinkingLevel : null;
+  };
+
+  const prevRef = input.previous ? stripThinkingLevel(input.previous) || input.previous : null;
+  const failedRef = input.failed ? stripThinkingLevel(input.failed) || input.failed : null;
 
   // Sticky within a turn: tool follow-ups stay on the model that is
   // handling the turn, keeping its prompt cache and reasoning state.
-  if (input.reason === "continuation" && input.previous) {
-    return { model: input.previous, why: "sticky:continuation" };
+  if (input.reason === "continuation" && prevRef) {
+    return { model: prevRef, thinkingLevel: entryThinkingFor(prevRef), why: "sticky:continuation" };
   }
 
   // Direct requests (compaction summaries, extension calls) have no branch
   // state; follow the turn's model when there is one.
-  if (input.reason === "direct" && input.previous) {
-    return { model: input.previous, why: "sticky:direct" };
+  if (input.reason === "direct" && prevRef) {
+    return { model: prevRef, thinkingLevel: entryThinkingFor(prevRef), why: "sticky:direct" };
   }
 
   const prevLowQuota = normalizeLowQuota(state);
   const nextCooldowns = normalizeCooldowns(state);
 
   // Clear expired cooldowns and quota cooldowns cleared by a strictly newer
-  // fresh reading above recover_pct.
+  // fresh reading above that provider's effective recover_pct.
   const recoveredCooldownProviders = new Set();
   for (const [prov, cd] of Object.entries(nextCooldowns)) {
     const untilMs = Date.parse(cd.until);
@@ -375,25 +532,28 @@ export function decideRoute(input) {
       continue;
     }
     if (cd.kind === "quota") {
-      const sampleModel = activeChain.find((m) => providerOf(m) === prov);
-      const reading = sampleModel ? freshReadingFor(quota, sampleModel) : null;
-      if (reading && Number.isFinite(atMs) && reading.atMs > atMs && reading.headroom >= cfg.recover_pct) {
+      const sampleEntry = activeChain.find((e) => e.provider === prov);
+      const reading = sampleEntry ? freshReadingFor(quota, sampleEntry.ref) : freshReadingForProvider(quota, prov);
+      const th = thresholdsFor(cfg, sampleEntry ? sampleEntry.ref : prov);
+      if (reading && Number.isFinite(atMs) && reading.atMs > atMs && reading.headroom >= th.recover_pct) {
         delete nextCooldowns[prov];
         recoveredCooldownProviders.add(prov);
       }
     }
   }
 
-  // Evaluate a candidate's quota status using ONLY its own provider's reading.
-  const evaluateQuota = (ref, lowQuotaMap) => {
-    const prov = providerOf(ref);
-    const reading = freshReadingFor(quota, ref);
+  // Evaluate a candidate's quota status using ONLY its own provider's reading
+  // and its effective threshold_pct / recover_pct.
+  const evaluateQuota = (entry, lowQuotaMap) => {
+    const prov = entry.provider;
+    const reading = freshReadingFor(quota, entry.ref);
+    const th = thresholdsFor(cfg, entry.ref);
     const lq = lowQuotaMap[prov];
     if (lq) {
       const resetMs = typeof lq.tight_resets_at === "string" ? Date.parse(lq.tight_resets_at) : NaN;
       const windowReset =
-        Number.isFinite(resetMs) && nowMs >= resetMs && reading !== null && reading.headroom > cfg.threshold_pct;
-      if (reading && reading.headroom >= cfg.recover_pct) {
+        Number.isFinite(resetMs) && nowMs >= resetMs && reading !== null && reading.headroom > th.threshold_pct;
+      if (reading && reading.headroom >= th.recover_pct) {
         delete lowQuotaMap[prov];
         return { low: false, reading, recovered: "recovered" };
       }
@@ -404,14 +564,14 @@ export function decideRoute(input) {
       if (
         (lq.tight_resets_at == null || (Number.isFinite(resetMs) && nowMs >= resetMs)) &&
         reading &&
-        reading.headroom <= cfg.threshold_pct &&
+        reading.headroom <= th.threshold_pct &&
         reading.tightResetsAtMs != null
       ) {
         lowQuotaMap[prov] = { tight_resets_at: new Date(reading.tightResetsAtMs).toISOString() };
       }
       return { low: true, reading, recovered: null };
     }
-    if (reading && reading.headroom <= cfg.threshold_pct) {
+    if (reading && reading.headroom <= th.threshold_pct) {
       lowQuotaMap[prov] = {
         tight_resets_at: reading.tightResetsAtMs != null ? new Date(reading.tightResetsAtMs).toISOString() : null,
       };
@@ -423,19 +583,20 @@ export function decideRoute(input) {
   // Retries: stay on the failed model unless it failed with a retryable
   // failover error (quota, rate limit, ResourceExhausted, overloaded, or
   // expired/invalid auth token).
-  if (input.reason === "retry" && input.failed) {
+  if (input.reason === "retry" && failedRef) {
     const kind = failoverKind(input.failedError);
     if (!kind) {
-      return { model: input.failed, why: "sticky:retry" };
+      return { model: failedRef, thinkingLevel: entryThinkingFor(failedRef), why: "sticky:retry" };
     }
-    const failedProv = providerOf(input.failed);
+    const failedProv = providerOf(failedRef);
+    const failedTh = thresholdsFor(cfg, failedRef);
     const parsedResetMs = parseResetDurationMs(input.failedError);
     let untilMs;
     if (parsedResetMs != null) {
       untilMs = nowMs + parsedResetMs;
     } else if (kind === "quota") {
-      const r = freshReadingFor(quota, input.failed);
-      if (r && r.headroom <= cfg.threshold_pct && r.tightResetsAtMs != null && r.tightResetsAtMs > nowMs) {
+      const r = freshReadingFor(quota, failedRef);
+      if (r && r.headroom <= failedTh.threshold_pct && r.tightResetsAtMs != null && r.tightResetsAtMs > nowMs) {
         untilMs = r.tightResetsAtMs;
       } else {
         untilMs = nowMs + DEFAULT_QUOTA_COOLDOWN_MS;
@@ -452,58 +613,64 @@ export function decideRoute(input) {
     }
 
     const nextLowQuota = { ...prevLowQuota };
-    let chosen = null;
+    let chosenEntry = null;
     let why = "";
     const lowAlternatives = [];
 
-    for (const ref of activeChain) {
-      if (ref === input.failed) continue;
-      const prov = providerOf(ref);
+    for (const entry of activeChain) {
+      if (entry.ref === failedRef) continue;
+      const prov = entry.provider;
       if (nextCooldowns[prov]) continue;
-      const q = evaluateQuota(ref, nextLowQuota);
+      const q = evaluateQuota(entry, nextLowQuota);
       if (!q.low) {
-        chosen = ref;
+        chosenEntry = entry;
         why = "retry:failover-" + kind;
         break;
       }
-      lowAlternatives.push({ ref, headroom: q.reading ? q.reading.headroom : -1 });
+      lowAlternatives.push({ entry, headroom: q.reading ? q.reading.headroom : -1 });
     }
-    if (!chosen && lowAlternatives.length > 0) {
+    if (!chosenEntry && lowAlternatives.length > 0) {
       lowAlternatives.sort((a, b) => b.headroom - a.headroom);
-      chosen = lowAlternatives[0].ref;
-      delete nextLowQuota[providerOf(chosen)];
+      chosenEntry = lowAlternatives[0].entry;
+      delete nextLowQuota[chosenEntry.provider];
       why = "retry:failover-" + kind + "-low-quota";
     }
-    if (!chosen) {
-      chosen = input.failed;
+    const chosenRef = chosenEntry ? chosenEntry.ref : failedRef;
+    const chosenThinking = chosenEntry ? chosenEntry.thinkingLevel : entryThinkingFor(failedRef);
+    if (!chosenEntry) {
       why = "retry:all-providers-cooled-down";
     }
 
-    const next = buildState(chosen, why, nowMs, quota, nextLowQuota, nextCooldowns);
-    return { model: chosen, why, state: stateChanged(state, next) ? next : undefined };
+    const next = buildState(chosenRef, why, nowMs, quota, nextLowQuota, nextCooldowns);
+    return {
+      model: chosenRef,
+      thinkingLevel: chosenThinking,
+      why,
+      state: stateChanged(state, next) ? next : undefined,
+    };
   }
 
   // Turn boundary ("user", or "direct" without a previous model): walk the
   // ordered chain and pick the first candidate that is neither cooled down nor
   // low on its own provider's quota.
   const nextLowQuota = { ...prevLowQuota };
-  let chosen = null;
+  let chosenEntry = null;
   let why = "";
   const nonCooledLow = [];
   const cooled = [];
 
   for (let i = 0; i < activeChain.length; i++) {
-    const ref = activeChain[i];
-    const prov = providerOf(ref);
+    const entry = activeChain[i];
+    const prov = entry.provider;
     const cd = nextCooldowns[prov];
     if (cd) {
-      cooled.push({ ref, untilMs: Date.parse(cd.until) || Infinity });
+      cooled.push({ entry, untilMs: Date.parse(cd.until) || Infinity });
       continue;
     }
-    const q = evaluateQuota(ref, nextLowQuota);
+    const q = evaluateQuota(entry, nextLowQuota);
     if (!q.low) {
-      chosen = ref;
-      const side = sideOf(ref);
+      chosenEntry = entry;
+      const side = sideOf(entry.ref);
       if (q.recovered) {
         why = side + ":" + q.recovered;
       } else if (recoveredCooldownProviders.has(prov)) {
@@ -511,13 +678,13 @@ export function decideRoute(input) {
       } else if (i === 0) {
         why = q.reading ? side + ":headroom-ok" : side + ":no-fresh-quota";
       } else {
-        const prevSkippedCooling = activeChain.slice(0, i).some((m) => !!nextCooldowns[providerOf(m)]);
-        const prevSkippedLow = activeChain.slice(0, i).some((m) => !!nextLowQuota[providerOf(m)]);
-        const wasSame = state?.model === ref || state?.side === side;
+        const prevSkippedCooling = activeChain.slice(0, i).some((m) => !!nextCooldowns[m.provider]);
+        const prevSkippedLow = activeChain.slice(0, i).some((m) => !!nextLowQuota[m.provider]);
+        const wasSame = state?.model === entry.ref || state?.side === side;
         if (wasSame && prevSkippedLow && !prevSkippedCooling) {
           const prevLowHasFresh = activeChain
             .slice(0, i)
-            .some((m) => !!nextLowQuota[providerOf(m)] && freshReadingFor(quota, m) !== null);
+            .some((m) => !!nextLowQuota[m.provider] && freshReadingFor(quota, m.ref) !== null);
           why = prevLowHasFresh ? side + ":holding" : side + ":holding-no-fresh-quota";
         } else if (prevSkippedCooling) {
           why = side + ":failover-cooldown";
@@ -527,36 +694,41 @@ export function decideRoute(input) {
       }
       break;
     }
-    nonCooledLow.push({ ref, idx: i, headroom: q.reading ? q.reading.headroom : -1 });
+    nonCooledLow.push({ entry, idx: i, headroom: q.reading ? q.reading.headroom : -1 });
   }
 
-  if (!chosen && nonCooledLow.length > 0) {
+  if (!chosenEntry && nonCooledLow.length > 0) {
     // Every non-cooled candidate is low on its own quota: pick the one with
     // the highest fresh headroom (preferring earlier chain order on ties).
     let best = nonCooledLow[0];
     for (const c of nonCooledLow.slice(1)) {
       if (c.headroom > best.headroom) best = c;
     }
-    chosen = best.ref;
-    why = sideOf(chosen) + ":all-low-more-headroom";
+    chosenEntry = best.entry;
+    why = sideOf(chosenEntry.ref) + ":all-low-more-headroom";
     // Only keep low_quota markers for higher-priority providers skipped in
     // favor of the winner; do not mark the winner itself as held out.
     for (let i = best.idx; i < activeChain.length; i++) {
-      delete nextLowQuota[providerOf(activeChain[i])];
+      delete nextLowQuota[activeChain[i].provider];
     }
   }
 
-  if (!chosen) {
+  if (!chosenEntry) {
     // Every candidate is in active cooldown: pick the one whose cooldown
     // expires soonest so routing still returns a valid physical model.
     cooled.sort((a, b) => a.untilMs - b.untilMs);
-    chosen = cooled[0]?.ref || activeChain[0];
-    why = sideOf(chosen) + ":all-providers-cooled-down";
+    chosenEntry = cooled[0]?.entry || activeChain[0];
+    why = sideOf(chosenEntry.ref) + ":all-providers-cooled-down";
   }
 
-  const next = buildState(chosen, why, nowMs, quota, nextLowQuota, nextCooldowns);
+  const next = buildState(chosenEntry.ref, why, nowMs, quota, nextLowQuota, nextCooldowns);
   // State is branch state for agent-loop requests only; direct requests
   // neither read nor keep it.
   const keep = input.reason !== "direct" && stateChanged(state, next);
-  return { model: chosen, why, state: keep ? next : undefined };
+  return {
+    model: chosenEntry.ref,
+    thinkingLevel: chosenEntry.thinkingLevel,
+    why,
+    state: keep ? next : undefined,
+  };
 }
