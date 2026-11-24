@@ -105,6 +105,10 @@ type Config struct {
 	// Desktop configures event-driven desktop notifications (`notify-send`)
 	// delivered by the ticker; see desktop.go and docs/desktop-alerts.md.
 	Desktop DesktopConfig `toml:"desktop"`
+
+	// StallRetry configures bounded automatic recovery when a pi worker stops
+	// a turn on a transient ACP stall error (stallretry.go).
+	StallRetry StallRetryConfig `toml:"stall_retry"`
 }
 
 // DesktopConfig is [desktop]: controls event-driven desktop notifications
@@ -407,6 +411,7 @@ func defaultConfig() Config {
 		VerifyMax:             20,
 		GHMinRemaining:        1000,
 		Autonomy:              AutonomyConfig{Level: 4, Max: maxStanding, Widespread: 5, Budget: BudgetConfig{Steps: 30, Applies: 3, Dispatches: 5}},
+		StallRetry:            StallRetryConfig{MaxRetries: defaultStallMaxRetries, BackoffSeconds: defaultStallBackoffSeconds},
 	}
 }
 
@@ -570,6 +575,9 @@ func loadConfig() (Config, error) {
 	}
 	if cfg.PromptDebounceSeconds < 0 {
 		return cfg, fmt.Errorf("prompt_debounce_seconds %d is negative; use 0 to disable the prompt debounce", cfg.PromptDebounceSeconds)
+	}
+	if err := cfg.validateStallRetry(); err != nil {
+		return cfg, err
 	}
 	if cfg.Repo == "" {
 		return cfg, errNoRepo

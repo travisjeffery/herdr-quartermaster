@@ -902,6 +902,10 @@ needs_me = true           # bead enters needs_me or worker hits an approval prom
 blocked = true            # bead enters blocked status
 needs_me_summary = true   # include bead ID + 1-line sanitized summary (never tap URLs or secrets)
 cooldown_seconds = 60     # minimum interval between desktop alerts; bursts coalesce (0 disables)
+
+[stall_retry]             # bounded ticker auto-retry when a pi worker stops on a transient ACP stall
+max_retries = 2           # max auto-nudges per stall episode before escalating to inbox; 0 disables
+backoff_seconds = 30      # base cooldown before retrying; doubles per attempt (30s, 60s, ...), capped at 10m
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts

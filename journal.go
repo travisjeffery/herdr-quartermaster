@@ -43,6 +43,9 @@ const (
 	journalWorkflow = "workflow"
 	// journalJob is a durable async coordinator job event (job.go).
 	journalJob = "job"
+	// journalStallRetry is a bounded ticker auto-retry or escalation after a
+	// transient ACP stall (stallretry.go).
+	journalStallRetry = "stall_retry"
 )
 
 type journalRecord struct {
