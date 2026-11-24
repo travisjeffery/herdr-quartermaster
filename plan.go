@@ -452,25 +452,11 @@ func planCmd(cfg Config, show func(string) (Bead, error), pos []string, by strin
 		}
 		return checkPlanFor(cfg, show, p, now, w)
 	case "approve":
-		if by != "TJ" {
-			return fmt.Errorf("%w: plan approve is TJ's (--by TJ); the dial approves with plan check", errNotAutonomous)
+		out, err := approvePlan(cfg, show, pos[1], by, ttl, "", now)
+		if out != "" {
+			fmt.Fprint(w, out)
 		}
-		p, digest, err := loadPlan(pos[1])
-		if err != nil {
-			return err
-		}
-		class, _ := classifyPlan(cfg, show, p)
-		e := planEvent{At: now, Kind: planApproved, Class: class, Level: -1, Pass: true, By: "TJ", Expires: now.Add(ttl)}
-		if err := appendPlanEvent(digest, e); err != nil {
-			return err
-		}
-		fmt.Fprintf(w, "plan %s (%s, class %d) approved by TJ until %s\n", short(digest), p.Bead, class, e.Expires.Format("15:04"))
-		if events, _ := readPlanEvents(digest); unfinished(events) || slices.ContainsFunc(events, func(e planEvent) bool { return e.Kind == planNeedsMe || e.Kind == planExpired }) {
-			if s := planRunState(events, digest); !strings.HasPrefix(s, "done") && !strings.HasPrefix(s, "failed") {
-				fmt.Fprintf(w, "its run stopped; continue it: quartermaster plan resume %s\n", digest)
-			}
-		}
-		return appendJournal(journalRecord{At: now, Kind: journalCheck, Bead: p.Bead, Class: class, Action: "plan", Pass: true, Text: "plan " + short(digest) + " approved by TJ"})
+		return err
 	case "run":
 		data, err := readPlanArg(pos[1], stdin)
 		if err != nil {
@@ -497,6 +483,51 @@ func planCmd(cfg Config, show func(string) (Bead, error), pos []string, by strin
 		return nil
 	}
 	return errors.New(planUsage)
+}
+
+// approvePlan records TJ's approval of a checked execution plan under digest
+// (or a unique prefix of 8+), appending the approved event and journaling the
+// decision. via, when set (for example "tap (device iphone181)"), records the
+// approval transport and device identity in both the event evidence and the
+// journal.
+func approvePlan(cfg Config, show func(string) (Bead, error), ref, by string, ttl time.Duration, via string, now time.Time) (string, error) {
+	if by != "TJ" {
+		return "", fmt.Errorf("%w: plan approve is TJ's (--by TJ); the dial approves with plan check", errNotAutonomous)
+	}
+	if ttl <= 0 {
+		ttl = approvalTTL
+	}
+	p, digest, err := loadPlan(ref)
+	if err != nil {
+		return "", err
+	}
+	class, _ := classifyPlan(cfg, show, p)
+	e := planEvent{At: now, Kind: planApproved, Class: class, Level: -1, Pass: true, By: "TJ", Expires: now.Add(ttl)}
+	if via != "" {
+		e.Evidence = "via " + via
+	}
+	if err := appendPlanEvent(digest, e); err != nil {
+		return "", err
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "plan %s (%s, class %d) approved by TJ", short(digest), p.Bead, class)
+	if via != "" {
+		fmt.Fprintf(&sb, " via %s", via)
+	}
+	fmt.Fprintf(&sb, " until %s\n", e.Expires.Format("15:04"))
+	if events, _ := readPlanEvents(digest); unfinished(events) || slices.ContainsFunc(events, func(e planEvent) bool { return e.Kind == planNeedsMe || e.Kind == planExpired }) {
+		if s := planRunState(events, digest); !strings.HasPrefix(s, "done") && !strings.HasPrefix(s, "failed") {
+			fmt.Fprintf(&sb, "its run stopped; continue it: quartermaster plan resume %s\n", digest)
+		}
+	}
+	text := "plan " + short(digest) + " approved by TJ"
+	if via != "" {
+		text += " via " + via
+	}
+	if err := appendJournal(journalRecord{At: now, Kind: journalCheck, Bead: p.Bead, Class: class, Action: "plan", Pass: true, Text: text}); err != nil {
+		return sb.String(), err
+	}
+	return sb.String(), nil
 }
 
 func readPlanArg(arg string, stdin io.Reader) ([]byte, error) {
