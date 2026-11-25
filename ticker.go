@@ -108,6 +108,9 @@ type Ticker struct {
 	inboxRunnerEnv *inboxRunnerEnv
 	inboxRunnerCtx context.Context
 	inboxRunnerWG  *sync.WaitGroup
+	notifyEnv      *notifyEnv
+	notifyCtx      context.Context
+	notifyWG       *sync.WaitGroup
 	now            func() time.Time
 }
 
@@ -469,6 +472,7 @@ func (t Ticker) once(st *TickerState) error {
 			if notifyErr := reconcileDesktopWith(threads, nil, t.cfg.Desktop, now, submitDesktopMessage); notifyErr != nil {
 				t.log.Printf("desktop notifications: %v", notifyErr)
 			}
+			t.reconcileNotify(threads, nil, now)
 		}
 		return err
 	}
@@ -604,7 +608,7 @@ func (t Ticker) once(st *TickerState) error {
 			}
 		}
 		alertThreads = append(alertThreads, th)
-		desktopMilestones = append(desktopMilestones, desktopMilestonesForTransition(th, prev, !seen, t.cfg.Desktop)...)
+		desktopMilestones = append(desktopMilestones, transitionMilestones(th, prev, !seen)...)
 		if out.Notify && desktopReason(th) == "" && classify(th) != GroupNeedsYou {
 			if err := t.herdr.Notify(fmt.Sprintf("%s: %s", id, classify(th)), shortTitle(th.Bead.Title, 60)); err != nil {
 				t.log.Printf("desktop notification submission failed: %v", err)
@@ -643,6 +647,7 @@ func (t Ticker) once(st *TickerState) error {
 	if err := reconcileDesktopWith(alertThreads, desktopMilestones, t.cfg.Desktop, now, submitDesktopMessage); err != nil {
 		t.log.Printf("desktop notifications: %v", err)
 	}
+	t.reconcileNotify(alertThreads, desktopMilestones, now)
 	watchOutcomes := t.checkWatches(threads, agents, now)
 	if coord, ok := agents[t.cfg.CoordinatorName]; ok {
 		inbox, _ := readInbox()
@@ -670,6 +675,28 @@ func (t Ticker) once(st *TickerState) error {
 	t.nudgeCoordinator(st, agents, now)
 	t.triggerInboxRunner(st, agents, now)
 	return nil
+}
+
+func (t Ticker) reconcileNotify(threads []Thread, milestones []desktopMilestone, now time.Time) {
+	if !t.cfg.Notify.enabled() {
+		return
+	}
+	var env notifyEnv
+	if t.notifyEnv != nil {
+		env = *t.notifyEnv
+	} else {
+		env = liveNotifyEnv(t.cfg, t.log.Printf)
+	}
+	if env.logf == nil && t.log != nil {
+		env.logf = t.log.Printf
+	}
+	ctx := t.notifyCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := reconcileNotifyWith(ctx, t.cfg, env, threads, milestones, now, t.notifyWG); err != nil {
+		t.log.Printf("outbound notifications: %v", err)
+	}
 }
 
 // launchMismatch is the ready workers, by agent name, whose launch mode no
@@ -1024,6 +1051,11 @@ func tickerRun(cfg Config) error {
 	var runnerWG sync.WaitGroup
 	t.inboxRunnerCtx = runnerCtx
 	t.inboxRunnerWG = &runnerWG
+	notifyCtx, cancelNotify := context.WithCancel(context.Background())
+	defer cancelNotify()
+	var notifyWG sync.WaitGroup
+	t.notifyCtx = notifyCtx
+	t.notifyWG = &notifyWG
 	if cfg.Tap.Enabled {
 		// The tap endpoint rides the ticker: no new daemon. A bind failure
 		// (no tailnet, port taken) leaves the ticker running and taps off.
@@ -1062,7 +1094,9 @@ func tickerRun(cfg Config) error {
 		case <-sig:
 			logger.Printf("ticker stopping")
 			cancelRunner()
+			cancelNotify()
 			runnerWG.Wait()
+			notifyWG.Wait()
 			return nil
 		case <-timer.C:
 		}

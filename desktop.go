@@ -58,6 +58,7 @@ type desktopMilestone struct {
 	Bead    string
 	Reason  string // pr_merged, pr_green, pr_ready
 	Summary string
+	PR      string
 }
 
 func desktopDir() string  { return filepath.Join(stateDir(), "desktop") }
@@ -155,23 +156,23 @@ func desktopPRIdentity(pr PR) string {
 	return fmt.Sprintf("#%d", pr.Number)
 }
 
-// desktopMilestonesForTransition derives event-driven PR desktop milestones
-// from a thread transition. First sight is a baseline so startup never replays
-// historical PR states.
-func desktopMilestonesForTransition(th Thread, prev Snapshot, first bool, cfg DesktopConfig) []desktopMilestone {
-	if first || !cfg.enabled() {
+// transitionMilestones derives all event-driven PR milestones from a thread
+// transition independently of [desktop] toggles so both desktop and [notify]
+// sinks observe the same transitions. First sight is a baseline so startup
+// never replays historical PR states.
+func transitionMilestones(th Thread, prev Snapshot, first bool) []desktopMilestone {
+	if first {
 		return nil
 	}
 	var out []desktopMilestone
-	if cfg.notifyPRMerged() {
-		for _, pr := range newlyMerged(th, prev) {
-			out = append(out, desktopMilestone{
-				Key:     desktopMilestoneKey("pr_merged", th.Bead.ID, desktopPRIdentity(pr)),
-				Bead:    th.Bead.ID,
-				Reason:  "pr_merged",
-				Summary: formatPRMergedSummary(th.Bead.ID, pr),
-			})
-		}
+	for _, pr := range newlyMerged(th, prev) {
+		out = append(out, desktopMilestone{
+			Key:     desktopMilestoneKey("pr_merged", th.Bead.ID, desktopPRIdentity(pr)),
+			Bead:    th.Bead.ID,
+			Reason:  "pr_merged",
+			Summary: formatPRMergedSummary(th.Bead.ID, pr),
+			PR:      prName(pr),
+		})
 	}
 	if th.PR != nil && th.PR.State == "OPEN" && th.Bead.Status != StatusNeedsMe {
 		rk := readyKey(th)
@@ -179,24 +180,38 @@ func desktopMilestonesForTransition(th Thread, prev Snapshot, first bool, cfg De
 		readyFired := false
 		if rk != "" && rk != prev.ReadyKey {
 			readyFired = true
-			if cfg.notifyPRReady() {
-				out = append(out, desktopMilestone{
-					Key:     desktopMilestoneKey("pr_ready", th.Bead.ID, rk),
-					Bead:    th.Bead.ID,
-					Reason:  "pr_ready",
-					Summary: formatPRReadySummary(th.Bead.ID, *th.PR),
-				})
-			}
+			out = append(out, desktopMilestone{
+				Key:     desktopMilestoneKey("pr_ready", th.Bead.ID, rk),
+				Bead:    th.Bead.ID,
+				Reason:  "pr_ready",
+				Summary: formatPRReadySummary(th.Bead.ID, *th.PR),
+				PR:      prName(*th.PR),
+			})
 		}
 		if !readyFired && rk == "" && gk != "" && prev.GreenTracked && gk != prev.GreenKey {
-			if cfg.notifyPRGreen() {
-				out = append(out, desktopMilestone{
-					Key:     desktopMilestoneKey("pr_green", th.Bead.ID, gk),
-					Bead:    th.Bead.ID,
-					Reason:  "pr_green",
-					Summary: formatPRGreenSummary(th.Bead.ID, *th.PR, th.Checks),
-				})
-			}
+			out = append(out, desktopMilestone{
+				Key:     desktopMilestoneKey("pr_green", th.Bead.ID, gk),
+				Bead:    th.Bead.ID,
+				Reason:  "pr_green",
+				Summary: formatPRGreenSummary(th.Bead.ID, *th.PR, th.Checks),
+				PR:      prName(*th.PR),
+			})
+		}
+	}
+	return out
+}
+
+// desktopMilestonesForTransition derives event-driven PR desktop milestones
+// from a thread transition filtered by [desktop] configuration. First sight is
+// a baseline so startup never replays historical PR states.
+func desktopMilestonesForTransition(th Thread, prev Snapshot, first bool, cfg DesktopConfig) []desktopMilestone {
+	if !cfg.enabled() {
+		return nil
+	}
+	var out []desktopMilestone
+	for _, m := range transitionMilestones(th, prev, first) {
+		if cfg.allowsMilestone(m.Reason) {
+			out = append(out, m)
 		}
 	}
 	return out

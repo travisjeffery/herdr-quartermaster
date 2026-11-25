@@ -410,6 +410,7 @@ type inboxRunnerEnv struct {
 	coordDir      func() string
 	execCmd       func(ctx context.Context, cfg Config, dir string, argv []string, prompt string) inboxRunnerExecResult
 	notify        func(title, body string) desktopResult
+	notifyEnv     *notifyEnv
 	logf          func(format string, args ...any)
 }
 
@@ -1193,36 +1194,60 @@ func execInboxRunnerCommand(parentCtx context.Context, cfg Config, dir string, a
 	}
 }
 
-func notifyInboxRunnerResult(cfg Config, env inboxRunnerEnv, res inboxRunnerResult, kinds []string) {
-	if !cfg.InboxRunner.notifyEnabled() || !cfg.Desktop.enabled() || env.notify == nil {
+func notifyInboxRunnerResult(ctx context.Context, cfg Config, env inboxRunnerEnv, res inboxRunnerResult, kinds []string, now time.Time) {
+	if !cfg.InboxRunner.notifyEnabled() {
 		return
 	}
 	total := len(res.Eligible)
+	unique := slices.Compact(slices.Sorted(slices.Values(kinds)))
+	var title, body string
 	switch {
 	case res.ExitStatus == "timeout":
-		body := fmt.Sprintf("Timed out after %ds on %d inbox %s; run quartermaster inbox-runner status.",
+		title = "Quartermaster: inbox runner timed out"
+		body = fmt.Sprintf("Timed out after %ds on %d inbox %s; run quartermaster inbox-runner status.",
 			int(cfg.InboxRunner.timeout()/time.Second), total, plural(total, "item"))
-		r := env.notify("Quartermaster: inbox runner timed out", body)
-		if r.State != "submitted" {
-			env.log("inbox-runner desktop notify: %s (%s)", r.State, r.Reason)
-		}
 	case res.ExitStatus == "error":
-		body := fmt.Sprintf("Failed on %d inbox %s; run quartermaster inbox-runner status.",
+		title = "Quartermaster: inbox runner failed"
+		body = fmt.Sprintf("Failed on %d inbox %s; run quartermaster inbox-runner status.",
 			total, plural(total, "item"))
-		r := env.notify("Quartermaster: inbox runner failed", body)
-		if r.State != "submitted" {
-			env.log("inbox-runner desktop notify: %s (%s)", r.State, r.Reason)
-		}
 	case res.Acked > 0:
-		unique := slices.Compact(slices.Sorted(slices.Values(kinds)))
 		detail := ""
 		if len(unique) > 0 {
 			detail = " (" + strings.Join(unique, ", ") + ")"
 		}
-		body := fmt.Sprintf("Handled %d/%d inbox %s%s.", res.Acked, total, plural(total, "item"), detail)
-		r := env.notify("Quartermaster: headless inbox runner", body)
+		title = "Quartermaster: headless inbox runner"
+		body = fmt.Sprintf("Handled %d/%d inbox %s%s.", res.Acked, total, plural(total, "item"), detail)
+	default:
+		return
+	}
+	if cfg.Desktop.enabled() && env.notify != nil {
+		r := env.notify(title, body)
 		if r.State != "submitted" {
 			env.log("inbox-runner desktop notify: %s (%s)", r.State, r.Reason)
+		}
+	}
+	if cfg.Notify.enabled() {
+		var nEnv notifyEnv
+		if env.notifyEnv != nil {
+			nEnv = *env.notifyEnv
+		} else {
+			nEnv = liveNotifyEnv(cfg, env.logf)
+		}
+		if nEnv.logf == nil {
+			nEnv.logf = env.logf
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		info := NotifyRunnerInfo{
+			ExitStatus: res.ExitStatus,
+			Acked:      res.Acked,
+			Eligible:   total,
+			Kinds:      unique,
+			DurationMs: res.Duration.Milliseconds(),
+		}
+		if err := dispatchNotifyInboxRunner(ctx, cfg, nEnv, title, body, info, now); err != nil {
+			env.log("inbox-runner outbound notify: %v", err)
 		}
 	}
 }
@@ -1411,7 +1436,7 @@ func executeInboxRunnerLocked(ctx context.Context, cfg Config, env inboxRunnerEn
 		ErrSummary: errSummary,
 		Plan:       plan,
 	}
-	notifyInboxRunnerResult(cfg, env, res, kinds)
+	notifyInboxRunnerResult(ctx, cfg, env, res, kinds, finishedAt)
 
 	if execRes.Err != nil {
 		return res, fmt.Errorf("headless inbox runner %s: %s", exitStatus, errSummary)
