@@ -434,6 +434,17 @@ lifecycle action.
   `quartermaster inbox-runner status [--json]` and
   `quartermaster inbox-runner run [--dry-run]`; disable anytime with
   `enabled = false`. See [docs/inbox-runner.md](docs/inbox-runner.md).
+- **Outbound notification sinks (opt-in).** Configure `[[notify.webhooks]]`
+  (JSON envelope or plain text, with `url_env` and `header_envs` so secrets stay
+  out of `config.toml`) and `[[notify.commands]]` (direct argv without shell,
+  JSON on stdin, process-group timeout) under `[notify]` to push privacy-safe,
+  sanitized notifications for ticker milestones, blockers, and headless inbox
+  runner updates — independently of `[desktop] enabled = false`. Delivery state
+  and per-sink cooldown queues persist atomically in `<state>/notify/status.json`
+  (0600) so bursts coalesce without dropping across restarts. Inspect or test
+  with `quartermaster notify status [--json]` and
+  `quartermaster notify test [--sink <name>]`. See
+  [docs/notifications.md](docs/notifications.md).
 - **Bot reviews** (Codex, CodeRabbit and other GitHub Apps) are told apart from
   human ones. Both go to the worker; only a human review notifies you.
 - **Resume.** Herdr restarts don't relaunch agents. `quartermaster resume` restarts
@@ -961,6 +972,22 @@ blocked = true            # bead enters blocked status
 needs_me_summary = true   # include bead ID + 1-line sanitized summary (never tap URLs or secrets)
 cooldown_seconds = 60     # minimum interval between desktop alerts; bursts coalesce (0 disables)
 
+# [[notify.webhooks]]     # opt-in outbound webhook sinks (docs/notifications.md); works even with [desktop] enabled = false
+# name = "ops-webhook"
+# url_env = "QUARTERMASTER_NOTIFY_URL"          # or url = "https://..." (http/https only)
+# header_envs = { Authorization = "QUARTERMASTER_NOTIFY_AUTH" }
+# events = ["pr_merged", "pr_green", "pr_ready", "needs_me", "blocked", "worker_blocked", "inbox_runner"]
+# format = "json"         # "json" (default) or "text"
+# timeout_seconds = 5     # default 5, capped at 30
+# cooldown_seconds = 30   # per-sink coalesce cooldown (default 30; 0 disables)
+#
+# [[notify.commands]]     # opt-in outbound command sinks (direct argv, JSON on stdin, Setpgid timeout)
+# name = "bridge-cli"
+# argv = ["/usr/local/bin/notify-bridge", "--stdin"]
+# events = ["needs_me", "pr_merged", "inbox_runner"]
+# timeout_seconds = 5
+# cooldown_seconds = 30
+
 [stall_retry]             # bounded ticker auto-retry when a pi worker stops on a transient ACP stall
 max_retries = 2           # max auto-nudges per stall episode before escalating to inbox; 0 disables
 backoff_seconds = 30      # base cooldown before retrying; doubles per attempt (30s, 60s, ...), capped at 10m
@@ -1269,6 +1296,8 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster inbox --questions [--json]` | List live worker approval prompts and active `needs_me` `OPTIONS:` questions (read-only; excludes `RUN:` beads, parked/snoozed beads, and already-answered questions, never mints tap links; `hash` carries the `--expect` hash for `prompt` and `null` for `needs_me`). |
 | `quartermaster inbox-runner run [--dry-run]` | Run one single-flight headless coordinator turn for allowlisted non-human-gated inbox items while the interactive coordinator is idle or closed (`--dry-run` evaluates eligibility and prints what would run without executing or mutating state). See [docs/inbox-runner.md](docs/inbox-runner.md). |
 | `quartermaster inbox-runner status [--json]` | Inspect `[inbox_runner]` enabled state, lock state, interactive coordinator check, cooldown, inbox eligibility counts, last run status/diagnostics, and persisted per-file attempt counts. |
+| `quartermaster notify status [--json]` | Inspect configured outbound `[notify]` webhook and command sinks (redacted targets/headers), subscribed events, cooldown, pending counts, and durable last delivery status/timestamp/error. See [docs/notifications.md](docs/notifications.md). |
+| `quartermaster notify test [--sink <name>]` | Send a synthetic `event: "test"` notification to all configured `[notify]` sinks (or one named sink), printing redacted per-sink results and exiting nonzero if no sinks are configured or any targeted sink fails. |
 | `quartermaster snooze <bead> <duration> [--reason R]` | Temporarily park a `needs_me` bead out of the Active list (`30m`, `4h`, `3d`, `1w`) until expiry or fresh bead activity; `quartermaster snooze <bead> --clear` removes it, and bare `quartermaster snooze [--json]` lists active snoozes. |
 | `quartermaster resume [<bead>...] [--agent K]` | Restart exited workers in their worktrees, continuing their last conversation. |
 | `quartermaster stale [--days N] [--release]` | List claims with no agent, worktree or PR untouched N days (7); `--release` reopens them. |

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -115,6 +117,12 @@ type Config struct {
 	// delivered by the ticker; see desktop.go and docs/desktop-alerts.md.
 	Desktop DesktopConfig `toml:"desktop"`
 
+	// Notify configures opt-in generic outbound notification sinks
+	// ([[notify.webhooks]] and [[notify.commands]]) for ticker milestones,
+	// blockers, and headless inbox runner updates; see notify.go and
+	// docs/notifications.md. Empty/disabled by default.
+	Notify NotifyConfig `toml:"notify"`
+
 	// StallRetry configures bounded automatic recovery when a pi worker stops
 	// a turn on a transient ACP stall error (stallretry.go).
 	StallRetry StallRetryConfig `toml:"stall_retry"`
@@ -202,6 +210,231 @@ func (c DesktopConfig) cooldown() time.Duration {
 func (c Config) validateDesktop() error {
 	if c.Desktop.CooldownSeconds != nil && *c.Desktop.CooldownSeconds < 0 {
 		return fmt.Errorf("[desktop] cooldown_seconds %d is negative; use 0 to disable cooldown", *c.Desktop.CooldownSeconds)
+	}
+	return nil
+}
+
+const (
+	defaultNotifyTimeoutSeconds  = 5
+	maxNotifyTimeoutSeconds      = 30
+	defaultNotifyCooldownSeconds = 30
+)
+
+var notifyAllEvents = []string{
+	"pr_merged",
+	"pr_green",
+	"pr_ready",
+	"needs_me",
+	"blocked",
+	"worker_blocked",
+	"inbox_runner",
+}
+
+var notifyKnownEvents = map[string]bool{
+	"pr_merged":      true,
+	"pr_green":       true,
+	"pr_ready":       true,
+	"needs_me":       true,
+	"blocked":        true,
+	"worker_blocked": true,
+	"inbox_runner":   true,
+}
+
+// NotifyConfig is [notify] in config.toml: opt-in generic outbound notification
+// sinks (webhooks and commands). Empty/disabled by default so upgrading changes
+// nothing until configured.
+type NotifyConfig struct {
+	// Enabled turns configured outbound notification sinks on or off
+	// (default true when at least one sink is configured).
+	Enabled  *bool                 `toml:"enabled"`
+	Webhooks []NotifyWebhookConfig `toml:"webhooks"`
+	Commands []NotifyCommandConfig `toml:"commands"`
+}
+
+// NotifyWebhookConfig is one [[notify.webhooks]] sink.
+type NotifyWebhookConfig struct {
+	Name            string            `toml:"name"`
+	URL             string            `toml:"url"`
+	URLEnv          string            `toml:"url_env"`
+	Headers         map[string]string `toml:"headers"`
+	HeaderEnvs      map[string]string `toml:"header_envs"`
+	Events          []string          `toml:"events"`
+	Format          string            `toml:"format"`
+	TimeoutSeconds  *int              `toml:"timeout_seconds"`
+	CooldownSeconds *int              `toml:"cooldown_seconds"`
+}
+
+// NotifyCommandConfig is one [[notify.commands]] sink.
+type NotifyCommandConfig struct {
+	Name            string   `toml:"name"`
+	Argv            []string `toml:"argv"`
+	Events          []string `toml:"events"`
+	TimeoutSeconds  *int     `toml:"timeout_seconds"`
+	CooldownSeconds *int     `toml:"cooldown_seconds"`
+}
+
+func (c NotifyConfig) hasSinks() bool { return len(c.Webhooks) > 0 || len(c.Commands) > 0 }
+func (c NotifyConfig) enabled() bool  { return c.hasSinks() && desktopBool(c.Enabled, true) }
+
+func notifyTimeout(p *int) time.Duration {
+	if p == nil || *p <= 0 {
+		return defaultNotifyTimeoutSeconds * time.Second
+	}
+	secs := min(*p, maxNotifyTimeoutSeconds)
+	return time.Duration(secs) * time.Second
+}
+
+func notifyCooldown(p *int) time.Duration {
+	if p == nil {
+		return defaultNotifyCooldownSeconds * time.Second
+	}
+	if *p <= 0 {
+		return 0
+	}
+	return time.Duration(*p) * time.Second
+}
+
+func notifyEffectiveEvents(events []string) []string {
+	if events == nil {
+		return slices.Clone(notifyAllEvents)
+	}
+	seen := make(map[string]bool, len(events))
+	out := make([]string, 0, len(events))
+	for _, ev := range events {
+		if !seen[ev] {
+			seen[ev] = true
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+func (w NotifyWebhookConfig) effectiveFormat() string {
+	if w.Format == "" {
+		return "json"
+	}
+	return w.Format
+}
+
+func (w NotifyWebhookConfig) timeout() time.Duration    { return notifyTimeout(w.TimeoutSeconds) }
+func (w NotifyWebhookConfig) cooldown() time.Duration   { return notifyCooldown(w.CooldownSeconds) }
+func (w NotifyWebhookConfig) effectiveEvents() []string { return notifyEffectiveEvents(w.Events) }
+func (w NotifyWebhookConfig) subscribes(event string) bool {
+	return slices.Contains(w.effectiveEvents(), event)
+}
+
+func (c NotifyCommandConfig) timeout() time.Duration    { return notifyTimeout(c.TimeoutSeconds) }
+func (c NotifyCommandConfig) cooldown() time.Duration   { return notifyCooldown(c.CooldownSeconds) }
+func (c NotifyCommandConfig) effectiveEvents() []string { return notifyEffectiveEvents(c.Events) }
+func (c NotifyCommandConfig) subscribes(event string) bool {
+	return slices.Contains(c.effectiveEvents(), event)
+}
+
+var httpHeaderNameRE = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]+$`)
+
+func validateNotifyURL(raw string) (*url.URL, error) {
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return nil, errors.New("URL must be non-empty without surrounding whitespace")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, errors.New("invalid URL syntax")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		if scheme == "" {
+			return nil, errors.New("URL must include http:// or https:// scheme")
+		}
+		return nil, fmt.Errorf("disallowed URL scheme %q (only http and https are allowed)", scheme)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return nil, errors.New("URL must include a host")
+	}
+	return u, nil
+}
+
+func validateNotifySinkCommon(kind, name string, events []string, timeoutSec, cooldownSec *int, seen map[string]bool) error {
+	if name == "" || strings.TrimSpace(name) != name {
+		return fmt.Errorf("[notify.%s] name must be non-empty without surrounding whitespace", kind)
+	}
+	if seen[name] {
+		return fmt.Errorf("[notify] duplicate sink name %q", name)
+	}
+	seen[name] = true
+	if events != nil && len(events) == 0 {
+		return fmt.Errorf("[notify.%s %q] events must not be empty (omit to subscribe to all events)", kind, name)
+	}
+	for _, ev := range events {
+		if !notifyKnownEvents[ev] {
+			return fmt.Errorf("[notify.%s %q] unknown event %q", kind, name, ev)
+		}
+	}
+	if timeoutSec != nil && *timeoutSec < 0 {
+		return fmt.Errorf("[notify.%s %q] timeout_seconds %d is negative", kind, name, *timeoutSec)
+	}
+	if cooldownSec != nil && *cooldownSec < 0 {
+		return fmt.Errorf("[notify.%s %q] cooldown_seconds %d is negative; use 0 to disable cooldown", kind, name, *cooldownSec)
+	}
+	return nil
+}
+
+func (c Config) validateNotify() error {
+	seen := make(map[string]bool, len(c.Notify.Webhooks)+len(c.Notify.Commands))
+	for _, w := range c.Notify.Webhooks {
+		if err := validateNotifySinkCommon("webhooks", w.Name, w.Events, w.TimeoutSeconds, w.CooldownSeconds, seen); err != nil {
+			return err
+		}
+		hasURL := strings.TrimSpace(w.URL) != ""
+		hasURLEnv := strings.TrimSpace(w.URLEnv) != ""
+		if hasURL == hasURLEnv {
+			return fmt.Errorf("[notify.webhooks %q] set exactly one of url or url_env", w.Name)
+		}
+		if hasURL {
+			if _, err := validateNotifyURL(w.URL); err != nil {
+				return fmt.Errorf("[notify.webhooks %q] url: %v", w.Name, err)
+			}
+		}
+		if hasURLEnv && !envNameRE.MatchString(w.URLEnv) {
+			return fmt.Errorf("[notify.webhooks %q] invalid url_env %q", w.Name, w.URLEnv)
+		}
+		if w.Format != "" && w.Format != "json" && w.Format != "text" {
+			return fmt.Errorf("[notify.webhooks %q] unknown format %q (want json or text)", w.Name, w.Format)
+		}
+		headerKeys := make(map[string]string, len(w.Headers)+len(w.HeaderEnvs))
+		for k, v := range w.Headers {
+			if !httpHeaderNameRE.MatchString(k) {
+				return fmt.Errorf("[notify.webhooks %q] invalid header name %q", w.Name, k)
+			}
+			if strings.ContainsAny(v, "\r\n") {
+				return fmt.Errorf("[notify.webhooks %q] header %q value must not contain CR or LF", w.Name, k)
+			}
+			canon := http.CanonicalHeaderKey(k)
+			if prev, dup := headerKeys[canon]; dup {
+				return fmt.Errorf("[notify.webhooks %q] duplicate header %q (conflicts with %q)", w.Name, k, prev)
+			}
+			headerKeys[canon] = k
+		}
+		for k, envVar := range w.HeaderEnvs {
+			if !httpHeaderNameRE.MatchString(k) {
+				return fmt.Errorf("[notify.webhooks %q] invalid header_envs header name %q", w.Name, k)
+			}
+			if !envNameRE.MatchString(envVar) {
+				return fmt.Errorf("[notify.webhooks %q] header_envs[%q] invalid env var %q", w.Name, k, envVar)
+			}
+			canon := http.CanonicalHeaderKey(k)
+			if prev, dup := headerKeys[canon]; dup {
+				return fmt.Errorf("[notify.webhooks %q] header %q conflicts with %q", w.Name, k, prev)
+			}
+			headerKeys[canon] = k
+		}
+	}
+	for _, cmd := range c.Notify.Commands {
+		if err := validateNotifySinkCommon("commands", cmd.Name, cmd.Events, cmd.TimeoutSeconds, cmd.CooldownSeconds, seen); err != nil {
+			return err
+		}
+		if len(cmd.Argv) == 0 || strings.TrimSpace(cmd.Argv[0]) == "" {
+			return fmt.Errorf("[notify.commands %q] argv must be non-empty", cmd.Name)
+		}
 	}
 	return nil
 }
@@ -608,6 +841,9 @@ func loadConfig() (Config, error) {
 		return cfg, err
 	}
 	if err := cfg.validateDesktop(); err != nil {
+		return cfg, err
+	}
+	if err := cfg.validateNotify(); err != nil {
 		return cfg, err
 	}
 	if cfg.Watches.MaxConcurrent < 0 {

@@ -55,6 +55,8 @@ Usage:
   quartermaster inbox --questions [--json]             list live approval prompts and needs_me OPTIONS questions
   quartermaster inbox-runner run [--dry-run]           run one headless coordinator turn for allowlisted inbox items
   quartermaster inbox-runner status [--json]           inspect headless inbox runner status, lock, cooldown, and attempts
+  quartermaster notify status [--json]                 inspect configured outbound notification sinks (redacted) and delivery status
+  quartermaster notify test [--sink <name>] [--json]   send a synthetic test notification to all configured sinks (or one named sink)
   quartermaster snooze <bead> <duration> [--reason R]  park a needs_me bead until duration expires or fresh activity
   quartermaster snooze <bead> --clear                  clear an active snooze on a bead
   quartermaster snooze [--json]                        list active snoozed beads
@@ -268,6 +270,8 @@ func run(args []string) error {
 		return snoozeCmd(cfg, liveSnoozeEnv(cfg), rest, os.Stdout)
 	case "inbox-runner":
 		return inboxRunnerCmd(cfg, liveInboxRunnerEnv(cfg, h.on(cfg.coordSocket()), nil), rest, os.Stdout)
+	case "notify":
+		return notifyCmd(cfg, liveNotifyEnv(cfg, nil), rest, os.Stdout)
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	kind := fs.String("agent", "", "agent kind: claude, codex, muse, pi, agy or auto")
