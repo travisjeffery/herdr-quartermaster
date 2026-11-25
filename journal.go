@@ -50,6 +50,8 @@ const (
 	journalOrphanFinish = "orphan_finish"
 	// journalUnblocked is a blocker-cleared wakeup or inbox notice (unblocked.go).
 	journalUnblocked = "unblocked"
+	// journalCIRerun is a bounded ticker CI flake auto-rerun or escalation (cirerun.go).
+	journalCIRerun = "ci_rerun"
 )
 
 type journalRecord struct {

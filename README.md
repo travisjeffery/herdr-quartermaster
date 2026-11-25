@@ -979,6 +979,12 @@ max_attempts = 2          # max runner invocations per inbox filename before cap
 kinds = ["ready_for_review", "review_bump", "orphan_finish", "merged", "closed", "unblocked", "checks_failing", "likely_stale"]
 # command = ["pi", "--no-approve", "--print", "--no-session", ...]  # optional override (prompt on stdin)
 notify = true             # emit privacy-safe desktop summary via notify-send on handled items or failure
+
+[ci_rerun]                # bounded ticker auto-rerun for transient CI infrastructure flakes
+enabled = true            # automatically run `gh run rerun <run_id> --failed` on pure infra flakes
+max_reruns = 2            # max auto-reruns per (pr, head_sha) before surfacing checks_failing; 0 disables
+min_level = 3             # minimum bead autonomy level required to auto-rerun failed CI jobs
+# patterns = ["(?i)spot.*preempt", "(?i)exit code 137", "(?i)lost communication"]  # overrides built-in regexes
 ```
 
 `[agents.<kind>] args` go to that agent's CLI every time quartermaster starts

@@ -245,6 +245,9 @@ type Snapshot struct {
 	// StallEscalated marks that the current stall episode has already surfaced
 	// to the inbox so subsequent ticks do not duplicate it.
 	StallEscalated bool `json:"stall_escalated,omitempty"`
+	// CIRerun persists bounded CI flake auto-rerun state for the current
+	// (pr, head_sha) across ticks and ticker restarts.
+	CIRerun *CIRerunSnapshot `json:"ci_rerun,omitempty"`
 	// Relaunch marks a worker asked to exit so it can be resumed in the
 	// launch mode its level calls for.
 	Relaunch bool `json:"relaunch,omitempty"`
@@ -580,6 +583,7 @@ func snapshotWith(t Thread, prev Snapshot, now time.Time, opts transitionOpts, f
 		StallNextAt:         prev.StallNextAt,
 		StallError:          prev.StallError,
 		StallEscalated:      prev.StallEscalated,
+		CIRerun:             cloneCIRerunSnapshot(prev.CIRerun),
 	}
 	if t.Agent != nil {
 		s.AgentStatus, s.AgentSeq = t.Agent.Status, t.Agent.Seq
@@ -761,9 +765,7 @@ func transitionWith(t Thread, prev Snapshot, first bool, now time.Time, opts tra
 	if t.PR != nil && t.PR.State == "OPEN" {
 		if len(t.Checks.Failing) > 0 && (!slices.Equal(t.Checks.Failing, prev.Failing) || (prev.InboxPRKey != "" && prev.InboxPRKey != inboxPRKey(t))) {
 			ev(EventFailing, "PR #%d checks failing: %s", t.PR.Number, strings.Join(t.Checks.Failing, ", "))
-			o.Prompts = append(o.Prompts, fmt.Sprintf(
-				"[quartermaster: automated, not the user] PR #%d has failing checks: %s. Investigate with `gh pr checks %d`, fix them on this branch, and push.",
-				t.PR.Number, strings.Join(t.Checks.Failing, ", "), t.PR.Number))
+			o.Prompts = append(o.Prompts, failingChecksPrompt(t.PR.Number, t.Checks.Failing))
 		}
 		review := func(what string) {
 			ev(EventReview, "PR #%d has %s", t.PR.Number, what)
@@ -909,6 +911,16 @@ func newlyMerged(t Thread, prev Snapshot) []PR {
 }
 
 const readyPrompt = "[" + toolName + ": automated, not the user] PR #"
+
+func failingChecksPrompt(prNumber int, failing []string) string {
+	return fmt.Sprintf(
+		"[%s: automated, not the user] PR #%d has failing checks: %s. Investigate with `gh pr checks %d`, fix them on this branch, and push.",
+		toolName, prNumber, strings.Join(failing, ", "), prNumber)
+}
+
+func isFailingChecksPrompt(p string) bool {
+	return strings.HasPrefix(p, "["+toolName+": automated, not the user] PR #") && strings.Contains(p, " has failing checks: ")
+}
 
 // cutReadyPrompt is the rest of a ready-to-merge prompt after its prefix. A
 // prompt queued under an old name, before the rename, counts too.
