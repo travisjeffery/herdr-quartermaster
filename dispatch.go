@@ -67,6 +67,7 @@ func brief(b Bead, branch, path, linear, instructions string) string {
 type DispatchOpts struct {
 	Backend string
 	Kind    string
+	Role    string
 	Focus   bool
 	// Host runs the worker there; empty means the bead's host: label, else
 	// local.
@@ -156,7 +157,21 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 			}
 		}
 	}
+	if o.Kind != "" && o.Kind != "auto" && !validKinds[o.Kind] {
+		return "", fmt.Errorf("unknown agent kind %q (%s)", o.Kind, kindList("auto"))
+	}
+	b, err := (Beads{}).Show(id)
+	if err != nil {
+		return "", err
+	}
+	role, err := cfg.resolveRoleForBead(b, o.Role)
+	if err != nil {
+		return "", err
+	}
 	kind := o.Kind
+	if kind == "" {
+		kind = role.Agent
+	}
 	if kind == "" {
 		kind = cfg.WorkerAgent
 	}
@@ -166,13 +181,14 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	if !validKinds[kind] {
 		return "", fmt.Errorf("unknown agent kind %q (%s)", kind, kindList("auto"))
 	}
-	bd := Beads{actor: kind}
-	b, err := bd.Show(id)
-	if err != nil {
-		return "", err
+	if kind == "pi" && role.Thinking != "" && !isValidPiThinkingLevel(role.Thinking) {
+		return "", fmt.Errorf("role %q: invalid pi thinking level %q (want %s)", role.Name, role.Thinking, strings.Join(piThinkingLevels, ", "))
 	}
-	if name, ok := cfg.repoName(b); !ok {
-		return "", fmt.Errorf("%s is labelled %s%s, which is not in repos; fix the label or add the repo", id, repoLabel, name)
+	bd := Beads{actor: kind}
+	if role.Worktree {
+		if rn, ok := cfg.repoName(b); !ok {
+			return "", fmt.Errorf("%s is labelled %s%s, which is not in repos; fix the label or add the repo", id, repoLabel, rn)
+		}
 	}
 	if b.Status == StatusClosed {
 		return "", fmt.Errorf("%s is closed", id)
@@ -185,53 +201,95 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if !role.Worktree && host != localHost {
+		return "", fmt.Errorf("role %q has worktree = false and runs on %s host only", role.Name, localHost)
+	}
 	// Local keeps its old behavior of carrying on when the list fails; a
 	// remote host that can't be listed can't be dispatched to either.
 	if err, ok := unreachable[host]; ok && host != localHost {
 		return "", fmt.Errorf("%s: unreachable: %w", host, err)
 	}
-	args := cfg.agentArgs(kind, cfg.launchBypass(b, host))
+	roleInstr, err := loadRoleInstructions(role)
+	if err != nil {
+		return "", err
+	}
+	args := cfg.workerArgs(kind, cfg.launchBypass(b, host), role)
 	if kind == "pi" {
-		// Before the worktree and the claim, so a model pi can't run leaves
-		// nothing behind.
+		// Before the worktree/role dir and the claim, so a model pi can't run
+		// leaves nothing behind.
 		if args, err = cfg.piLaunch(host, args, "worker", id); err != nil {
 			return "", err
 		}
 	}
 	hh := cfg.herdrOn(h, host)
-	repo, _ := cfg.repoOn(host, b)
-	if host != localHost {
-		// An idle host's clone falls behind; cut the worktree from a fresh base.
-		if out, err := cfg.hostExec(host, "git", "-C", repo, "fetch", "origin", cfg.BaseBranch).CombinedOutput(); err != nil {
-			return "", fmt.Errorf("%s: git fetch origin %s in %s: %v: %s", host, cfg.BaseBranch, repo, err, strings.TrimSpace(string(out)))
+	var (
+		opened  Opened
+		branch  string
+		workdir string
+		repoRef string
+	)
+	if role.Worktree {
+		repo, _ := cfg.repoOn(host, b)
+		if host != localHost {
+			// An idle host's clone falls behind; cut the worktree from a fresh base.
+			if out, err := cfg.hostExec(host, "git", "-C", repo, "fetch", "origin", cfg.BaseBranch).CombinedOutput(); err != nil {
+				return "", fmt.Errorf("%s: git fetch origin %s in %s: %v: %s", host, cfg.BaseBranch, repo, err, strings.TrimSpace(string(out)))
+			}
 		}
-	}
-	branch := branchFor(cfg.BranchPrefix, b)
-	opened, err := hh.WorktreeCreate(repo, branch, cfg.BaseBranch, name, o.Focus)
-	if err != nil {
-		// A resumed bead already has its branch.
-		var err2 error
-		if opened, err2 = hh.WorktreeOpen(repo, branch, name, o.Focus); err2 != nil {
-			return "", fmt.Errorf("worktree for %s%s: %v; open: %v", branch, onHost(host), err, err2)
+		branch = branchFor(cfg.BranchPrefix, b)
+		opened, err = hh.WorktreeCreate(repo, branch, cfg.BaseBranch, name, o.Focus)
+		if err != nil {
+			// A resumed bead already has its branch.
+			var err2 error
+			if opened, err2 = hh.WorktreeOpen(repo, branch, name, o.Focus); err2 != nil {
+				return "", fmt.Errorf("worktree for %s%s: %v; open: %v", branch, onHost(host), err, err2)
+			}
+		}
+		workdir = opened.Path
+	} else {
+		workdir, err = ensureRoleDir(id)
+		if err != nil {
+			return "", fmt.Errorf("role dir for %s: %w", id, err)
+		}
+		opened, err = hh.WorkspaceCreate(workdir, name, o.Focus)
+		if err != nil {
+			return "", fmt.Errorf("workspace for %s (%s): %w", id, workdir, err)
+		}
+		if rn, ok := cfg.repoName(b); ok {
+			if rn != "" {
+				repoRef = cfg.Repos[rn]
+			} else {
+				repoRef = cfg.Repo
+			}
 		}
 	}
 	if err := bd.Claim(id); err != nil && b.Status != StatusInProgress {
 		return "", fmt.Errorf("claim %s: %w", id, err)
 	}
 	if err := setHostLabel(bd, b, host); err != nil {
-		return "", fmt.Errorf("label %s %s%s (its worktree is %s%s): %w", id, hostLabel, host, opened.Path, onHost(host), err)
+		return "", fmt.Errorf("label %s %s%s (its dir is %s%s): %w", id, hostLabel, host, workdir, onHost(host), err)
+	}
+	if err := setRoleLabel(bd, b, role.Name); err != nil {
+		return "", fmt.Errorf("label %s %s%s: %w", id, roleLabel, role.Name, err)
 	}
 	tab := opened.PaneID[:strings.LastIndex(opened.PaneID, ":")] + ":t1"
 	_ = hh.TabRename(tab, shortTitle(b.Title, 34))
 	// The brief says how to check the level, so an older notice is moot.
 	_ = os.Remove(noticePath(host, name))
-	text := brief(b, branch, opened.Path, linearKey(b, cfg.LinearPrefixes), readInstructions())
+	text := briefForRole(b, role, branch, workdir, repoRef, linearKey(b, cfg.LinearPrefixes), readInstructions(), roleInstr)
 	if auto != "" {
-		// The step is done once the worktree is up; a failed brief still leaves
-		// the dispatch on record.
-		_ = bd.Note(id, fmt.Sprintf("%s dispatched %s%s — quartermaster dispatch", auto, kind, onHost(host)))
+		// The step is done once the worktree/role workspace is up; a failed
+		// brief still leaves the dispatch on record.
+		roleSuffix := ""
+		if role.Name != roleImplementer {
+			roleSuffix = " (" + role.Name + ")"
+		}
+		_ = bd.Note(id, fmt.Sprintf("%s dispatched %s%s%s — quartermaster dispatch", auto, kind, roleSuffix, onHost(host)))
 	}
 	env := cfg.agentEnvOn(host, kind) + " QUARTERMASTER_BEAD=" + shellQuote(id)
+	if role.Name != roleImplementer {
+		env += " QUARTERMASTER_ROLE=" + shellQuote(role.Name)
+	}
 	if host == localHost {
 		// The bead's own socket to the executor and the shims, if one is
 		// running (S1: advisory routing).
@@ -239,6 +297,15 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	}
 	_ = hh.Run(opened.PaneID, env)
 	where := opened.PaneID + onHost(host)
+	startedSummary := func() string {
+		if !role.Worktree {
+			return fmt.Sprintf("started %s on %s (%s, role %s, dir %s)", kind, id, where, role.Name, workdir)
+		}
+		if role.Name != roleImplementer {
+			return fmt.Sprintf("started %s on %s (%s, role %s, branch %s)", kind, id, where, role.Name, branch)
+		}
+		return fmt.Sprintf("started %s on %s (%s, branch %s)", kind, id, where, branch)
+	}
 	if err := hh.AgentStart(name, kind, opened.PaneID, args...); err != nil {
 		// A new worktree often opens on the agent's folder-trust prompt. The
 		// ticker delivers the brief once someone answers it.
@@ -249,12 +316,12 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 			return "", err
 		}
 		h.Notify("quartermaster: "+id+" is waiting for you", "Answer its startup prompt (folder trust?) in "+where+"; the brief follows.")
-		return fmt.Sprintf("started %s on %s (%s, branch %s); it is at a startup prompt, the brief is queued", kind, id, where, branch), nil
+		return startedSummary() + "; it is at a startup prompt, the brief is queued", nil
 	}
 	if err := hh.Prompt(name, text); err != nil {
 		return "", fmt.Errorf("brief %s: %w", name, err)
 	}
-	return fmt.Sprintf("started %s on %s (%s, branch %s)", kind, id, where, branch), nil
+	return startedSummary(), nil
 }
 
 // resolve removes a finished bead's linked worktree and, once its PR merged,
@@ -279,6 +346,20 @@ func resolve(cfg Config, h Herdr, id string, force bool) (string, error) {
 				return "", fmt.Errorf("%s's agent is still working", id)
 			}
 		}
+	}
+	role, roleErr := cfg.resolveRoleForBead(b, "")
+	_, hasDir := hasRoleDir(id)
+	if hasDir || (roleErr == nil && !role.Worktree) {
+		closeRoleWorkspace(h, agentName(id))
+		rdir, existed, err := removeRoleDir(id)
+		if err != nil {
+			return "", err
+		}
+		execClose(id)
+		if !existed {
+			return "nothing to remove: no role directory for " + id, nil
+		}
+		return "removed role directory " + rdir, nil
 	}
 	repo := cfg.repoFor(b)
 	target, branches, err := linkedWorktree(cfg, h, b)
@@ -308,6 +389,20 @@ func resolve(cfg Config, h Herdr, id string, force bool) (string, error) {
 		done = append(done, "kept branch "+target.Branch+" (no merged PR)")
 	}
 	return strings.Join(done, "; "), nil
+}
+
+// closeRoleWorkspace closes any non-worktree Herdr workspace created for a
+// worktree = false role worker. Never touches a git worktree workspace.
+func closeRoleWorkspace(h Herdr, name string) {
+	wss, err := h.Workspaces()
+	if err != nil {
+		return
+	}
+	for _, ws := range wss {
+		if !ws.HasWorktree && ws.Label == name && ws.ID != "" {
+			_ = h.WorkspaceClose(ws.ID)
+		}
+	}
 }
 
 // linkedWorktree is the linked worktree herdr lists for b's branch, or for its

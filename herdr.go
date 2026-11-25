@@ -257,6 +257,44 @@ func (h Herdr) Worktrees(repo string) ([]Worktree, error) {
 	return out.Worktrees, json.Unmarshal(res, &out)
 }
 
+type Workspace struct {
+	ID          string `json:"workspace_id"`
+	Label       string `json:"label"`
+	HasWorktree bool   `json:"-"`
+}
+
+func (h Herdr) Workspaces() ([]Workspace, error) {
+	res, err := h.call(callTimeout, "workspace", "list")
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Workspaces []struct {
+			ID       string          `json:"workspace_id"`
+			Label    string          `json:"label"`
+			Worktree json.RawMessage `json:"worktree"`
+		} `json:"workspaces"`
+	}
+	if err := json.Unmarshal(res, &out); err != nil {
+		return nil, err
+	}
+	ws := make([]Workspace, 0, len(out.Workspaces))
+	for _, w := range out.Workspaces {
+		wt := bytes.TrimSpace(w.Worktree)
+		ws = append(ws, Workspace{
+			ID:          w.ID,
+			Label:       w.Label,
+			HasWorktree: len(wt) > 0 && string(wt) != "null",
+		})
+	}
+	return ws, nil
+}
+
+func (h Herdr) WorkspaceClose(workspace string) error {
+	_, err := h.call(callTimeout, "workspace", "close", workspace)
+	return err
+}
+
 func (h Herdr) WorkspaceCreate(cwd, label string, focus bool) (Opened, error) {
 	res, err := h.call(callTimeout, "workspace", "create", "--cwd", cwd, "--label", label, focusFlag(focus))
 	if err != nil {
@@ -332,6 +370,7 @@ func (h Herdr) ForegroundArgv(pane string) ([][]string, error) {
 type Pane struct {
 	ID    string `json:"pane_id"`
 	Agent string `json:"agent"`
+	Cwd   string `json:"cwd"`
 }
 
 func (h Herdr) Panes(workspace string) ([]Pane, error) {

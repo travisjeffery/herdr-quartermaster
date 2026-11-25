@@ -94,6 +94,11 @@ type Config struct {
 	// coordinator alike.
 	Agents map[string]AgentConfig `toml:"agents"`
 
+	// Roles configures named worker roles ([roles.<name>]); built-in presets
+	// (implementer, reviewer, investigator, rollout) are always available and
+	// can be overridden here (roles.go, docs/roles.md).
+	Roles map[string]RoleConfig `toml:"roles"`
+
 	// Autonomy is the dial: how far beads go without TJ; see
 	// docs/design/autonomy-dial.md. It also decides what auto_close and
 	// auto_resolve did: the ticker closes and resolves at level 3 and above.
@@ -831,10 +836,19 @@ func loadConfig() (Config, error) {
 	for name, path := range cfg.Repos {
 		cfg.Repos[name] = expandHome(path)
 	}
+	for name, role := range cfg.Roles {
+		if role.InstructionsFile != "" {
+			role.InstructionsFile = expandHome(role.InstructionsFile)
+			cfg.Roles[name] = role
+		}
+	}
 	if err := cfg.validateHosts(); err != nil {
 		return cfg, err
 	}
 	if err := cfg.validateAgents(); err != nil {
+		return cfg, err
+	}
+	if err := cfg.validateRoles(); err != nil {
 		return cfg, err
 	}
 	if err := cfg.validateTap(); err != nil {

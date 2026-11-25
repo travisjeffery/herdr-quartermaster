@@ -20,10 +20,12 @@ qm is a short alias: qm context is quartermaster context.
 
 Usage:
   quartermaster coordinator [--agent K]                open (or focus) the coordinator agent
-  quartermaster dispatch <bead> [--agent K] [--focus]  start a worker on a bead in its own worktree
+  quartermaster dispatch <bead> [--agent K] [--role R] [--focus]  start a worker on a bead (worktree or role dir)
                 [--host H] [--force] [--by WHO]        on host H (default: the bead's host: label, else
-                                                       local); --force ignores the bead's needs: labels
+                                                       local); --force ignores the bead's needs: labels;
+                                                       --role selects a built-in or [roles.<name>] role
                 [--backend herdr|pi-rpc]               opt in to native pi RPC; no default or live sessions change
+  quartermaster roles [--json]                         list built-in and configured [roles.<name>] presets
   quartermaster rpc status|output|events <bead>        inspect a native worker (no Herdr needed)
   quartermaster rpc tell <bead> <request-id> <text>     idempotent submission/reconciliation; never replays intent
   quartermaster rpc steer <bead> <request-id> <text>    explicit running-turn steering (class 3); never tell fallback
@@ -252,6 +254,8 @@ func run(args []string) error {
 	if err != nil {
 		if errors.Is(err, errNoRepo) && len(args) > 0 && args[0] == "job" {
 			cfg = defaultConfig()
+		} else if errors.Is(err, errNoRepo) && len(args) > 0 && args[0] == "roles" {
+			// keep cfg so configured [roles.<name>] entries still display
 		} else if !(errors.Is(err, errNoRepo) && len(args) > 0 && args[0] == "configure") {
 			return err
 		}
@@ -277,6 +281,7 @@ func run(args []string) error {
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	kind := fs.String("agent", "", "agent kind: claude, codex, muse, pi, agy or auto")
+	roleFlag := fs.String("role", "", "dispatch, focus: worker role (implementer, reviewer, investigator, rollout, or configured [roles.<name>])")
 	backend := fs.String("backend", "", "dispatch: herdr (default) or pi-rpc (local, headless)")
 	focus := fs.Bool("focus", false, "focus the new workspace")
 	repoFlag := fs.String("repo", "", "configure: the repository quartermaster works in, written to config.toml if it has none")
@@ -298,7 +303,7 @@ func run(args []string) error {
 	forFlag := fs.Duration("for", 0, "autonomy level: how long a level 8 or 9 lease lasts (8 defaults to 4h); plan approve: how long the approval lasts (default 1h)")
 	expect := fs.String("expect", "", "answer: the hash of the prompt being answered, from quartermaster prompt")
 	questionsFlag := fs.Bool("questions", false, "inbox: list live approval prompts and needs_me OPTIONS questions")
-	jsonFlag := fs.Bool("json", false, "context, digest, inbox, show, memory: emit JSON output")
+	jsonFlag := fs.Bool("json", false, "context, digest, inbox, show, memory, roles: emit JSON output")
 	reasonFlag := fs.String("reason", "", "close: what shipped and how it was verified")
 	by := fs.String("by", "coordinator", "dispatch, focus, resume, stale --release, answer, close: who decided; anyone but TJ needs the bead's autonomy level to reach the step's class")
 	pos, err := interspersed(fs, rest)
@@ -315,13 +320,15 @@ func run(args []string) error {
 		fmt.Println(msg)
 	case "dispatch":
 		if len(pos) != 1 {
-			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex|muse|pi|agy] [--focus] [--host H] [--force]")
+			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex|muse|pi|agy] [--role R] [--focus] [--host H] [--force]")
 		}
-		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Backend: *backend, Focus: *focus, Host: *hostFlag, Force: *force, By: *by})
+		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Role: *roleFlag, Backend: *backend, Focus: *focus, Host: *hostFlag, Force: *force, By: *by})
 		if err != nil {
 			return err
 		}
 		fmt.Println(msg)
+	case "roles":
+		return rolesCmd(cfg, pos, *jsonFlag, os.Stdout)
 	case "headless":
 		return headlessCmd(cfg, pos, *by, os.Stdout)
 	case "rpc":
@@ -339,7 +346,7 @@ func run(args []string) error {
 			h.Notify("quartermaster: no bead", err.Error())
 			return err
 		}
-		msg, err := dispatch(cfg, h, id, DispatchOpts{Kind: *kind, Focus: true, By: "TJ"}) // focus is TJ's key, never the coordinator's
+		msg, err := dispatch(cfg, h, id, DispatchOpts{Kind: *kind, Role: *roleFlag, Focus: true, By: "TJ"}) // focus is TJ's key, never the coordinator's
 		if err != nil {
 			h.Notify("quartermaster: "+id, err.Error())
 			return err
