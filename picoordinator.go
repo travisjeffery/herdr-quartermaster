@@ -29,6 +29,9 @@ func (t Ticker) nudgePiCoordinator(st *TickerState, coord Agent, now time.Time) 
 	}
 	latest := st.LastNudge
 	for _, e := range events {
+		if t.cfg.suppressInteractiveNudgeFor(e) {
+			continue
+		}
 		if e.At.After(latest) && !e.At.After(now) {
 			latest = e.At
 		}

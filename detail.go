@@ -296,7 +296,11 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 		if cmd := r.run; cmd != "" {
 			para(ansiRed, "  ", "run: "+cmd+" (p copies)")
 		}
-		if why := unanswerable(r.agent); why != "" {
+		if r.agent != nil && r.agent.Status == "blocked" {
+			para(ansiDim, "  ", "A opens the approval prompt (enter focuses pane)")
+		} else if _, ok := parseNeedsMeQuestion(b.Notes); ok && r.run == "" {
+			para(ansiDim, "  ", "A opens the structured question")
+		} else if why := unanswerable(r.agent); why != "" {
 			para(ansiDim, "  ", why)
 		} else {
 			para(ansiDim, "  ", "A answers "+r.agent.Name)

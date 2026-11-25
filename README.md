@@ -660,18 +660,47 @@ tasks use `quartermaster rpc view <bead>`. See [limits, privacy, state evidence
 and replay APIs](docs/pi-rpc.md#read-only-conversations-in-the-board).
 The focus-or-start clipboard action is **not** a viewer.
 
-Moving work forward, on the selected bead:
+Moving work forward, on the selected bead (or marked rows for bulk actions):
 
+- `;` or `M` marks/unmarks a row on the main board; `*` toggles or clears all
+  marks in the current section (`esc` clears kept filters, then marks, before
+  quitting). Bulk `C` (close `--by TJ` with one reason + confirm), `n` (toggle
+  `next`), `R` (resume exited workers), `d` (resolve worktrees/role dirs, never
+  `--force`), and `D`/`c`/`x`/`m`/`i`/`t` (dispatch) apply to all visible marked
+  rows when marks are set, without changing `space`/`v` (detail pane) or `T`
+  (tidy view).
 - `a` adds a note; `n` toggles `next`; `S` sets the status, `P` the priority.
-- `A` answers the worker: you type the reply, confirm it, and it goes to the
-  agent with `herdr agent prompt`. Only an idle agent is prompted, checked
-  again just before sending. A worker at an approval prompt (`!`) is never
-  answered from the board; `↵` focuses a TUI worker. Native RPC views have no
-  approval controls: use the existing `prompt`/`answer` flow separately.
-- `↵` views native RPC history; for other rows it focuses the bead's agent,
-  or starts one. `c`/`x`/`m`/`i`/`t` start Claude, Codex, Muse, pi or agy;
-  `R` resumes an exited agent in its worktree.
-- `+` creates a child task; `C` closes the bead with a reason.
+- `A` opens the answer view or replies to the worker:
+  - On a worker blocked at an approval prompt (`!`), `A` loads the live prompt
+    (command, options, and prompt hash) and lets you pick option `1`–`9` with
+    confirmation, executing through the hash-verified `--expect <hash> --by TJ`
+    path (refusing if the prompt hash changed).
+  - On a `needs_me` bead with a structured `QUESTION:`/`OPTIONS:` block (or an
+    agentless free-text question), `A` renders the full question, class,
+    recommendation, and numbered options; pressing `1`–`9` (or `t` for custom
+    text) confirms, records `NEEDS_ME ANSWERED: ... by TJ via board`, returns
+    the bead to `in_progress`, and prompts the worker if at rest.
+  - On an idle worker without a structured question, `A` prompts for a direct
+    reply with confirmation, checking again that the agent is still idle before
+    sending. Native RPC views remain read-only.
+- `↵` views native RPC history; for other rows it focuses the bead's agent, or
+  starts one (defaulting to any `role:<name>` label on the bead; press `r` on
+  the confirmation line to switch roles). `c`/`x`/`m`/`i`/`t` start Claude,
+  Codex, Muse, pi or agy; `D` opens the `[roles.<name>]` role picker directly
+  (`implementer`, `reviewer`, `investigator`, `rollout`, or custom roles).
+- `R` resumes exited worker(s) in their worktree or role directory; press `a`
+  (or `c`/`x`/`m`/`i`/`t` directly on the confirmation line) to override the
+  agent kind (for example resuming an exited session onto `pi`).
+- `N` creates a new top-level bead (title, optional configured `repo:<name>`
+  label, optional `[roles.<name>]` role, and create vs create+dispatch); `+`
+  creates a child task under the selected bead.
+- `@` opens the ask-coordinator input bar, forwarding a free-form prompt to the
+  running idle coordinator without leaving the board.
+- `E` toggles the live Events / Inbox view over unread `inbox/` entries,
+  `<state>/notify/events.json`, and recent `AUTO:` journal steps; `↵` jumps to
+  the event's bead on the main board and `i` acknowledges an unread inbox file.
+- `C` closes the bead(s) via `quartermaster close --by TJ` with a reason; `d`
+  runs `quartermaster resolve` (never `--force`).
 - `y` copies the id, `p` a pending `RUN:` command, `o` opens the PR, `l` the
   Linear issue (set `linear_workspace` unless the bead's notes link it), `b`
   shows `bd show` in `$PAGER`.
@@ -1039,6 +1068,7 @@ max_attempts = 2          # max runner invocations per inbox filename before cap
 kinds = ["ready_for_review", "review_bump", "orphan_finish", "merged", "closed", "unblocked", "checks_failing", "likely_stale"]
 # command = ["pi", "--no-approve", "--print", "--no-session", ...]  # optional override (prompt on stdin)
 notify = true             # emit privacy-safe desktop summary via notify-send on handled items or failure
+suppress_interactive_nudges = false  # opt-in: skip routine interactive coordinator nudges for allowlisted kinds while enabled
 
 [ci_rerun]                # bounded ticker auto-rerun for transient CI infrastructure flakes
 enabled = true            # automatically run `gh run rerun <run_id> --failed` on pure infra flakes

@@ -128,7 +128,11 @@ func buildRows(cfg Config, data boardData, mode sortMode) []boardRow {
 func threadRow(st TickerState, th Thread) boardRow {
 	state := th.derived()
 	g := state.group()
-	r := boardRow{state: &state, bead: th.Bead, agent: th.Agent, group: g, line: stateLine(th), color: groupColor(g), run: runCommand(th),
+	line := stateLine(th)
+	if role, err := beadRole(th.Bead); err == nil && role != "" && role != roleImplementer {
+		line += " · role:" + role
+	}
+	r := boardRow{state: &state, bead: th.Bead, agent: th.Agent, group: g, line: line, color: groupColor(g), run: runCommand(th),
 		prs: linkedPRs(st, th.Bead), linear: th.Linear, moves: linearMoves([]Thread{th}), runs: th.Runs}
 	agent, pr := "", ""
 	if th.Agent != nil {
@@ -168,6 +172,9 @@ func queuedRow(st TickerState, th Thread) boardRow {
 	key := th.Linear
 	if key != "" {
 		parts = append(parts, key)
+	}
+	if role, err := beadRole(b); err == nil && role != "" && role != roleImplementer {
+		parts = append(parts, "role:"+role)
 	}
 	parts = append(parts, th.Level)
 	line := strings.Join(parts, " · ")

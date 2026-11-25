@@ -14,10 +14,14 @@ import (
 // fakeBoard is bd and herdr for the board: beads and agents to list, and a
 // log of every call that would change something.
 type fakeBoard struct {
-	beads  []Bead
-	agents []Agent
-	gc     []gcItem
-	calls  []string
+	beads   []Bead
+	agents  []Agent
+	inbox   []InboxItem
+	feed    []NotifyFeedEvent
+	journal []journalRecord
+	prompts map[string]ApprovalPrompt
+	gc      []gcItem
+	calls   []string
 	// fail makes every write fail.
 	fail error
 	// listed counts bead loads.
@@ -40,13 +44,17 @@ func (f *fakeBoard) env() boardEnv {
 			}
 		}
 	}
+	nextCreated := 0
 	return boardEnv{
 		beads: func() ([]Bead, error) {
 			f.listed++
 			return slices.Clone(f.beads), nil
 		},
 		agents: func() ([]Agent, error) { return slices.Clone(f.agents), nil },
-		local:  func() (TickerState, []InboxItem) { return TickerState{}, nil },
+		local:  func() (TickerState, []InboxItem) { return TickerState{}, slices.Clone(f.inbox) },
+		events: func() ([]NotifyFeedEvent, []journalRecord, error) {
+			return slices.Clone(f.feed), slices.Clone(f.journal), nil
+		},
 		show: func(id string) (Bead, error) {
 			for _, b := range f.beads {
 				if b.ID == id {
@@ -57,6 +65,36 @@ func (f *fakeBoard) env() boardEnv {
 		},
 		read: func(string) (string, error) { return "screen", nil },
 		gc:   func(boardData) ([]gcItem, error) { return f.gc, nil },
+
+		readPrompt: func(id string) (ApprovalPrompt, error) {
+			if p, ok := f.prompts[id]; ok {
+				return p, nil
+			}
+			return ApprovalPrompt{}, errNoPrompt
+		},
+		answerPrompt: func(id, choice, expect string) (string, error) {
+			p, ok := f.prompts[id]
+			if !ok {
+				return "", errNoPrompt
+			}
+			if p.Hash != expect {
+				return "", fmt.Errorf("the prompt changed: %s now shows [%s], not [%s]", id, p.Hash, expect)
+			}
+			if err := rec("answer-prompt %s %s --expect %s --by TJ", id, choice, expect); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("answered %s: %s", id, choice), nil
+		},
+		answerNeedsMe: func(id, choice, text, expect string) (string, error) {
+			if err := rec("answer-needs-me %s choice=%s text=%q expect=%s", id, choice, text, expect); err != nil {
+				return "", err
+			}
+			edit(id, func(b *Bead) {
+				b.Status = StatusInProgress
+				b.Notes = strings.TrimLeft(b.Notes+"\nNEEDS_ME ANSWERED: "+choice+" by TJ via board", "\n")
+			})
+			return fmt.Sprintf("answered %s; the bead is in_progress", id), nil
+		},
 
 		note: func(id, text string) error {
 			edit(id, func(b *Bead) { b.Notes += "\n" + text })
@@ -83,19 +121,66 @@ func (f *fakeBoard) env() boardEnv {
 		child: func(parent Bead, title string) (string, error) {
 			return parent.ID + ".1", rec("child %s %s", parent.ID, title)
 		},
-		prompt:   func(a, text string) error { return rec("prompt %s %s", a, text) },
-		dispatch: func(id, kind string) (string, error) { return "started", rec("dispatch %s %s", id, kind) },
-		resume:   func(id string) (string, error) { return "resumed", rec("resume %s", id) },
-		resolve:  func(id string) (string, error) { return "removed", rec("resolve %s", id) },
-		release:  func(b Bead, days int) error { return rec("release %s %d", b.ID, days) },
+		create: func(title, repo, role string) (string, error) {
+			nextCreated++
+			id := fmt.Sprintf("bk-new%d", nextCreated)
+			if err := rec("create %q repo=%s role=%s", title, repo, role); err != nil {
+				return "", err
+			}
+			var labels []string
+			if repo != "" {
+				labels = append(labels, repoLabel+repo)
+			}
+			if role != "" {
+				labels = append(labels, roleLabel+role)
+			}
+			f.beads = append(f.beads, Bead{ID: id, Title: title, Status: StatusOpen, Priority: 2, Type: "task", Labels: labels, UpdatedAt: t0})
+			return id, nil
+		},
+		prompt: func(a, text string) error { return rec("prompt %s %s", a, text) },
+		askCoordinator: func(text string) (string, error) {
+			return askBoardCoordinator(defaultConfig(), func() ([]Agent, error) { return slices.Clone(f.agents), nil }, func(target, msg string) error {
+				return rec("coord %s %s", target, msg)
+			}, text)
+		},
+		dispatch: func(id, kind, role string, focus bool) (string, error) {
+			if role == "" && focus {
+				return "started", rec("dispatch %s %s", id, kind)
+			}
+			return "started", rec("dispatch %s %s role=%s focus=%t", id, kind, role, focus)
+		},
+		resume: func(id, kind string) (string, error) {
+			if kind == "" {
+				return "resumed", rec("resume %s", id)
+			}
+			return "resumed", rec("resume %s %s", id, kind)
+		},
+		resolve: func(id string) (string, error) { return "removed", rec("resolve %s", id) },
+		release: func(b Bead, days int) error { return rec("release %s %d", b.ID, days) },
 		autonomy: func(id string, n int, d time.Duration) (string, error) {
 			edit(id, func(b *Bead) { b.Labels = withLevel(b.Labels, n) })
 			return "autonomy set", rec("autonomy %s %d %s", id, n, d)
 		},
-		focus:     func(a string) error { return rec("focus %s", a) },
-		inboxDone: func(files []string) error { return rec("dismiss %s", strings.Join(files, ",")) },
-		copy:      func(text string) error { return rec("copy %s", text) },
-		open:      func(u string) string { rec("open %s", u); return "opened " + u },
+		focus: func(a string) error { return rec("focus %s", a) },
+		inboxDone: func(files []string) error {
+			if err := rec("dismiss %s", strings.Join(files, ",")); err != nil {
+				return err
+			}
+			drop := map[string]bool{}
+			for _, fn := range files {
+				drop[fn] = true
+			}
+			kept := make([]InboxItem, 0, len(f.inbox))
+			for _, it := range f.inbox {
+				if !drop[it.File] {
+					kept = append(kept, it)
+				}
+			}
+			f.inbox = kept
+			return nil
+		},
+		copy: func(text string) error { return rec("copy %s", text) },
+		open: func(u string) string { rec("open %s", u); return "opened " + u },
 	}
 }
 
@@ -380,7 +465,7 @@ func TestAnswerOnlyAnIdleWorker(t *testing.T) {
 		t.Fatalf("no agent: status %q", m.status)
 	}
 
-	// An approval prompt is never answered from the board.
+	// A blocked agent whose prompt cannot be read is never sent raw text.
 	f.agents[0].Status = "blocked"
 	m.data.Agents = slices.Clone(f.agents)
 	m.rebuild()

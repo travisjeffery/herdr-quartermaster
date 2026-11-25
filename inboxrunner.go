@@ -108,6 +108,11 @@ type InboxRunnerConfig struct {
 	// Notify controls whether a concise privacy-safe desktop summary is emitted
 	// via desktop.go when the runner handles items or fails (default true).
 	Notify *bool `toml:"notify"`
+	// SuppressInteractiveNudges suppresses routine interactive coordinator
+	// ticker nudges for allowlisted inbox events while [inbox_runner] enabled
+	// is true (default false for backward compatibility). Human-gated and
+	// non-allowlisted events still nudge the interactive coordinator.
+	SuppressInteractiveNudges bool `toml:"suppress_interactive_nudges"`
 }
 
 func (c InboxRunnerConfig) idle() time.Duration {
@@ -158,6 +163,21 @@ func (c InboxRunnerConfig) allowedKindSet() map[string]bool {
 		m[k] = true
 	}
 	return m
+}
+
+// suppressInteractiveNudgeFor reports whether an inbox item is handled by the
+// headless inbox runner and should not trigger routine interactive coordinator
+// nudges when [inbox_runner] enabled and suppress_interactive_nudges are true.
+// Human-gated items, headless-enrolled beads, and non-allowlisted kinds are
+// never suppressed.
+func (c Config) suppressInteractiveNudgeFor(it InboxItem) bool {
+	if !c.InboxRunner.Enabled || !c.InboxRunner.SuppressInteractiveNudges {
+		return false
+	}
+	if isForbiddenInboxItem(it) || headlessOwned(it.Bead) {
+		return false
+	}
+	return c.InboxRunner.allowedKindSet()[string(it.Kind)]
 }
 
 func (c Config) validateInboxRunner() error {
@@ -1535,14 +1555,15 @@ type InboxRunnerStatusReport struct {
 }
 
 type inboxRunnerConfigDoc struct {
-	IdleSeconds     int      `json:"idle_seconds"`
-	CooldownSeconds int      `json:"cooldown_seconds"`
-	TimeoutSeconds  int      `json:"timeout_seconds"`
-	MaxAttempts     int      `json:"max_attempts"`
-	Kinds           []string `json:"kinds"`
-	Notify          bool     `json:"notify"`
-	Command         []string `json:"command,omitempty"`
-	CommandError    string   `json:"command_error,omitempty"`
+	IdleSeconds               int      `json:"idle_seconds"`
+	CooldownSeconds           int      `json:"cooldown_seconds"`
+	TimeoutSeconds            int      `json:"timeout_seconds"`
+	MaxAttempts               int      `json:"max_attempts"`
+	Kinds                     []string `json:"kinds"`
+	Notify                    bool     `json:"notify"`
+	SuppressInteractiveNudges bool     `json:"suppress_interactive_nudges"`
+	Command                   []string `json:"command,omitempty"`
+	CommandError              string   `json:"command_error,omitempty"`
 }
 
 type inboxRunnerInboxDoc struct {
@@ -1582,13 +1603,14 @@ func buildInboxRunnerStatus(cfg Config, env inboxRunnerEnv) (InboxRunnerStatusRe
 		items = []inboxRunnerItemView{}
 	}
 	cmdDoc := inboxRunnerConfigDoc{
-		IdleSeconds:     cfg.InboxRunner.IdleSeconds,
-		CooldownSeconds: cfg.InboxRunner.CooldownSeconds,
-		TimeoutSeconds:  int(cfg.InboxRunner.timeout() / time.Second),
-		MaxAttempts:     cfg.InboxRunner.maxAttempts(),
-		Kinds:           cfg.InboxRunner.effectiveKinds(),
-		Notify:          cfg.InboxRunner.notifyEnabled(),
-		Command:         tickerPlan.Command,
+		IdleSeconds:               cfg.InboxRunner.IdleSeconds,
+		CooldownSeconds:           cfg.InboxRunner.CooldownSeconds,
+		TimeoutSeconds:            int(cfg.InboxRunner.timeout() / time.Second),
+		MaxAttempts:               cfg.InboxRunner.maxAttempts(),
+		Kinds:                     cfg.InboxRunner.effectiveKinds(),
+		Notify:                    cfg.InboxRunner.notifyEnabled(),
+		SuppressInteractiveNudges: cfg.InboxRunner.SuppressInteractiveNudges,
+		Command:                   tickerPlan.Command,
 	}
 	if tickerPlan.CommandErr != nil {
 		cmdDoc.CommandError = tickerPlan.CommandErr.Error()
@@ -1629,8 +1651,8 @@ func writeInboxRunnerStatus(w io.Writer, rep InboxRunnerStatusReport, asJSON boo
 	}
 	fmt.Fprintf(w, "inbox-runner: %s · %s\n", enabled, running)
 	fmt.Fprintf(w, "coordinator:  %s (%s)\n", rep.Coordinator.State, rep.Coordinator.Detail)
-	fmt.Fprintf(w, "config:       idle=%ds cooldown=%ds timeout=%ds max_attempts=%d notify=%t\n",
-		rep.Config.IdleSeconds, rep.Config.CooldownSeconds, rep.Config.TimeoutSeconds, rep.Config.MaxAttempts, rep.Config.Notify)
+	fmt.Fprintf(w, "config:       idle=%ds cooldown=%ds timeout=%ds max_attempts=%d notify=%t suppress_nudges=%t\n",
+		rep.Config.IdleSeconds, rep.Config.CooldownSeconds, rep.Config.TimeoutSeconds, rep.Config.MaxAttempts, rep.Config.Notify, rep.Config.SuppressInteractiveNudges)
 	fmt.Fprintf(w, "kinds:        %s\n", strings.Join(rep.Config.Kinds, ", "))
 	if len(rep.Config.Command) > 0 {
 		fmt.Fprintf(w, "command:      %s\n", strings.Join(rep.Config.Command, " "))
