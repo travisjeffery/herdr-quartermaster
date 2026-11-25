@@ -678,9 +678,6 @@ func (t Ticker) once(st *TickerState) error {
 }
 
 func (t Ticker) reconcileNotify(threads []Thread, milestones []desktopMilestone, now time.Time) {
-	if !t.cfg.Notify.enabled() {
-		return
-	}
 	var env notifyEnv
 	if t.notifyEnv != nil {
 		env = *t.notifyEnv
@@ -695,7 +692,7 @@ func (t Ticker) reconcileNotify(threads []Thread, milestones []desktopMilestone,
 		ctx = context.Background()
 	}
 	if err := reconcileNotifyWith(ctx, t.cfg, env, threads, milestones, now, t.notifyWG); err != nil {
-		t.log.Printf("outbound notifications: %v", err)
+		t.log.Printf("notifications: %v", err)
 	}
 }
 

@@ -57,6 +57,8 @@ Usage:
   quartermaster inbox-runner status [--json]           inspect headless inbox runner status, lock, cooldown, and attempts
   quartermaster notify status [--json]                 inspect configured outbound notification sinks (redacted) and delivery status
   quartermaster notify test [--sink <name>] [--json]   send a synthetic test notification to all configured sinks (or one named sink)
+  quartermaster notify events [--since N] [--limit N] [--event K,...] [--json]
+                                                       inspect the durable notification event feed (read-only)
   quartermaster snooze <bead> <duration> [--reason R]  park a needs_me bead until duration expires or fresh activity
   quartermaster snooze <bead> --clear                  clear an active snooze on a bead
   quartermaster snooze [--json]                        list active snoozed beads

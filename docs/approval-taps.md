@@ -61,7 +61,7 @@ The same Tailscale-bound tap server also hosts a persistent, mobile-first
   it fails closed otherwise.
 
 Every route (`/`, `/inbox`, `/inbox.json`, `/inbox/plan/<digest>`,
-`/tap-links/<bead>`, and `/tap/<token>`) enforces the exact same fail-closed auth guard: tailnet source
+`/tap-links/<bead>`, `/events`, and `/tap/<token>`) enforces the exact same fail-closed auth guard: tailnet source
 IP, `tailscale whois` lookup, and explicit membership in `[tap] devices`. Any
 non-tailnet source, failed `whois`, or disallowed device — including the host
 machine itself — receives `403` and is journalled as `TAP REFUSED: …` before
@@ -86,6 +86,79 @@ Clients on an allowed tailnet device can mint fresh, 15-minute one-time
   written to the inbox, logs, bead notes, or `journal.jsonl` (the journal
   records `TAP MINTED:` with bead, device, and link count only, and refusals as
   `TAP REFUSED:`).
+
+### Cursor-based notification feed (`GET /events`)
+
+Allowed tailnet clients can poll a durable, bounded notification event feed
+(`<state>/notify/events.json`, retaining the most recent 500 events) over the
+same Tailscale-bound tap server without running a client webhook listener or
+managing shared bearer tokens:
+
+- **Auth & method:** Enforces the exact same fail-closed tailnet IP +
+  `tailscale whois` + `[tap] devices` guard before reading any state (returning
+  `403` JSON `{"error": …}` and journalling `TAP REFUSED:` on refusal, including
+  requests from the host machine itself). `GET` only (`405` on other methods);
+  strictly read-only (never creates or mutates files). Responses always carry
+  `Content-Type: application/json; charset=utf-8` and `Cache-Control: no-store`.
+- **Query parameters** (malformed values return `400` JSON `{"error": …}`):
+  - `since` (optional non-negative integer, default `0`): return events with
+    `seq > since` in ascending `seq` order.
+  - `limit` (optional positive integer, default `100`, capped at `500`; values
+    `<= 0` or non-integer are rejected with `400`).
+  - `event` (optional comma-separated list of known event kinds: `pr_merged`,
+    `pr_green`, `pr_ready`, `needs_me`, `blocked`, `worker_blocked`,
+    `inbox_runner`; unknown kinds — including synthetic `test` — are rejected
+    with `400`).
+- **Response schema:**
+
+```json
+{
+  "version": 1,
+  "latest_seq": 42,
+  "next_since": 42,
+  "has_more": false,
+  "truncated": false,
+  "events": [
+    {
+      "seq": 42,
+      "version": 1,
+      "event": "needs_me",
+      "at": "2026-11-25T08:00:00Z",
+      "title": "Quartermaster: needs_me",
+      "body": "task-12: Approve staging rollout?",
+      "inbox_url": "http://100.64.1.2:8642/inbox",
+      "items": [
+        {
+          "bead": "task-12",
+          "reason": "needs_me",
+          "summary": "Approve staging rollout?",
+          "class": 6
+        }
+      ]
+    }
+  ]
+}
+```
+
+- **Cursor & truncation semantics:**
+  - `next_since` is the last returned event's `seq` when `events` is non-empty,
+    and `latest_seq` otherwise (so a fresh client starting at `?since=0` or a
+    client whose cursor fell ahead of a reset state directory syncs cleanly).
+  - `has_more` is `true` when additional matching events exist beyond `limit`.
+  - `truncated` is `true` when `since > 0` and either `since` predates the
+    oldest retained event (`oldest_seq > 1 && since < oldest_seq - 1`) or
+    `since > latest_seq`, signaling the client should perform a snapshot sync
+    (such as `quartermaster context --compact` or `quartermaster inbox --questions`).
+- **Privacy guarantees:** Events inherit the shared `notify.go`/`desktop.go`
+  sanitization — secrets, tokens, generic URLs, and signed `/tap/<token>` bearer
+  links are never stored or returned. Only the validated non-secret `inbox_url`
+  (`/inbox`) is included when `[tap]` is enabled. `items[].class` (`0`–`9`,
+  omitted when unset) is extracted for `needs_me` items from live `CLASS:` notes
+  or structured question cards so consumers can separate urgent (`class >= 7`)
+  from batched notifications without an extra round trip.
+- **Local CLI inspection:** `quartermaster notify events [--since <seq>] [--limit <N>] [--event <kinds>] [--json]`
+  reads the same local feed file strictly read-only. See
+  [docs/notifications.md](notifications.md).
 
 The inbox shows four live queues:
 
