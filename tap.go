@@ -328,6 +328,7 @@ func (s *tapServer) handler() http.Handler {
 	mux.HandleFunc("/inbox", s.handleInbox)
 	mux.HandleFunc("/inbox.json", s.handleInboxJSON)
 	mux.HandleFunc("/inbox/plan/", s.handleInboxPlan)
+	mux.HandleFunc("/events", s.handleEvents)
 	mux.HandleFunc("/", s.handleRoot)
 	return mux
 }

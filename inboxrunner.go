@@ -1226,29 +1226,27 @@ func notifyInboxRunnerResult(ctx context.Context, cfg Config, env inboxRunnerEnv
 			env.log("inbox-runner desktop notify: %s (%s)", r.State, r.Reason)
 		}
 	}
-	if cfg.Notify.enabled() {
-		var nEnv notifyEnv
-		if env.notifyEnv != nil {
-			nEnv = *env.notifyEnv
-		} else {
-			nEnv = liveNotifyEnv(cfg, env.logf)
-		}
-		if nEnv.logf == nil {
-			nEnv.logf = env.logf
-		}
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		info := NotifyRunnerInfo{
-			ExitStatus: res.ExitStatus,
-			Acked:      res.Acked,
-			Eligible:   total,
-			Kinds:      unique,
-			DurationMs: res.Duration.Milliseconds(),
-		}
-		if err := dispatchNotifyInboxRunner(ctx, cfg, nEnv, title, body, info, now); err != nil {
-			env.log("inbox-runner outbound notify: %v", err)
-		}
+	var nEnv notifyEnv
+	if env.notifyEnv != nil {
+		nEnv = *env.notifyEnv
+	} else {
+		nEnv = liveNotifyEnv(cfg, env.logf)
+	}
+	if nEnv.logf == nil {
+		nEnv.logf = env.logf
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	info := NotifyRunnerInfo{
+		ExitStatus: res.ExitStatus,
+		Acked:      res.Acked,
+		Eligible:   total,
+		Kinds:      unique,
+		DurationMs: res.Duration.Milliseconds(),
+	}
+	if err := dispatchNotifyInboxRunner(ctx, cfg, nEnv, title, body, info, now); err != nil {
+		env.log("inbox-runner notify: %v", err)
 	}
 }
 

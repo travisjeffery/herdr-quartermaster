@@ -357,9 +357,11 @@ lifecycle action.
   with the answer. Free-text questions are unchanged. The same listener also
   serves a bookmarkable, mobile-first **Tailnet Web Inbox** at `/inbox` (and
   `/inbox.json`, with `/` redirecting to `/inbox`; `quartermaster tap url`
-  prints the URL) and an on-demand JSON link minter at `GET /tap-links/<bead>`
-  (fresh 15-minute links per call, never persisted or logged) behind the exact
-  same fail-closed tailnet IP +
+  prints the URL), an on-demand JSON link minter at `GET /tap-links/<bead>`
+  (fresh 15-minute links per call, never persisted or logged), and a
+  cursor-based notification feed at `GET /events?since=<seq>&limit=<N>&event=<kinds>`
+  backed by `<state>/notify/events.json` behind the exact same fail-closed
+  tailnet IP +
   `tailscale whois` `[tap] devices` allowlist, showing live approval prompts,
   `needs_me` questions (including `RUN:` commands, free-text notes, and
   optional structured review cards under `cards/<bead>/`), pending checked
@@ -434,15 +436,22 @@ lifecycle action.
   `quartermaster inbox-runner status [--json]` and
   `quartermaster inbox-runner run [--dry-run]`; disable anytime with
   `enabled = false`. See [docs/inbox-runner.md](docs/inbox-runner.md).
-- **Outbound notification sinks (opt-in).** Configure `[[notify.webhooks]]`
-  (JSON envelope or plain text, with `url_env` and `header_envs` so secrets stay
-  out of `config.toml`) and `[[notify.commands]]` (direct argv without shell,
-  JSON on stdin, process-group timeout) under `[notify]` to push privacy-safe,
-  sanitized notifications for ticker milestones, blockers, and headless inbox
-  runner updates — independently of `[desktop] enabled = false`. Delivery state
-  and per-sink cooldown queues persist atomically in `<state>/notify/status.json`
-  (0600) so bursts coalesce without dropping across restarts. Inspect or test
-  with `quartermaster notify status [--json]` and
+- **Outbound notification sinks and durable event feed.** Sanitized ticker
+  milestones, blockers (including `class` on `needs_me` items), and headless
+  inbox runner outcomes are recorded automatically into a bounded durable ring
+  buffer (`<state>/notify/events.json`, mode `0600`, last 500 events with
+  monotonic `seq`) — even when `[desktop] enabled = false` and no outbound sinks
+  are configured — served via `GET /events?since=<seq>&limit=<N>&event=<kinds>`
+  on the fail-closed tailnet tap server and inspectable locally via
+  `quartermaster notify events [--since <seq>] [--limit <N>] [--event <kinds>] [--json]`.
+  You can also configure opt-in `[[notify.webhooks]]` (JSON envelope or plain
+  text, with `url_env` and `header_envs` so secrets stay out of `config.toml`)
+  and `[[notify.commands]]` (direct argv without shell, JSON on stdin,
+  process-group timeout) under `[notify]` to push notifications independently
+  of `[desktop] enabled = false`. Delivery state and per-sink cooldown queues
+  persist atomically in `<state>/notify/status.json` (0600) so bursts coalesce
+  without dropping across restarts. Inspect or test with
+  `quartermaster notify status [--json]` and
   `quartermaster notify test [--sink <name>]`. See
   [docs/notifications.md](docs/notifications.md).
 - **Bot reviews** (Codex, CodeRabbit and other GitHub Apps) are told apart from
@@ -1298,6 +1307,7 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | `quartermaster inbox-runner status [--json]` | Inspect `[inbox_runner]` enabled state, lock state, interactive coordinator check, cooldown, inbox eligibility counts, last run status/diagnostics, and persisted per-file attempt counts. |
 | `quartermaster notify status [--json]` | Inspect configured outbound `[notify]` webhook and command sinks (redacted targets/headers), subscribed events, cooldown, pending counts, and durable last delivery status/timestamp/error. See [docs/notifications.md](docs/notifications.md). |
 | `quartermaster notify test [--sink <name>]` | Send a synthetic `event: "test"` notification to all configured `[notify]` sinks (or one named sink), printing redacted per-sink results and exiting nonzero if no sinks are configured or any targeted sink fails. |
+| `quartermaster notify events [--since <seq>] [--limit <N>] [--event <kinds>] [--json]` | Read-only local view of the bounded durable notification event feed (`<state>/notify/events.json`, also served over Tailscale at `GET /events` when `[tap]` is enabled). |
 | `quartermaster snooze <bead> <duration> [--reason R]` | Temporarily park a `needs_me` bead out of the Active list (`30m`, `4h`, `3d`, `1w`) until expiry or fresh bead activity; `quartermaster snooze <bead> --clear` removes it, and bare `quartermaster snooze [--json]` lists active snoozes. |
 | `quartermaster resume [<bead>...] [--agent K]` | Restart exited workers in their worktrees, continuing their last conversation. |
 | `quartermaster stale [--days N] [--release]` | List claims with no agent, worktree or PR untouched N days (7); `--release` reopens them. |

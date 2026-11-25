@@ -1,14 +1,18 @@
-# Outbound notification sinks (`[notify]`)
+# Outbound notification sinks (`[notify]`) and event feed
 
-Quartermaster can push real-time, privacy-safe notifications to external HTTP
+Quartermaster records real-time, privacy-safe notification events in a durable
+bounded feed (`<state>/notify/events.json`, served over Tailscale at
+`GET /events` when `[tap]` is enabled and inspectable locally with
+`quartermaster notify events`) and can also push them to opt-in external HTTP
 webhooks and local commands when ticker milestones, blockers, or headless inbox
 runner updates occur.
 
-`[notify]` is **opt-in and empty by default**, so upgrading Quartermaster
-changes nothing until you add at least one `[[notify.webhooks]]` or
-`[[notify.commands]]` sink. It runs **independently of `[desktop]`**, allowing
-headless servers to set `[desktop] enabled = false` while keeping webhooks and
-commands active.
+Outbound sinks under `[notify]` are **opt-in and empty by default**, so
+upgrading Quartermaster sends no external webhooks or commands until you add at
+least one `[[notify.webhooks]]` or `[[notify.commands]]` sink. Both the durable
+event feed and outbound sinks run **independently of `[desktop]`**, allowing
+headless servers to set `[desktop] enabled = false` while keeping the feed,
+`GET /events`, webhooks, and commands active.
 
 ## Supported events
 
@@ -102,6 +106,11 @@ versioned `version: 1` JSON envelope:
 }
 ```
 
+For `needs_me` items, `items[].class` (optional integer `0`–`9`, omitted when
+unavailable) is extracted from live `CLASS: N` notes or structured question
+cards so consumers can distinguish urgent (`class >= 7`) from batched items
+without an extra round trip.
+
 For `inbox_runner` events, the envelope includes `runner`:
 
 ```json
@@ -142,7 +151,55 @@ with body:
 - `inbox_url` is populated **only** when `[tap]` is enabled and validated as
   the non-secret bookmarkable `/inbox` path (`http://<tailnet-ip>:<port>/inbox`
   with no query string or token). Signed `/tap/<token>` bearer URLs are never
-  emitted in outbound notifications.
+  emitted in outbound notifications or stored in the durable event feed.
+
+## Durable event feed (`<state>/notify/events.json` and `GET /events`)
+
+Quartermaster maintains a bounded, durable notification feed in
+`<state>/notify/events.json` (mode `0600`, directory `0700`, `flock`-protected,
+atomic rename + `fsync`):
+
+- **Always recorded:** Sanitized ticker milestones/blockers (`pr_merged`,
+  `pr_green`, `pr_ready`, `needs_me`, `blocked`, `worker_blocked`) and headless
+  inbox runner outcomes (`inbox_runner` on `acked > 0`, failure, or timeout) are
+  appended automatically — even when `[desktop] enabled = false` and no
+  `[[notify.webhooks]]` or `[[notify.commands]]` sinks are configured. Synthetic
+  events from `quartermaster notify test` are never written to the feed.
+- **Monotonic sequence & ring buffer:** Each event gets a monotonically
+  increasing integer `seq` (`1, 2, 3, ...`) persisted as `latest_seq` across
+  restarts and evictions. The file retains the most recent 500 events; each
+  entry carries `seq` alongside the sanitized `version: 1` envelope fields
+  (`version`, `event`, `at`, `title`, `body`, `inbox_url`, `items`, `runner`).
+- **Tailnet polling (`GET /events`):** When `[tap]` is enabled, the existing
+  Tailscale-bound tap server exposes `GET /events?since=<seq>&limit=<N>&event=<kinds>`
+  behind the exact same fail-closed auth guard as `/inbox`, `/inbox.json`, and
+  `/tap-links/` (tailnet IP + `tailscale whois` + `[tap] devices`; disallowed
+  sources — including the host machine itself — receive `403` and log
+  `TAP REFUSED:` before reading any state). Only `GET` is allowed (`405` on
+  other methods), requests are strictly read-only, and responses carry
+  `Content-Type: application/json; charset=utf-8` and `Cache-Control: no-store`.
+- **Query parameters** (malformed values return `400` JSON `{"error": ...}`):
+  - `since` (optional non-negative integer, default `0`): return events with
+    `seq > since` in ascending `seq` order.
+  - `limit` (optional positive integer, default `100`, capped at `500`; `<= 0`
+    or non-integer values return `400`).
+  - `event` (optional comma-separated list of known event kinds: `pr_merged`,
+    `pr_green`, `pr_ready`, `needs_me`, `blocked`, `worker_blocked`,
+    `inbox_runner`; unknown kinds return `400`).
+- **Response shape and cursor/truncation semantics:**
+  `{"version":1,"latest_seq":<uint64>,"next_since":<uint64>,"has_more":<bool>,"truncated":<bool>,"events":[...]}`
+  - `next_since` equals the last returned event's `seq` if `events` is
+    non-empty, or `latest_seq` otherwise (so a fresh client starting at
+    `?since=0` or a client whose cursor fell ahead of a reset state dir syncs
+    cleanly).
+  - `has_more` is `true` when additional matching events exist beyond `limit`.
+  - `truncated` is `true` when `since > 0` and either `since` predates the
+    oldest retained event (`oldest_seq > 1 && since < oldest_seq - 1`) or
+    `since > latest_seq`, signaling the client should perform a snapshot sync
+    (`quartermaster context --compact` / `quartermaster inbox --questions`).
+
+See [docs/approval-taps.md](approval-taps.md#cursor-based-notification-feed-get-events)
+for the full tailnet endpoint contract and example payload.
 
 ## Delivery semantics & state
 
@@ -171,11 +228,15 @@ quartermaster notify status --json
 quartermaster notify test
 quartermaster notify test --sink ops-webhook
 quartermaster notify test --json
+
+# Inspect the local durable notification event feed (strictly read-only):
+quartermaster notify events
+quartermaster notify events --since 10 --limit 50 --event needs_me,pr_merged --json
 ```
 
 `quartermaster notify test` exits nonzero if no sinks are configured, if
 `--sink` does not match a configured sink, or if any targeted sink fails or
-times out.
+times out. It never writes synthetic `test` events into `<state>/notify/events.json`.
 
 ## Rollback
 

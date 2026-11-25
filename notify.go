@@ -56,6 +56,7 @@ type NotifyItem struct {
 	Reason  string `json:"reason"`
 	Summary string `json:"summary,omitempty"`
 	PR      string `json:"pr,omitempty"`
+	Class   *int   `json:"class,omitempty"`
 }
 
 // NotifyRunnerInfo summarizes one headless inbox runner outcome inside an
@@ -100,6 +101,7 @@ type notifyPendingItem struct {
 	Reason  string    `json:"reason"`
 	Summary string    `json:"summary,omitempty"`
 	PR      string    `json:"pr,omitempty"`
+	Class   *int      `json:"class,omitempty"`
 	At      time.Time `json:"at"`
 }
 
@@ -428,11 +430,16 @@ func sanitizeNotifyEnvelope(ev NotifyEnvelope) NotifyEnvelope {
 	if len(ev.Items) > 0 {
 		clean := make([]NotifyItem, 0, len(ev.Items))
 		for _, it := range ev.Items {
+			var classPtr *int
+			if it.Class != nil && *it.Class >= 0 && *it.Class <= 9 {
+				classPtr = cloneIntPtr(it.Class)
+			}
 			clean = append(clean, NotifyItem{
 				Bead:    sanitizeDesktopLine(it.Bead, 120),
 				Reason:  sanitizeDesktopLine(it.Reason, 64),
 				Summary: sanitizeDesktopLine(it.Summary, notifyMaxSummaryRunes),
 				PR:      sanitizeDesktopLine(it.PR, 120),
+				Class:   classPtr,
 			})
 		}
 		ev.Items = clean
@@ -913,12 +920,8 @@ func coalescePendingRunners(runs []notifyPendingRunner) (string, string, NotifyR
 	return title, body, info
 }
 
-func buildNotifyEnvelopeForSink(pendingItems []notifyPendingItem, pendingRunner []notifyPendingRunner, now time.Time) NotifyEnvelope {
-	ev := NotifyEnvelope{
-		Version: notifyEnvelopeVersion,
-		At:      now.UTC().Format(time.RFC3339),
-	}
-	ordered := append([]notifyPendingItem(nil), pendingItems...)
+func sortNotifyPendingItems(items []notifyPendingItem) []notifyPendingItem {
+	ordered := append([]notifyPendingItem(nil), items...)
 	sort.Slice(ordered, func(i, j int) bool {
 		pi, pj := desktopReasonPriority(ordered[i].Reason), desktopReasonPriority(ordered[j].Reason)
 		if pi != pj {
@@ -929,6 +932,15 @@ func buildNotifyEnvelopeForSink(pendingItems []notifyPendingItem, pendingRunner 
 		}
 		return ordered[i].Key < ordered[j].Key
 	})
+	return ordered
+}
+
+func buildNotifyEnvelopeForSink(pendingItems []notifyPendingItem, pendingRunner []notifyPendingRunner, now time.Time) NotifyEnvelope {
+	ev := NotifyEnvelope{
+		Version: notifyEnvelopeVersion,
+		At:      now.UTC().Format(time.RFC3339),
+	}
+	ordered := sortNotifyPendingItems(pendingItems)
 
 	if len(ordered) > 0 {
 		ev.Event = ordered[0].Reason
@@ -940,6 +952,7 @@ func buildNotifyEnvelopeForSink(pendingItems []notifyPendingItem, pendingRunner 
 				Reason:  it.Reason,
 				Summary: it.Summary,
 				PR:      it.PR,
+				Class:   cloneIntPtr(it.Class),
 			})
 		}
 	}
@@ -991,7 +1004,14 @@ func runNotifyJobs(ctx context.Context, cfg Config, env notifyEnv, jobs []notify
 	if len(jobs) == 0 {
 		return
 	}
-	inboxURL := resolveSafeTapInboxURL(cfg, env)
+	runNotifyJobsWithInboxURL(ctx, cfg, env, jobs, resolveSafeTapInboxURL(cfg, env), wg)
+}
+
+func runNotifyJobsWithInboxURL(ctx context.Context, cfg Config, env notifyEnv, jobs []notifyJob, inboxURL string, wg *sync.WaitGroup) {
+	_ = cfg
+	if len(jobs) == 0 {
+		return
+	}
 	for i := range jobs {
 		jobs[i].Envelope.InboxURL = inboxURL
 		jobs[i].Envelope = sanitizeNotifyEnvelope(jobs[i].Envelope)
@@ -1065,25 +1085,41 @@ func collectDueNotifyJobs(st *notifyStatusFile, sinks []notifySink, now time.Tim
 	return jobs
 }
 
-// reconcileNotifyWith updates durable episode deduplication and per-sink
-// cooldown queues in <state>/notify/status.json and dispatches any due
-// outbound sink notifications independently of [desktop].
+// reconcileNotifyWith updates durable episode deduplication in
+// <state>/notify/status.json, appends newly detected sanitized events to the
+// durable notification feed (<state>/notify/events.json) even when [desktop]
+// and outbound sinks are off, and dispatches any due outbound sink
+// notifications independently of [desktop].
 func reconcileNotifyWith(ctx context.Context, cfg Config, env notifyEnv, threads []Thread, milestones []desktopMilestone, now time.Time, wg *sync.WaitGroup) error {
-	if !cfg.Notify.enabled() {
-		return nil
+	var sinks []notifySink
+	if cfg.Notify.enabled() {
+		sinks = configuredNotifySinks(cfg)
 	}
-	sinks := configuredNotifySinks(cfg)
-	if len(sinks) == 0 {
-		return nil
+	if len(sinks) == 0 && len(milestones) == 0 {
+		hasReason := false
+		for _, th := range threads {
+			if desktopReason(th) != "" {
+				hasReason = true
+				break
+			}
+		}
+		if !hasReason {
+			if _, err := os.Stat(notifyStatusPath()); errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+		}
 	}
-	var jobs []notifyJob
+
+	var (
+		newlyDue []notifyPendingItem
+		jobs     []notifyJob
+	)
 	err := withNotifyLock(func() error {
 		st, err := loadNotifyStatus()
 		if err != nil {
 			return err
 		}
 		active := map[string]bool{}
-		var newlyDue []notifyPendingItem
 
 		for _, th := range threads {
 			reason := desktopReason(th)
@@ -1110,12 +1146,17 @@ func reconcileNotifyWith(ctx context.Context, cfg Config, env notifyEnv, threads
 				if th.PR != nil {
 					prRef = prName(*th.PR)
 				}
+				var classPtr *int
+				if reason == "needs_me" {
+					classPtr = notifyNeedsMeClass(th)
+				}
 				newlyDue = append(newlyDue, notifyPendingItem{
 					Key:     fmt.Sprintf("episode:%s:%s", id, reason),
 					Bead:    id,
 					Reason:  reason,
 					Summary: sanitizeDesktopLine(notifyItemSummaryForThread(th, reason), notifyMaxSummaryRunes),
 					PR:      prRef,
+					Class:   classPtr,
 					At:      now,
 				})
 			} else if hash != "" {
@@ -1172,47 +1213,68 @@ func reconcileNotifyWith(ctx context.Context, cfg Config, env notifyEnv, threads
 			delete(st.Episodes, inactive[i])
 		}
 
-		for _, it := range newlyDue {
-			for _, sink := range sinks {
-				if !sink.subscribes(it.Reason) {
-					continue
+		if len(sinks) > 0 {
+			for _, it := range newlyDue {
+				for _, sink := range sinks {
+					if !sink.subscribes(it.Reason) {
+						continue
+					}
+					ss := st.Sinks[sink.Name]
+					ss.PendingItems = appendPendingNotifyItem(ss.PendingItems, it)
+					st.Sinks[sink.Name] = ss
 				}
-				ss := st.Sinks[sink.Name]
-				ss.PendingItems = appendPendingNotifyItem(ss.PendingItems, it)
-				st.Sinks[sink.Name] = ss
 			}
+			jobs = collectDueNotifyJobs(&st, sinks, now)
 		}
-
-		jobs = collectDueNotifyJobs(&st, sinks, now)
 		return saveNotifyStatus(st)
 	})
 	if err != nil {
 		return err
 	}
-	runNotifyJobs(ctx, cfg, env, jobs, wg)
-	return nil
+
+	var inboxURL string
+	if len(newlyDue) > 0 || len(jobs) > 0 {
+		inboxURL = resolveSafeTapInboxURL(cfg, env)
+	}
+	var feedErr error
+	if len(newlyDue) > 0 {
+		ordered := sortNotifyPendingItems(newlyDue)
+		feedEnvelopes := make([]NotifyEnvelope, 0, len(ordered))
+		for _, it := range ordered {
+			ev := buildNotifyEnvelopeForSink([]notifyPendingItem{it}, nil, now)
+			ev.InboxURL = inboxURL
+			feedEnvelopes = append(feedEnvelopes, sanitizeNotifyEnvelope(ev))
+		}
+		feedErr = appendNotifyFeedEvents(feedEnvelopes)
+	}
+	runNotifyJobsWithInboxURL(ctx, cfg, env, jobs, inboxURL, wg)
+	return feedErr
 }
 
-// dispatchNotifyInboxRunner enqueues an inbox_runner event for all subscribed
-// outbound sinks and delivers every sink not currently in cooldown. Any sink
-// in cooldown retains the event durably in <state>/notify/status.json for
-// subsequent flushing.
+// dispatchNotifyInboxRunner records a sanitized inbox_runner event into the
+// durable notification feed (<state>/notify/events.json) — even when [desktop]
+// and outbound sinks are off — and enqueues/delivers to any subscribed
+// outbound sinks in <state>/notify/status.json.
 func dispatchNotifyInboxRunner(ctx context.Context, cfg Config, env notifyEnv, title, body string, runner NotifyRunnerInfo, now time.Time) error {
+	inboxURL := resolveSafeTapInboxURL(cfg, env)
+	cleanEnv := sanitizeNotifyEnvelope(NotifyEnvelope{
+		Version:  notifyEnvelopeVersion,
+		Event:    "inbox_runner",
+		At:       now.UTC().Format(time.RFC3339),
+		Title:    title,
+		Body:     body,
+		InboxURL: inboxURL,
+		Runner:   &runner,
+	})
+	feedErr := appendNotifyFeedEvents([]NotifyEnvelope{cleanEnv})
+
 	if !cfg.Notify.enabled() {
-		return nil
+		return feedErr
 	}
 	sinks := configuredNotifySinks(cfg)
 	if len(sinks) == 0 {
-		return nil
+		return feedErr
 	}
-	cleanEnv := sanitizeNotifyEnvelope(NotifyEnvelope{
-		Version: notifyEnvelopeVersion,
-		Event:   "inbox_runner",
-		At:      now.UTC().Format(time.RFC3339),
-		Title:   title,
-		Body:    body,
-		Runner:  &runner,
-	})
 	entry := notifyPendingRunner{
 		Title:  cleanEnv.Title,
 		Body:   cleanEnv.Body,
@@ -1240,8 +1302,8 @@ func dispatchNotifyInboxRunner(ctx context.Context, cfg Config, env notifyEnv, t
 	if err != nil {
 		return err
 	}
-	runNotifyJobs(ctx, cfg, env, jobs, nil)
-	return nil
+	runNotifyJobsWithInboxURL(ctx, cfg, env, jobs, inboxURL, nil)
+	return feedErr
 }
 
 // NotifyStatusReport is emitted by `quartermaster notify status [--json]`.
@@ -1444,7 +1506,7 @@ func runNotifyTest(ctx context.Context, cfg Config, env notifyEnv, sinkFilter st
 	return nil
 }
 
-const notifyUsage = "usage: quartermaster notify status [--json] | quartermaster notify test [--sink <name>] [--json]"
+const notifyUsage = "usage: quartermaster notify status [--json] | quartermaster notify test [--sink <name>] [--json] | quartermaster notify events [--since <seq>] [--limit <N>] [--event <kinds>] [--json]"
 
 func notifyCmd(cfg Config, env notifyEnv, args []string, out io.Writer) error {
 	if len(args) == 0 {
@@ -1481,6 +1543,41 @@ func notifyCmd(cfg Config, env notifyEnv, args []string, out io.Writer) error {
 			return errors.New(notifyUsage)
 		}
 		return runNotifyTest(context.Background(), cfg, env, *sink, out, *asJSON)
+	case "events":
+		fs := flag.NewFlagSet("notify events", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		since := fs.Uint64("since", 0, "return events with seq > since")
+		limit := fs.Int("limit", notifyFeedDefaultLimit, "maximum events to return (1-500)")
+		eventArg := fs.String("event", "", "comma-separated event kinds to include")
+		asJSON := fs.Bool("json", false, "emit JSON output")
+		pos, err := interspersed(fs, rest)
+		if err != nil {
+			return fmt.Errorf("%v\n%s", err, notifyUsage)
+		}
+		if len(pos) != 0 {
+			return errors.New(notifyUsage)
+		}
+		if *limit <= 0 {
+			return fmt.Errorf("invalid --limit %d: must be a positive integer\n%s", *limit, notifyUsage)
+		}
+		lim := min(*limit, notifyFeedMaxLimit)
+		var filter map[string]bool
+		if *eventArg != "" {
+			filter, err = parseNotifyEventFilter(*eventArg)
+			if err != nil {
+				return fmt.Errorf("%v\n%s", err, notifyUsage)
+			}
+		}
+		feed, err := loadNotifyFeed()
+		if err != nil {
+			return err
+		}
+		resp := queryNotifyFeed(feed, NotifyEventsQuery{
+			Since:  *since,
+			Limit:  lim,
+			Events: filter,
+		})
+		return writeNotifyEvents(out, resp, *asJSON)
 	default:
 		return fmt.Errorf("unknown notify command %q\n%s", sub, notifyUsage)
 	}
