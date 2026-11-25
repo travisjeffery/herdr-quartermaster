@@ -795,6 +795,20 @@ its chain usable. Older catalogs have `claude-opus-5-5` but not
 ] } } }
 ```
 
+### Worker roles
+
+Workers default to the `implementer` role (git worktree, branch, PR-authoring
+and auto-merge workflow). Built-in non-coding presets — `reviewer`,
+`investigator`, and `rollout` — run with `worktree = false` in an isolated
+`<state>/roles/<bead>` directory (mode `0700`) with role-specific briefs and no
+throwaway branches, and can be customized or extended under `[roles.<name>]`
+with per-role `agent`, `model`, `thinking`, `args`, `exclude_tools` (merged
+cleanly into `pi`'s `--exclude-tools`), `brief`, and `instructions` /
+`instructions_file`. Select a role with `quartermaster dispatch <bead> --role
+<name>` or a `role:<name>` bead label (persisted for `resume`, `resolve`, and
+`context`), and inspect effective roles with `quartermaster roles [--json]`.
+See [docs/roles.md](docs/roles.md).
+
 ### Antigravity (agy) workers
 
 Google's [Antigravity](https://antigravity.google/) CLI is opt-in (details,
@@ -937,6 +951,16 @@ env = ["CLAUDE_CODE_ENABLE_TELEMETRY=1", "OTEL_EXPORTER_OTLP_ENDPOINT=https://ot
 args = ["--model", "claude-opus-5-5[1m]"]                     # workers
 coordinator_args = ["--model", "claude-fable-5-2[1m]"]        # the coordinator, in place of args
 bypass_args = ["--dangerously-skip-permissions"]   # after args, only for a worker under a 9 lease (the default; [] turns it off)
+
+# [roles.reviewer]          # configurable worker roles (docs/roles.md); built-in presets: implementer, reviewer, investigator, rollout
+# worktree = false          # default true for implementer/custom, false for built-in reviewer/investigator/rollout
+# agent = "pi"              # optional agent kind override (claude|codex|muse|pi|agy|auto)
+# model = "anthropic/claude-opus-5-5"
+# thinking = "high"         # --thinking (pi), --effort (claude/agy), --reasoning-effort (muse)
+# exclude_tools = ["edit", "write"]  # pi only; merged into [agents.pi] --exclude-tools without duplicates
+# brief = "reviewer"        # implementer | reviewer | investigator | rollout
+# instructions = "Check edge cases and concurrency invariants."
+# instructions_file = "~/prompts/review-checklist.md"
 
 [autonomy]                # the 0-9 dial (docs/design/autonomy-dial.md; these are the defaults)
 level = 4                 # the global level for beads without an autonomy:N label; 3+ also auto-closes
@@ -1295,7 +1319,8 @@ QUARTERMASTER_DIGEST_SLACK_CHANNEL=U0123456789
 | Command | What it does |
 |---|---|
 | `quartermaster coordinator [--agent K]` | Open (or focus) the coordinator agent. Also `prefix+shift+j`. |
-| `quartermaster dispatch <bead> [--agent K] [--focus] [--host H] [--force]` | Claim a bead, create its worktree and branch, start a worker and brief it, on host `H` (default: the bead's `host:` label, else local). |
+| `quartermaster dispatch <bead> [--agent K] [--role R] [--focus] [--host H] [--force]` | Claim a bead, create its worktree/branch (or isolated `<state>/roles/<bead>` dir when `worktree = false`), start a worker and brief it, on host `H` (default: the bead's `host:` label, else local). Persists `role:<name>` for non-default roles. |
+| `quartermaster roles [--json]` | List all built-in (`implementer`, `reviewer`, `investigator`, `rollout`) and custom `[roles.<name>]` presets with their effective settings (see [docs/roles.md](docs/roles.md)). |
 | `quartermaster host list` | The worker hosts: herdr machine, slots, labels, repos. |
 | `quartermaster focus [<bead>] [--agent K]` | Focus the bead's worker, or dispatch one. With no bead, reads the id from the clipboard. |
 | `quartermaster context [--compact] [--section S,...] [--json]` | The coordinator's digest: inbox, threads by state, Linear moves, `next` and ready beads. `--compact` renders under 4 KB while keeping every `needs_me` bead; `--section` selects from `summary,autonomy,inbox,threads,linear,next,ready`; `--json` emits the same sections as JSON. |

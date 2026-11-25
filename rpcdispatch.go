@@ -16,7 +16,11 @@ import (
 // rpcLaunchArgs reuses model preflight, guard extension and ask configuration.
 // Native sessions get a private directory and their exact file on resume.
 func rpcLaunchArgs(cfg Config, id string) ([]string, error) {
-	args := cfg.agentArgs("pi", false)
+	return rpcLaunchArgsForRole(cfg, id, builtinRolePreset(roleImplementer))
+}
+
+func rpcLaunchArgsForRole(cfg Config, id string, role EffectiveRole) ([]string, error) {
+	args := cfg.workerArgs("pi", false, role)
 	for _, a := range args {
 		key, _, _ := strings.Cut(a, "=")
 		switch key {
@@ -53,11 +57,23 @@ func dispatchRPC(cfg Config, h Herdr, id string, o DispatchOpts) (string, error)
 	if err != nil {
 		return "", err
 	}
+	role, err := cfg.resolveRoleForBead(b, o.Role)
+	if err != nil {
+		return "", err
+	}
+	if role.Agent != "" && role.Agent != "pi" && role.Agent != "auto" {
+		return "", fmt.Errorf("role %q sets agent %q, but pi-rpc requires pi", role.Name, role.Agent)
+	}
+	if role.Thinking != "" && !isValidPiThinkingLevel(role.Thinking) {
+		return "", fmt.Errorf("role %q: invalid pi thinking level %q (want %s)", role.Name, role.Thinking, strings.Join(piThinkingLevels, ", "))
+	}
 	if b.Status == StatusClosed {
 		return "", fmt.Errorf("%s is closed", id)
 	}
-	if _, ok := cfg.repoName(b); !ok {
-		return "", errors.New("unknown repository label")
+	if role.Worktree {
+		if _, ok := cfg.repoName(b); !ok {
+			return "", errors.New("unknown repository label")
+		}
 	}
 	host, err := cfg.hostFor(b, o.Host, o.Force)
 	if err != nil {
@@ -83,7 +99,11 @@ func dispatchRPC(cfg Config, h Herdr, id string, o DispatchOpts) (string, error)
 			}
 		}
 	}
-	args, err := rpcLaunchArgs(cfg, id)
+	roleInstr, err := loadRoleInstructions(role)
+	if err != nil {
+		return "", err
+	}
+	args, err := rpcLaunchArgsForRole(cfg, id, role)
 	if err != nil {
 		return "", err
 	}
@@ -97,16 +117,35 @@ func dispatchRPC(cfg Config, h Herdr, id string, o DispatchOpts) (string, error)
 	if rpcExists(id) {
 		return "", errors.New("RPC reservation already exists")
 	}
-	repo := cfg.repoFor(b)
-	branch := branchFor(cfg.BranchPrefix, b)
-	cwd := filepath.Join(rpcDir(id), "worktree")
-	cwd, err = filepath.Abs(cwd)
-	if err != nil {
-		return "", err
-	}
-	out, err := exec.Command("git", "-C", repo, "worktree", "add", "-b", branch, cwd, cfg.BaseBranch).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("new isolated RPC worktree (existing branches are never adopted): %w: %s", err, out)
+	var (
+		branch  string
+		cwd     string
+		repoRef string
+	)
+	if role.Worktree {
+		repo := cfg.repoFor(b)
+		branch = branchFor(cfg.BranchPrefix, b)
+		cwd = filepath.Join(rpcDir(id), "worktree")
+		cwd, err = filepath.Abs(cwd)
+		if err != nil {
+			return "", err
+		}
+		out, err := exec.Command("git", "-C", repo, "worktree", "add", "-b", branch, cwd, cfg.BaseBranch).CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("new isolated RPC worktree (existing branches are never adopted): %w: %s", err, out)
+		}
+	} else {
+		cwd, err = ensureRoleDir(id)
+		if err != nil {
+			return "", fmt.Errorf("role dir for %s: %w", id, err)
+		}
+		if rn, ok := cfg.repoName(b); ok {
+			if rn != "" {
+				repoRef = cfg.Repos[rn]
+			} else {
+				repoRef = cfg.Repo
+			}
+		}
 	}
 	w := rpcWorker{Bead: id, Cwd: cwd, Branch: branch, Args: args}
 	if err = rpcSave(filepath.Join(rpcDir(id), "worker.json"), w); err != nil {
@@ -118,6 +157,9 @@ func dispatchRPC(cfg Config, h Herdr, id string, o DispatchOpts) (string, error)
 	if err = setHostLabel(bd, b, localHost); err != nil {
 		return "", err
 	}
+	if err = setRoleLabel(bd, b, role.Name); err != nil {
+		return "", err
+	}
 	if auto != "" {
 		_ = bd.Note(id, auto+" dispatched pi-rpc in "+cwd+" — native local supervisor; no Herdr pane")
 	}
@@ -125,11 +167,14 @@ func dispatchRPC(cfg Config, h Herdr, id string, o DispatchOpts) (string, error)
 	if err = rpcStart(id); err != nil {
 		return "", err
 	}
-	text := brief(b, branch, cwd, linearKey(b, cfg.LinearPrefixes), readInstructions())
+	text := briefForRole(b, role, branch, cwd, repoRef, linearKey(b, cfg.LinearPrefixes), readInstructions(), roleInstr)
 	text += "\nTransport: native pi RPC, no Herdr pane. Do not run herdr commands. Inspect with quartermaster rpc status/output/events; use quartermaster tell for follow-ups.\n"
 	reqID := "brief-" + rpcID()
 	if _, err = rpcClient(id, rpcRequest{Op: "prompt", ID: reqID, Text: text}); err != nil {
 		return "", fmt.Errorf("worker started; brief request %s may have been delivered: %w", reqID, err)
+	}
+	if !role.Worktree {
+		return fmt.Sprintf("started pi-rpc on %s (role %s, dir %s); request %s", id, role.Name, cwd, reqID), nil
 	}
 	return fmt.Sprintf("started pi-rpc on %s (branch %s, worktree %s); request %s", id, branch, cwd, reqID), nil
 }

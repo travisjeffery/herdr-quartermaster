@@ -831,17 +831,25 @@ func (t Ticker) leftActive(st *TickerState, id string, prev Snapshot, agents map
 			summary += fmt.Sprintf(" after PR #%d merged", prev.PRNumber)
 		}
 		// The coordinator may have resolved it before this pass saw it close.
-		wt, _, werr := linkedWorktree(t.cfg, t.herdr, b)
-		if lvl, _ := t.cfg.beadLevel(b, autonomyStopped()); werr == nil && wt == nil {
-			summary += "; its worktree is already removed"
-		} else if lvl >= classHousekeeping && prev.PRState == "MERGED" && (!hasAgent || agentReady(&a)) {
-			if res, err := resolve(t.cfg, t.herdr, id, false); err != nil {
-				summary += "; auto-resolve failed: " + err.Error()
+		if role, rerr := t.cfg.resolveRoleForBead(b, ""); rerr == nil && !role.Worktree {
+			if _, ok := hasRoleDir(id); ok {
+				summary += fmt.Sprintf("; run `quartermaster resolve %s` to remove its role directory", id)
 			} else {
-				summary += "; " + res
+				summary += "; its role directory is already removed"
 			}
 		} else {
-			summary += fmt.Sprintf("; run `quartermaster resolve %s` to remove its worktree", id)
+			wt, _, werr := linkedWorktree(t.cfg, t.herdr, b)
+			if lvl, _ := t.cfg.beadLevel(b, autonomyStopped()); werr == nil && wt == nil {
+				summary += "; its worktree is already removed"
+			} else if lvl >= classHousekeeping && prev.PRState == "MERGED" && (!hasAgent || agentReady(&a)) {
+				if res, err := resolve(t.cfg, t.herdr, id, false); err != nil {
+					summary += "; auto-resolve failed: " + err.Error()
+				} else {
+					summary += "; " + res
+				}
+			} else {
+				summary += fmt.Sprintf("; run `quartermaster resolve %s` to remove its worktree", id)
+			}
 		}
 		_ = writeEvent(Event{Bead: id, Kind: "closed", Summary: summary, At: now})
 	}

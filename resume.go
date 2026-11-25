@@ -54,15 +54,27 @@ func beadWorktree(cfg Config, b Bead, prs map[string]PR, wts []Worktree) (Worktr
 type Resumable struct {
 	Bead     Bead
 	Worktree Worktree
+	// RoleDir is non-empty when the bead ran in a worktree = false isolated
+	// role directory (<state>/roles/<bead>).
+	RoleDir string
 }
 
-// orphans splits the beads with no live agent into those with a worktree to
-// resume in and those without one.
+// orphans splits the beads with no live agent into those with a worktree or
+// role directory to resume in and those without one.
 func orphans(cfg Config, beads []Bead, live map[string]bool, prs map[string]PR, list worktreeLister) ([]Resumable, []Bead, error) {
 	var resumable []Resumable
 	var bare []Bead
 	for _, b := range beads {
 		if live[agentName(b.ID)] {
+			continue
+		}
+		role, roleErr := cfg.resolveRoleForBead(b, "")
+		if roleErr == nil && !role.Worktree {
+			if dir, ok := hasRoleDir(b.ID); ok {
+				resumable = append(resumable, Resumable{Bead: b, RoleDir: dir})
+			} else {
+				bare = append(bare, b)
+			}
 			continue
 		}
 		wts, err := list(cfg.repoFor(b))
@@ -71,6 +83,8 @@ func orphans(cfg Config, beads []Bead, live map[string]bool, prs map[string]PR, 
 		}
 		if w, ok := beadWorktree(cfg, b, prs, wts); ok {
 			resumable = append(resumable, Resumable{Bead: b, Worktree: w})
+		} else if dir, ok := hasRoleDir(b.ID); ok {
+			resumable = append(resumable, Resumable{Bead: b, RoleDir: dir})
 		} else {
 			bare = append(bare, b)
 		}
@@ -137,13 +151,18 @@ func pickResumable(res []Resumable, ids []string) ([]Resumable, []string) {
 }
 
 // resumeKind prefers an explicit kind, then the kind that claimed the bead
-// (dispatch claims as the agent kind), then the configured worker.
+// (dispatch claims as the agent kind), then the bead's role agent override,
+// then the configured worker.
 func resumeKind(cfg Config, b Bead, kind string) string {
 	switch {
 	case kind == "" && validKinds[b.Assignee]:
 		return b.Assignee
 	case kind == "":
-		kind = cfg.WorkerAgent
+		if role, err := cfg.resolveRoleForBead(b, ""); err == nil && role.Agent != "" {
+			kind = role.Agent
+		} else {
+			kind = cfg.WorkerAgent
+		}
 	}
 	if kind == "auto" {
 		return autoAgent(time.Now())
@@ -223,6 +242,19 @@ func resume(cfg Config, h Herdr, ids []string, kind, by string) ([]string, error
 	return out, errors.Join(errs...)
 }
 
+func findRoleWorkspace(h Herdr, name string) (string, bool) {
+	wss, err := h.Workspaces()
+	if err != nil {
+		return "", false
+	}
+	for _, ws := range wss {
+		if !ws.HasWorktree && ws.Label == name && ws.ID != "" {
+			return ws.ID, true
+		}
+	}
+	return "", false
+}
+
 func resumeOne(cfg Config, h Herdr, r Resumable, kind string) (string, error) {
 	lease, err := rpcLease(r.Bead.ID)
 	if err != nil {
@@ -232,12 +264,40 @@ func resumeOne(cfg Config, h Herdr, r Resumable, kind string) (string, error) {
 	if rpcExists(r.Bead.ID) {
 		return "", errors.New("native worker: use quartermaster rpc resume explicitly; no automatic replay")
 	}
+	role, err := cfg.resolveRoleForBead(r.Bead, "")
+	if err != nil {
+		return "", err
+	}
 	if !validKinds[kind] {
 		return "", fmt.Errorf("unknown agent kind %q (%s)", kind, kindList())
 	}
+	if kind == "pi" && role.Thinking != "" && !isValidPiThinkingLevel(role.Thinking) {
+		return "", fmt.Errorf("role %q: invalid pi thinking level %q (want %s)", role.Name, role.Thinking, strings.Join(piThinkingLevels, ", "))
+	}
 	id, name := r.Bead.ID, agentName(r.Bead.ID)
+	args := cfg.workerArgs(kind, cfg.launchBypass(r.Bead, localHost), role, resumeArgs[kind]...)
+	if kind == "pi" {
+		var err error
+		if args, err = cfg.piLaunch(localHost, args, "worker", id); err != nil {
+			return "", err
+		}
+	}
 	var pane string
-	if r.Worktree.WorkspaceID == "" {
+	if r.RoleDir != "" {
+		if wsID, ok := findRoleWorkspace(h, name); ok {
+			if panes, err := h.Panes(wsID); err == nil {
+				pane, _ = freePane(panes)
+			}
+		}
+		if pane == "" {
+			opened, err := h.WorkspaceCreate(r.RoleDir, name, false)
+			if err != nil {
+				return "", fmt.Errorf("open role workspace %s: %w", r.RoleDir, err)
+			}
+			pane = opened.PaneID
+			_ = h.TabRename(pane[:strings.LastIndex(pane, ":")]+":t1", shortTitle(r.Bead.Title, 34))
+		}
+	} else if r.Worktree.WorkspaceID == "" {
 		opened, err := h.WorktreeOpen(cfg.repoFor(r.Bead), r.Worktree.Branch, name, false)
 		if err != nil {
 			return "", fmt.Errorf("open worktree %s: %w", r.Worktree.Branch, err)
@@ -255,14 +315,12 @@ func resumeOne(cfg Config, h Herdr, r Resumable, kind string) (string, error) {
 		}
 	}
 	text := fmt.Sprintf("[quartermaster] You were resumed after your agent exited. Run `bd show %s` and continue.", id)
-	_ = h.Run(pane, cfg.agentEnv(kind)+" QUARTERMASTER_BEAD="+shellQuote(id)+execEnv(id))
-	args := cfg.agentArgs(kind, cfg.launchBypass(r.Bead, localHost), resumeArgs[kind]...)
-	if kind == "pi" {
-		var err error
-		if args, err = cfg.piLaunch(localHost, args, "worker", id); err != nil {
-			return "", err
-		}
+	env := cfg.agentEnv(kind) + " QUARTERMASTER_BEAD=" + shellQuote(id)
+	if role.Name != roleImplementer {
+		env += " QUARTERMASTER_ROLE=" + shellQuote(role.Name)
 	}
+	env += execEnv(id)
+	_ = h.Run(pane, env)
 	if err := h.AgentStart(name, kind, pane, args...); err != nil {
 		if !strings.Contains(err.Error(), "agent_not_ready") {
 			return "", fmt.Errorf("start %s in %s: %w", kind, pane, err)

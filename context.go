@@ -115,8 +115,12 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   `+"`## Acceptance`"+` section is checked against criteria the verifier derives from
   its description, and its note says so. TJ's own close (`+"`--by TJ`"+`, the board)
   skips the verifier: TJ is the evaluator then.
-- `+"`quartermaster dispatch <bead> [--agent claude|codex|muse|pi|agy]`"+` starts a worker; it claims the
-  bead and briefs the agent. One bead per thread.
+- `+"`quartermaster dispatch <bead> [--agent claude|codex|muse|pi|agy] [--role implementer|reviewer|investigator|rollout|<custom>]`"+` starts a worker; it claims the
+  bead and briefs the agent. One bead per thread. Built-in roles: `+"`implementer`"+` (default, git worktree + branch),
+  `+"`reviewer`"+` (worktree-free skeptical PR review), `+"`investigator`"+` (worktree-free read-only diagnosis), and `+"`rollout`"+`
+  (worktree-free post-merge rollout/verification). `+"`--role`"+` persists a `+"`role:<name>`"+` label on the bead (and a bead
+  labelled `+"`role:<name>`"+` selects that role automatically across dispatch, resume, and resolve); run
+  `+"`quartermaster roles`"+` to inspect built-in and configured `+"`[roles.<name>]`"+` presets.
 - Talk to a worker with `+"`quartermaster tell <bead> \"...\"`"+`: a pi worker gets it over its
   control socket, queued behind a running turn; any other is typed into its pane, only when
   it is at rest. Read it with `+"`herdr agent read <name> --source recent-unwrapped --lines 120`"+`

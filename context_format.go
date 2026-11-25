@@ -183,6 +183,7 @@ type contextThread struct {
 	SnoozedUntil *time.Time `json:"snoozed_until,omitempty"`
 	PR           *contextPR `json:"pr"`
 	Repo         string     `json:"repo,omitempty"`
+	Role         string     `json:"role,omitempty"`
 	State        string     `json:"state,omitempty"`
 	Agent        string     `json:"agent,omitempty"`
 	Title        string     `json:"title,omitempty"`
@@ -200,6 +201,7 @@ type contextThread struct {
 
 	group      Group  `json:"-"`
 	repoTag    string `json:"-"`
+	roleTag    string `json:"-"`
 	isNeedsMe  bool   `json:"-"`
 	parkedKind string `json:"-"`
 	cardLine   string `json:"-"`
@@ -549,6 +551,7 @@ func contextWarnings(cfg Config, threads []Thread, next, ready []Bead, st Ticker
 		out = append(out, fmt.Sprintf("gh has been failing since %s (%s); PR state below is stale.", st.GHFailingFor.Format(time.Kitchen), strings.Join(st.GHFailingIn, ", ")))
 	}
 	out = append(out, unknownRepos(cfg, threads, next, ready)...)
+	out = append(out, unknownRoles(cfg, threads, next, ready)...)
 	if pid := runningPID(); pid == 0 {
 		out = append(out, "the ticker is not running (`quartermaster ticker start`); nothing follows PRs or updates the sidebar.")
 	} else if w := socketWarning(runningSocket(), cfg.coordSocket(), os.Getenv("HERDR_SOCKET_PATH")); w != "" {
@@ -622,6 +625,10 @@ func buildContextThread(cfg Config, t Thread, g Group, noAgentKind string, compa
 	ct.repoTag = repoTag(cfg, t.Bead)
 	if name, ok := cfg.repoName(t.Bead); ok && name != "" {
 		ct.Repo = name
+	}
+	ct.roleTag = roleTag(cfg, t.Bead)
+	if role, err := cfg.resolveRoleForBead(t.Bead, ""); err == nil && role.Name != roleImplementer {
+		ct.Role = role.Name
 	}
 	ct.State = stateLine(t)
 	agent := "no agent"
@@ -1051,7 +1058,7 @@ func renderThreadsText(doc *contextDoc) string {
 		if t.Parked && t.ParkedReason != "" {
 			state = "parked (" + t.ParkedReason + ")"
 		}
-		fmt.Fprintf(&s, "- %s%s · %s · %s · %s\n", t.Bead, t.repoTag, state, t.Agent, t.Title)
+		fmt.Fprintf(&s, "- %s%s%s · %s · %s · %s\n", t.Bead, t.repoTag, t.roleTag, state, t.Agent, t.Title)
 		if t.Run != "" {
 			fmt.Fprintf(&s, "  run: %s\n", t.Run)
 		}
