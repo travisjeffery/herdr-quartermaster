@@ -14,7 +14,7 @@ func renderBoard(m *board, w, hgt int) string {
 	add := func(style, text string) { lines = append(lines, style+fit(text, w)+ansiReset) }
 
 	add(ansiBold, m.titleLine())
-	if line := filterLine(m.filter); line != "" && m.view != viewGC {
+	if line := filterLine(m.filter); line != "" && m.view != viewGC && m.view != viewEvents && m.view != viewAnswer {
 		add(ansiCyan, line)
 	}
 	// The bottom three lines: the selected bead's latest note, the status or
@@ -22,13 +22,17 @@ func renderBoard(m *board, w, hgt int) string {
 	body := hgt - len(lines) - 3
 	switch m.view {
 	case viewHelp:
-		for i, l := range helpLines(m.back == viewGC) {
+		for i, l := range helpLinesFor(m.back) {
 			if i < body {
 				add("", l)
 			}
 		}
 	case viewGC:
 		lines = append(lines, m.gcLines(w, body)...)
+	case viewEvents:
+		lines = append(lines, m.eventsLines(w, body)...)
+	case viewAnswer:
+		lines = append(lines, m.answerLines(w, body)...)
 	default:
 		var detail []styledLine
 		if m.view == viewDetail && m.sel() != nil {
@@ -40,7 +44,7 @@ func renderBoard(m *board, w, hgt int) string {
 			m.scroll = min(m.scroll, max(0, len(detail)-1))
 			detail = detail[m.scroll:]
 		}
-		lines = append(lines, listLines(m.rows, m.cur, detail, m.now(), w, body)...)
+		lines = append(lines, listLines(m.rows, m.cur, m.marked, detail, m.now(), w, body)...)
 	}
 	for len(lines) < hgt-3 {
 		lines = append(lines, "")
@@ -50,6 +54,12 @@ func renderBoard(m *board, w, hgt int) string {
 	if r := m.sel(); r != nil && m.view == viewList {
 		if latest, _ := notesSplit(r.bead.Notes); latest != "" {
 			preview = latest
+		}
+	} else if r := m.evSel(); r != nil && m.view == viewEvents {
+		if r.inboxFile != "" {
+			preview = "inbox: " + r.inboxFile + "  (i ack · ↵ jump)"
+		} else if r.summary != "" {
+			preview = r.summary
 		}
 	}
 	add(ansiDim, preview)
@@ -92,7 +102,8 @@ func (m *board) titleLine() string {
 	if needs > 0 {
 		parts = append(parts, fmt.Sprintf("%d need you", needs))
 	}
-	if m.view == viewGC {
+	switch m.view {
+	case viewGC:
 		parts[0] = "quartermaster tidy"
 		parts = parts[:1]
 		switch {
@@ -107,7 +118,42 @@ func (m *board) titleLine() string {
 				parts = append(parts, fmt.Sprintf("%d marked", n))
 			}
 		}
-	} else {
+	case viewEvents:
+		parts = []string{
+			"quartermaster events",
+			fmt.Sprintf("%d unread inbox", len(m.data.Inbox)),
+			fmt.Sprintf("%d recent", len(m.feed)+len(m.autoRecs)),
+		}
+		if m.evLoading {
+			parts = append(parts, "refreshing…")
+		} else if m.evErr != "" {
+			parts = append(parts, "events failed: "+m.evErr)
+		}
+		return strings.Join(parts, " · ")
+	case viewAnswer:
+		parts = []string{"quartermaster answer"}
+		if m.ans != nil {
+			parts = append(parts, m.ans.beadID)
+			if m.ans.kind == answerKindPrompt {
+				parts = append(parts, "approval prompt")
+				if m.ans.prompt != nil {
+					parts = append(parts, "["+m.ans.prompt.Hash+"]")
+				}
+			} else {
+				parts = append(parts, "needs_me")
+				if m.ans.question != nil && m.ans.question.ClassN >= 0 {
+					parts = append(parts, fmt.Sprintf("C%d", m.ans.question.ClassN))
+				}
+			}
+			if m.ans.loading {
+				parts = append(parts, "loading…")
+			}
+		}
+		return strings.Join(parts, " · ")
+	default:
+		if n := len(m.marked); n > 0 {
+			parts = append(parts, fmt.Sprintf("%d marked", n))
+		}
 		parts = append(parts, "by "+m.sort.String())
 	}
 	switch {
@@ -135,10 +181,17 @@ func (m *board) hint() string {
 		return "any key returns"
 	case m.view == viewGC:
 		return "space mark  * all  C close  u release  d resolve  i dismiss  ↵ focus  r rescan  esc back  ? help"
+	case m.view == viewEvents:
+		return "j/k move  ↵ jump to bead  i ack inbox  r refresh  E/esc back  ? help"
+	case m.view == viewAnswer:
+		if m.ans != nil && m.ans.kind == answerKindPrompt {
+			return "1-9 pick option  j/k scroll  r reload  esc back  ? help"
+		}
+		return "1-9 pick option  t custom text  j/k scroll  r reload  esc back  ? help"
 	case m.view == viewDetail:
 		return "J/K scroll  V RPC view  a note  A answer  o PR  l Linear  b bd show  ↵ view/focus/start  esc back"
 	}
-	return "↵ RPC view or focus/start  V read-only RPC view  space detail  a note  A answer  T tidy  / filter  ? help"
+	return "↵ focus/start  space detail  A answer  D role  ; mark  E events  N new  @ coord  T tidy  ? help"
 }
 
 // agentGlyph is the agent column: working, idle or done, waiting on an
@@ -158,7 +211,7 @@ func agentGlyph(a *Agent) (string, string) {
 
 // listLines is the list, scrolled to keep the selection in view, and below it
 // the detail pane when one is open: the list then gets a third of the body.
-func listLines(rows []boardRow, cur int, detail []styledLine, now time.Time, w, body int) []string {
+func listLines(rows []boardRow, cur int, marked map[string]bool, detail []styledLine, now time.Time, w, body int) []string {
 	var out []string
 	if len(rows) == 0 {
 		return []string{ansiDim + fit("  nothing open", w) + ansiReset}
@@ -214,11 +267,20 @@ func listLines(rows []boardRow, cur int, detail []styledLine, now time.Time, w, 
 			title = " " + rpcViewFit(r.bead.Title, titleW)
 		}
 		head := fit(r.bead.ID, idW) + " " + fmt.Sprintf("P%d", r.bead.Priority) + " "
+		isMarked := marked[r.bead.ID]
 		if i == cur {
-			out = append(out, ansiInvert+rpcViewFit("▌ "+head+glyph+" "+when+" "+rpcViewFit(r.line, stateW)+title, w)+ansiReset)
+			prefix := "▌ "
+			if isMarked {
+				prefix = "▌*"
+			}
+			out = append(out, ansiInvert+rpcViewFit(prefix+head+glyph+" "+when+" "+rpcViewFit(r.line, stateW)+title, w)+ansiReset)
 			continue
 		}
-		out = append(out, "  "+head+gColor+glyph+ansiReset+" "+ansiDim+when+ansiReset+" "+r.color+rpcViewFit(r.line, stateW)+ansiReset+title)
+		prefix := "  "
+		if isMarked {
+			prefix = ansiYellow + ansiBold + "* " + ansiReset
+		}
+		out = append(out, prefix+head+gColor+glyph+ansiReset+" "+ansiDim+when+ansiReset+" "+r.color+rpcViewFit(r.line, stateW)+ansiReset+title)
 	}
 	if detail != nil {
 		out = append(out, ansiDim+strings.Repeat("─", w)+ansiReset)
@@ -308,6 +370,14 @@ func (m *board) gcLines(w, body int) []string {
 
 func helpLines(gc bool) []string {
 	if gc {
+		return helpLinesFor(viewGC)
+	}
+	return helpLinesFor(viewList)
+}
+
+func helpLinesFor(v boardView) []string {
+	switch v {
+	case viewGC:
 		return []string{
 			"Tidy: what looks finished, with the evidence for each.",
 			"",
@@ -322,6 +392,27 @@ func helpLines(gc bool) []string {
 			"",
 			"Actions apply to the marked items, or the selected one when none are.",
 		}
+	case viewEvents:
+		return []string{
+			"Events / Inbox: unread inbox/ files and recent notify/events.json + AUTO: steps.",
+			"",
+			"  j/k ↑/↓      move                 ^d/^u   page        g/G  top/bottom",
+			"  ↵            jump to the event's bead on the main board",
+			"  i            acknowledge the selected unread inbox file",
+			"  r            refresh inbox and recent events now",
+			"  esc, q, E    back to the board",
+		}
+	case viewAnswer:
+		return []string{
+			"Answer view: full approval prompt or structured needs_me question.",
+			"",
+			"  1-9          pick a numbered option (confirms before sending --by TJ)",
+			"               approval prompts verify --expect <hash> and refuse on mismatch;",
+			"               needs_me records NEEDS_ME ANSWERED, sets in_progress, prompts worker",
+			"  t            enter a custom free-text answer (needs_me questions only)",
+			"  j/k, J/K     scroll               r       reload live prompt / question",
+			"  esc, q       back to the board",
+		}
 	}
 	return []string{
 		"Every open bead, by what it needs. Agents refresh every 2s, beads every 30s",
@@ -331,22 +422,24 @@ func helpLines(gc bool) []string {
 		"  ]/[ tab   next/prev section                 :     go to a bead id",
 		"  /         filter (every word, any field)    s     sort: priority, recent, oldest",
 		"  space v   detail pane    J/K  scroll it     b     bd show in a pager",
-		"  esc q     close the pane, clear the filter, or quit",
-		"  r         refresh now    T    tidy view     q     quit",
+		"  ; M       mark/unmark row                   *     toggle/clear section marks",
+		"  esc q     close pane, clear filter/marks, or quit",
+		"  r         refresh now    T    tidy view     E     live events / inbox view",
 		"",
-		"  ↵         view native RPC history; otherwise focus/start (confirms start)",
+		"  ↵         view native RPC history; otherwise focus/start (confirms; r picks role)",
 		"  V         read-only native history (including parked/stopped workers)",
-		"  c x m i t start claude, codex, muse, pi or agy (confirms)",
-		"  R         resume an exited agent in its worktree (confirms)",
-		"  a         add a note                        A   answer an idle worker (confirms)",
-		"  n         toggle the next label             S   set status",
-		"  P         set priority                      +   create a child task (confirms)",
+		"  c x m i t start claude, codex, muse, pi or agy (confirms; r picks role; bulk)",
+		"  D         start with a [roles.<name>] role picker (defaults to role: label)",
+		"  R         resume exited agent(s) (confirms; a or c/x/m/i/t overrides agent)",
+		"  a         add a note                        A   answer prompt / needs_me / worker",
+		"  n         toggle next (single or marked)    S   set status         P  priority",
+		"  N         create top-level bead (repo/role) +   create child task  @  ask coord",
 		"  U 0-9     autonomy level: U cycles 2 4 7, a digit sets it (confirms; 8 and 9",
 		"            ask how long); the worker is told when idle. L4 on a row is its level",
-		"  C         close with a reason (confirms)",
-		"  o l       open the PR / Linear issue        y p copy the id / RUN command",
+		"  C         close --by TJ (single or marked)  d   resolve worktree (never --force)",
+		"  o l       open PR / Linear issue            y p copy id / RUN command",
 		"",
-		"Approval prompts are never answered here; native RPC viewing has no controls.",
+		"Approval prompts verify --expect <hash> --by TJ; native RPC viewing is read-only.",
 	}
 }
 

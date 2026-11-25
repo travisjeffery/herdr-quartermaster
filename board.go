@@ -2,8 +2,11 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -83,36 +86,74 @@ type boardEnv struct {
 	beads  func() ([]Bead, error)
 	agents func() ([]Agent, error)
 	// local is the ticker's last state and the unhandled inbox, both files.
-	local func() (TickerState, []InboxItem)
-	show  func(id string) (Bead, error)
-	read  func(pane string) (string, error)
-	gc    func(data boardData) ([]gcItem, error)
+	local  func() (TickerState, []InboxItem)
+	events func() ([]NotifyFeedEvent, []journalRecord, error)
+	show   func(id string) (Bead, error)
+	read   func(pane string) (string, error)
+	gc     func(data boardData) ([]gcItem, error)
 	// Native viewing is independent of focus/dispatch and of live agents.
 	native     func() map[string]rpcVisibility
 	isNative   func(id string) bool
 	viewNative func(id, title string, links []string) error
 
-	note        func(id, text string) error
-	setStatus   func(id, status string) error
-	setLabel    func(id, label string, on bool) error
-	setPriority func(id string, p int) error
-	close       func(id, reason string) error
-	child       func(parent Bead, title string) (string, error)
-	prompt      func(agent, text string) error
-	dispatch    func(id, kind string) (string, error)
-	resume      func(id string) (string, error)
-	resolve     func(id string) (string, error)
-	release     func(b Bead, days int) error
-	autonomy    func(id string, n int, d time.Duration) (string, error)
-	focus       func(agent string) error
-	inboxDone   func(files []string) error
-	copy        func(text string) error
-	open        func(url string) string
+	readPrompt    func(id string) (ApprovalPrompt, error)
+	answerPrompt  func(id, choice, expect string) (string, error)
+	answerNeedsMe func(id, choice, text, expect string) (string, error)
+
+	note           func(id, text string) error
+	setStatus      func(id, status string) error
+	setLabel       func(id, label string, on bool) error
+	setPriority    func(id string, p int) error
+	close          func(id, reason string) error
+	child          func(parent Bead, title string) (string, error)
+	create         func(title, repo, role string) (string, error)
+	prompt         func(agent, text string) error
+	askCoordinator func(text string) (string, error)
+	dispatch       func(id, kind, role string, focus bool) (string, error)
+	resume         func(id, kind string) (string, error)
+	resolve        func(id string) (string, error)
+	release        func(b Bead, days int) error
+	autonomy       func(id string, n int, d time.Duration) (string, error)
+	focus          func(agent string) error
+	inboxDone      func(files []string) error
+	copy           func(text string) error
+	open           func(url string) string
+}
+
+// askBoardCoordinator forwards a free-form natural-language prompt to the
+// running interactive coordinator session/pane without leaving the board.
+// Refuses when no coordinator is running or when it is busy/blocked.
+func askBoardCoordinator(cfg Config, listAgents func() ([]Agent, error), send func(target, text string) error, text string) (string, error) {
+	if strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("nothing to send to coordinator")
+	}
+	agents, err := listAgents()
+	if err != nil {
+		return "", fmt.Errorf("list agents: %w", err)
+	}
+	byName := make(map[string]Agent, len(agents))
+	for _, a := range agents {
+		if a.Name != "" {
+			byName[a.Name] = a
+		}
+	}
+	coord, ok := findCoordinatorAgent(cfg, byName)
+	if !ok {
+		return "", fmt.Errorf("coordinator is not running; open it with `quartermaster coordinator`")
+	}
+	if !agentReady(&coord) {
+		return "", fmt.Errorf("coordinator (%s) is %s; wait until it is idle", coord.Name, coord.Status)
+	}
+	if err := send(coord.Name, text); err != nil {
+		return "", err
+	}
+	return "sent to coordinator (" + coord.Name + ")", nil
 }
 
 func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 	bd := Beads{}
 	cache := boardCachePath()
+	pEnv := livePromptEnv(cfg, h)
 	return boardEnv{
 		beads: func() ([]Bead, error) {
 			beads, err := bd.list("--status", strings.Join(boardStatuses, ","))
@@ -126,12 +167,26 @@ func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 			inbox, _ := readInbox()
 			return loadState(), inbox
 		},
+		events: func() ([]NotifyFeedEvent, []journalRecord, error) {
+			return loadBoardEvents(time.Now())
+		},
 		show:       bd.Show,
 		read:       func(pane string) (string, error) { return h.Read(pane, 40, detailTimeout) },
 		gc:         func(data boardData) ([]gcItem, error) { return loadGC(cfg, h, data) },
 		native:     rpcVisibilityAll,
 		isNative:   rpcExists,
 		viewNative: runRPCView,
+
+		readPrompt: func(id string) (ApprovalPrompt, error) {
+			p, _, _, err := workerPrompt(pEnv, id)
+			return p, err
+		},
+		answerPrompt: func(id, choice, expect string) (string, error) {
+			return answerPromptVia(pEnv, id, choice, expect, "TJ", -1, "board")
+		},
+		answerNeedsMe: func(id, choice, text, expect string) (string, error) {
+			return answerNeedsMeTextVia(pEnv, id, choice, text, expect, "board")
+		},
 
 		note:      bd.Note,
 		setStatus: bd.SetStatus,
@@ -141,22 +196,40 @@ func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 			return err
 		},
 		close: func(id, reason string) error {
-			_, err := bd.run("close", id, "--reason", reason)
-			return err
+			return closeBead(cfg, liveCloseEnv(cfg), id, reason, "TJ", io.Discard)
 		},
 		child: func(parent Bead, title string) (string, error) {
 			out, err := bd.run("create", title, "-t", "task", "-p", fmt.Sprint(parent.Priority), "--parent", parent.ID, "--silent")
 			return strings.TrimSpace(string(out)), err
 		},
+		create: func(title, repo, role string) (string, error) {
+			args := []string{"create", title, "-t", "task", "-p", "2"}
+			var labels []string
+			if repo != "" {
+				labels = append(labels, repoLabel+repo)
+			}
+			if role != "" && role != roleImplementer {
+				labels = append(labels, roleLabel+role)
+			}
+			if len(labels) > 0 {
+				args = append(args, "-l", strings.Join(labels, ","))
+			}
+			args = append(args, "--silent")
+			out, err := bd.run(args...)
+			return strings.TrimSpace(string(out)), err
+		},
 		prompt: h.Prompt,
+		askCoordinator: func(text string) (string, error) {
+			return askBoardCoordinator(cfg, h.Agents, h.Prompt, text)
+		},
 		autonomy: func(id string, n int, d time.Duration) (string, error) {
 			return setLevel(cfg, liveAutonomyEnv(cfg, h), id, n, d, "TJ", time.Now())
 		},
-		dispatch: func(id, kind string) (string, error) {
-			return dispatch(cfg, h, id, DispatchOpts{Kind: kind, Focus: true, By: "TJ"})
+		dispatch: func(id, kind, role string, focus bool) (string, error) {
+			return dispatch(cfg, h, id, DispatchOpts{Kind: kind, Role: role, Focus: focus, By: "TJ"})
 		},
-		resume: func(id string) (string, error) {
-			lines, err := resume(cfg, h, []string{id}, "", "TJ")
+		resume: func(id, kind string) (string, error) {
+			lines, err := resume(cfg, h, []string{id}, kind, "TJ")
 			return strings.Join(lines, "; "), err
 		},
 		resolve: func(id string) (string, error) { return resolve(cfg, h, id, false) },
@@ -201,11 +274,14 @@ type (
 	}
 	// doneMsg is an action finishing: its message, and what to reload.
 	doneMsg struct {
-		text   string
-		err    error
-		reload bool
-		gc     bool
-		quit   bool
+		text         string
+		err          error
+		reload       bool
+		reloadLocal  bool
+		reloadAgents bool
+		gc           bool
+		closeAnswer  bool
+		quit         bool
 	}
 )
 
@@ -215,6 +291,8 @@ const (
 	viewList boardView = iota
 	viewDetail
 	viewGC
+	viewEvents
+	viewAnswer
 	viewHelp
 )
 
@@ -269,6 +347,23 @@ type board struct {
 	scroll     int
 	scrolledOn string
 
+	// marked tracks main-board multi-selected bead IDs for bulk actions.
+	marked map[string]bool
+
+	// ans holds the live approval prompt or structured needs_me question shown
+	// in viewAnswer.
+	ans *answerState
+
+	// Live Events / Inbox view (E) state.
+	feed      []NotifyFeedEvent
+	autoRecs  []journalRecord
+	evRows    []eventRow
+	evCur     int
+	evLoading bool
+	evLoaded  bool
+	evErr     string
+	evAt      time.Time
+
 	gc        []gcItem
 	gcLoading bool
 	gcLoaded  bool
@@ -284,8 +379,17 @@ type board struct {
 }
 
 func newBoard(cfg Config, env boardEnv, data boardData, now func() time.Time) *board {
-	m := &board{cfg: cfg, env: env, now: now, data: data, details: map[string]*beadDetail{}, gcMarked: map[string]bool{}}
+	m := &board{
+		cfg:      cfg,
+		env:      env,
+		now:      now,
+		data:     data,
+		details:  map[string]*beadDetail{},
+		marked:   map[string]bool{},
+		gcMarked: map[string]bool{},
+	}
 	m.rebuild()
+	m.rebuildEvents()
 	return m
 }
 
@@ -297,6 +401,17 @@ func (m *board) rebuild() {
 		id = r.bead.ID
 	}
 	m.all = buildRows(m.cfg, m.data, m.sort)
+	present := make(map[string]bool, len(m.all))
+	for _, r := range m.all {
+		if r.header == "" {
+			present[r.bead.ID] = true
+		}
+	}
+	for mid := range m.marked {
+		if !present[mid] {
+			delete(m.marked, mid)
+		}
+	}
 	m.rows = filterRows(m.all, m.filter.query)
 	m.cur = -1
 	for i, r := range m.rows {
@@ -346,6 +461,11 @@ func (m *board) tick() []cmd {
 	}
 	if m.view == viewGC && !m.gcLoaded && !m.gcLoading {
 		cmds = append(cmds, m.loadGC())
+	}
+	if m.view == viewEvents && !m.evLoading && (!m.evLoaded || now.Sub(m.evAt) >= localEvery) {
+		if c := m.loadEvents(); c != nil {
+			cmds = append(cmds, c)
+		}
 	}
 	return cmds
 }
@@ -459,6 +579,19 @@ func (m *board) apply(x msg) []cmd {
 		m.localAt = m.now()
 		m.data.State, m.data.Inbox = x.st, x.inbox
 		m.rebuild()
+		m.rebuildEvents()
+	case eventsMsg:
+		m.evLoading, m.evLoaded = false, true
+		m.evAt = m.now()
+		if x.err != nil {
+			m.evErr = x.err.Error()
+			return nil
+		}
+		m.evErr = ""
+		m.feed, m.autoRecs = x.feed, x.journal
+		m.rebuildEvents()
+	case answerLoadMsg:
+		m.applyAnswerLoad(x)
 	case gcMsg:
 		m.gcLoading, m.gcLoaded = false, true
 		m.gcErr, m.gcTook = "", x.took
@@ -486,12 +619,24 @@ func (m *board) apply(x msg) []cmd {
 		default:
 			m.status = x.text
 		}
+		if x.closeAnswer && x.err == nil && m.view == viewAnswer && m.ans != nil {
+			m.view = m.ans.back
+			m.ans = nil
+		}
 		if x.quit && x.err == nil {
 			m.quit = true
 		}
 		var cmds []cmd
 		if x.reload {
 			cmds = append(cmds, m.loadBeads())
+		}
+		if x.reloadLocal {
+			m.localAt = time.Time{}
+			m.evAt = time.Time{}
+			cmds = append(cmds, m.tick()...)
+		} else if x.reloadAgents {
+			m.agentsAt = time.Time{}
+			cmds = append(cmds, m.tick()...)
 		}
 		if x.gc {
 			m.gcLoaded = false
@@ -556,6 +701,9 @@ func (m *board) key(k string) []cmd {
 			return nil
 		}
 		m.ask = nil
+		if k == "\n" && strings.Contains(a.keys, "\r") {
+			k = "\r"
+		}
 		if len(k) == 1 && strings.Contains(a.keys, k) {
 			return a.then(k)
 		}
@@ -576,6 +724,10 @@ func (m *board) key(k string) []cmd {
 		return nil
 	case viewGC:
 		return m.gcKey(k)
+	case viewEvents:
+		return m.eventsKey(k)
+	case viewAnswer:
+		return m.answerKey(k)
 	case viewDetail:
 		if m.detailKey(k) {
 			return nil
@@ -650,10 +802,15 @@ const page = 10
 func (m *board) listKey(k string) []cmd {
 	switch k {
 	case "q", "\x1b":
-		// Esc clears a kept filter before it closes the board.
+		// Esc clears a kept filter, then clears marks, before it closes the board.
 		if k == "\x1b" && m.filter.query != "" {
 			m.filter.query = ""
 			m.rebuild()
+			return nil
+		}
+		if k == "\x1b" && len(m.marked) > 0 {
+			m.marked = map[string]bool{}
+			m.status = "cleared marks"
 			return nil
 		}
 		m.quit = true
@@ -703,6 +860,32 @@ func (m *board) listKey(k string) []cmd {
 	case "T":
 		m.view = viewGC
 		return m.tick()
+	case "E":
+		m.view = viewEvents
+		m.rebuildEvents()
+		m.evAt = time.Time{}
+		m.localAt = time.Time{}
+		return m.tick()
+	case "N":
+		m.createAsk()
+		return nil
+	case "@":
+		m.askCoordinatorBar()
+		return nil
+	case ";", "M":
+		if r := m.sel(); r != nil {
+			id := r.bead.ID
+			if m.marked[id] {
+				delete(m.marked, id)
+			} else {
+				m.marked[id] = true
+			}
+			m.move(1)
+		}
+		return nil
+	case "*":
+		m.toggleSectionMarks()
+		return nil
 	case " ", "v":
 		if m.sel() != nil {
 			m.view = viewDetail
@@ -747,7 +930,7 @@ func (m *board) jump(id string) {
 	m.status = "no open bead matches " + id
 }
 
-// beadKey is the keys that act on the selected bead.
+// beadKey is the keys that act on the selected bead (or marked beads for bulk actions).
 func (m *board) beadKey(k string, r boardRow) []cmd {
 	id := r.bead.ID
 	switch k {
@@ -761,21 +944,57 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 			name := r.agent.Name
 			return []cmd{func() msg { return doneMsg{err: m.env.focus(name), quit: true} }}
 		}
-		m.dispatchAsk(r, "")
+		m.dispatchAsk([]boardRow{r}, "", "", false)
 	case "c", "x", "m", "i", "t":
-		m.dispatchAsk(r, map[string]string{"c": "claude", "x": "codex", "m": "muse", "i": "pi", "t": "agy"}[k])
+		kind := map[string]string{"c": "claude", "x": "codex", "m": "muse", "i": "pi", "t": "agy"}[k]
+		if len(m.marked) > 0 {
+			targets, ok := m.boardTargets()
+			if !ok {
+				return nil
+			}
+			eligible := filterRowsWithoutAgent(targets)
+			if len(eligible) == 0 {
+				m.status = "nothing to dispatch in the selection (all already have agents)"
+				return nil
+			}
+			m.dispatchAsk(eligible, kind, "", false)
+			return nil
+		}
+		m.dispatchAsk([]boardRow{r}, kind, "", false)
+	case "D":
+		if len(m.marked) > 0 {
+			targets, ok := m.boardTargets()
+			if !ok {
+				return nil
+			}
+			eligible := filterRowsWithoutAgent(targets)
+			if len(eligible) == 0 {
+				m.status = "nothing to dispatch in the selection (all already have agents)"
+				return nil
+			}
+			m.dispatchRolePick(eligible, "")
+			return nil
+		}
+		m.dispatchRolePick([]boardRow{r}, "")
 	case "R":
+		if len(m.marked) > 0 {
+			targets, ok := m.boardTargets()
+			if !ok {
+				return nil
+			}
+			eligible := filterRowsWithoutAgent(targets)
+			if len(eligible) == 0 {
+				m.status = "nothing to resume in the selection (all already have agents)"
+				return nil
+			}
+			m.resumeAsk(eligible, "")
+			return nil
+		}
 		if r.agent != nil {
 			m.status = id + " already has an agent (" + r.agent.Name + ")"
 			return nil
 		}
-		m.ask = confirm("resume "+id+"'s last agent conversation in its worktree?", func() []cmd {
-			m.status = "resuming " + id + "…"
-			return []cmd{func() msg {
-				text, err := m.env.resume(id)
-				return doneMsg{text: text, err: err, reload: true}
-			}}
-		})
+		m.resumeAsk([]boardRow{r}, "")
 	case "a":
 		m.ask = &ask{prompt: "note on " + id + ": ", text: true, then: func(text string) []cmd {
 			m.local(id, func(b *Bead) { b.Notes = strings.TrimLeft(b.Notes+"\n"+text, "\n") })
@@ -784,8 +1003,36 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 			}}
 		}}
 	case "A":
-		m.answer(r)
+		return m.openAnswer(r)
 	case "n":
+		if len(m.marked) > 0 {
+			targets, ok := m.boardTargets()
+			if !ok {
+				return nil
+			}
+			on := false
+			for _, t := range targets {
+				if !t.bead.HasLabel(LabelNext) {
+					on = true
+					break
+				}
+			}
+			for _, t := range targets {
+				for i := range m.data.Beads {
+					if m.data.Beads[i].ID == t.bead.ID {
+						m.data.Beads[i].Labels = without(m.data.Beads[i].Labels, LabelNext)
+						if on {
+							m.data.Beads[i].Labels = append(m.data.Beads[i].Labels, LabelNext)
+						}
+					}
+				}
+			}
+			m.rebuild()
+			word := map[bool]string{true: "labelled next", false: "unlabelled next"}[on]
+			return m.bulkRun(word, targets, func(t boardRow) (string, error) {
+				return "", m.env.setLabel(t.bead.ID, LabelNext, on)
+			})
+		}
 		on := !r.bead.HasLabel(LabelNext)
 		m.local(id, func(b *Bead) {
 			if on {
@@ -869,6 +1116,21 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 			return nil
 		}}
 	case "C":
+		if len(m.marked) > 0 {
+			targets, ok := m.boardTargets()
+			if !ok {
+				return nil
+			}
+			m.ask = &ask{prompt: "close " + rowIDs(targets) + ", reason: ", text: true, then: func(reason string) []cmd {
+				m.ask = confirm(fmt.Sprintf("close %s: %q?", rowIDs(targets), reason), func() []cmd {
+					return m.bulkRun("closed", targets, func(t boardRow) (string, error) {
+						return "", m.env.close(t.bead.ID, reason)
+					})
+				})
+				return nil
+			}}
+			return nil
+		}
 		m.ask = &ask{prompt: "close " + id + ", reason: ", text: true, then: func(reason string) []cmd {
 			m.ask = confirm(fmt.Sprintf("close %s: %q?", id, reason), func() []cmd {
 				return []cmd{func() msg {
@@ -877,6 +1139,24 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 			})
 			return nil
 		}}
+	case "d":
+		targets, ok := m.boardTargets()
+		if !ok {
+			return nil
+		}
+		m.ask = confirm("quartermaster resolve "+rowIDs(targets)+" (remove worktree/role dir, never --force)?", func() []cmd {
+			if len(targets) == 1 && len(m.marked) == 0 {
+				tid := targets[0].bead.ID
+				m.status = "resolving " + tid + "…"
+				return []cmd{func() msg {
+					text, err := m.env.resolve(tid)
+					return doneMsg{text: text, err: err, reload: true, reloadAgents: true}
+				}}
+			}
+			return m.bulkRun("resolved", targets, func(t boardRow) (string, error) {
+				return m.env.resolve(t.bead.ID)
+			})
+		})
 	case "o":
 		if len(r.prs) == 0 {
 			m.status = "no PR known"
@@ -904,26 +1184,442 @@ func (m *board) copied(text, done string) string {
 	return done
 }
 
-// dispatchAsk confirms, then starts a worker on the bead and closes the board
-// on the new workspace, which dispatch focuses.
-func (m *board) dispatchAsk(r boardRow, kind string) {
-	id := r.bead.ID
+// boardTargets returns the marked visible rows when any rows are marked on the
+// main board, or the currently selected row otherwise. If marks exist but none
+// are visible under the current filter, ok is false.
+func (m *board) boardTargets() ([]boardRow, bool) {
+	if len(m.marked) == 0 {
+		if r := m.sel(); r != nil {
+			return []boardRow{*r}, true
+		}
+		return nil, false
+	}
+	var out []boardRow
+	for _, r := range m.rows {
+		if r.header == "" && m.marked[r.bead.ID] {
+			out = append(out, r)
+		}
+	}
+	if len(out) == 0 {
+		m.status = "no marked beads match current filter (esc clears filter)"
+		return nil, false
+	}
+	return out, true
+}
+
+func filterRowsWithoutAgent(rows []boardRow) []boardRow {
+	var out []boardRow
+	for _, r := range rows {
+		if r.agent == nil {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func rowIDs(rows []boardRow) string {
+	s := make([]string, 0, len(rows))
+	for _, r := range rows {
+		s = append(s, r.bead.ID)
+	}
+	if len(s) > 3 {
+		return fmt.Sprintf("%s and %d more", strings.Join(s[:3], ", "), len(s)-3)
+	}
+	return strings.Join(s, ", ")
+}
+
+// toggleSectionMarks marks all visible rows in the current section, or clears
+// all marks in the current section when any row in it is already marked.
+func (m *board) toggleSectionMarks() {
+	sec := m.sectionRows()
+	if len(sec) == 0 {
+		return
+	}
+	anyMarked := false
+	for _, r := range sec {
+		if m.marked[r.bead.ID] {
+			anyMarked = true
+			break
+		}
+	}
+	if anyMarked {
+		for _, r := range sec {
+			delete(m.marked, r.bead.ID)
+		}
+		m.status = fmt.Sprintf("unmarked %d in section", len(sec))
+		return
+	}
+	for _, r := range sec {
+		m.marked[r.bead.ID] = true
+	}
+	m.status = fmt.Sprintf("marked %d in section", len(sec))
+}
+
+func (m *board) sectionRows() []boardRow {
+	if m.cur < 0 || m.cur >= len(m.rows) {
+		return nil
+	}
+	h := m.cur
+	for h > 0 && m.rows[h].header == "" {
+		h--
+	}
+	var out []boardRow
+	for i := h + 1; i < len(m.rows) && m.rows[i].header == ""; i++ {
+		out = append(out, m.rows[i])
+	}
+	return out
+}
+
+// bulkRun applies do to each row in turn on the main board, unmarking each
+// acted row and summarizing successes and errors.
+func (m *board) bulkRun(done string, rows []boardRow, do func(boardRow) (string, error)) []cmd {
+	for _, r := range rows {
+		delete(m.marked, r.bead.ID)
+	}
+	m.status = fmt.Sprintf("%s: working on %d…", done, len(rows))
+	return []cmd{func() msg {
+		var ok, errs []string
+		for _, r := range rows {
+			if _, err := do(r); err != nil {
+				errs = append(errs, r.bead.ID+": "+err.Error())
+				continue
+			}
+			ok = append(ok, r.bead.ID)
+		}
+		text := fmt.Sprintf("%s %d", done, len(ok))
+		if len(ok) > 0 && len(ok) <= 3 {
+			text = done + " " + strings.Join(ok, ", ")
+		}
+		var err error
+		if len(errs) > 0 {
+			err = fmt.Errorf("%d failed: %s", len(errs), strings.Join(errs, "; "))
+		}
+		return doneMsg{text: text, err: err, reload: true, reloadAgents: true}
+	}}
+}
+
+// dispatchAsk confirms, then starts a worker (or bulk workers) on rows. When
+// role is empty and not explicitly chosen, a single bead defaults to any
+// role:<name> label on the bead; pressing r on the confirmation lets the user
+// pick any built-in or configured [roles.<name>] role before starting.
+func (m *board) dispatchAsk(rows []boardRow, kind, role string, roleChosen bool) {
+	if len(rows) == 0 {
+		return
+	}
+	single := len(rows) == 1 && len(m.marked) == 0
+	effectiveName := role
+	if !roleChosen && effectiveName == "" && len(rows) == 1 {
+		labelRole, err := beadRole(rows[0].bead)
+		if err != nil {
+			m.status = err.Error()
+			return
+		}
+		effectiveName = labelRole
+	}
+	eff, err := m.cfg.resolveRole(effectiveName)
+	if err != nil {
+		m.status = err.Error()
+		return
+	}
 	who := kind
 	if who == "" {
-		who = "an agent"
+		if eff.Agent != "" {
+			who = eff.Agent
+		} else {
+			who = "an agent"
+		}
 	}
-	m.ask = confirm(fmt.Sprintf("start %s on %s in its own worktree?", who, id), func() []cmd {
-		m.status = "starting " + id + "…"
-		return []cmd{func() msg {
-			text, err := m.env.dispatch(id, kind)
-			return doneMsg{text: text, err: err, reload: true, quit: true}
-		}}
+	dispatchRole := ""
+	if roleChosen || (effectiveName != "" && effectiveName != roleImplementer) {
+		dispatchRole = eff.Name
+	}
+	roleNote := ""
+	if dispatchRole != "" {
+		roleNote = " (role " + dispatchRole + ")"
+	}
+	var prompt string
+	if single {
+		where := "in its own worktree"
+		if !eff.Worktree {
+			where = "in an isolated role dir (no worktree)"
+		}
+		prompt = fmt.Sprintf("start %s on %s%s %s?  y/n · r role", who, rows[0].bead.ID, roleNote, where)
+	} else {
+		prompt = fmt.Sprintf("start %s on %s%s?  y/n · r role", who, rowIDs(rows), roleNote)
+	}
+	m.ask = &ask{prompt: prompt, keys: "yr", then: func(k string) []cmd {
+		if k == "r" {
+			m.pickRoleAsk("role for "+rowIDs(rows), eff.Name, func(picked string) []cmd {
+				m.dispatchAsk(rows, kind, picked, true)
+				return nil
+			})
+			return nil
+		}
+		if single {
+			id := rows[0].bead.ID
+			m.status = "starting " + id + "…"
+			return []cmd{func() msg {
+				text, err := m.env.dispatch(id, kind, dispatchRole, true)
+				return doneMsg{text: text, err: err, reload: true, quit: true}
+			}}
+		}
+		return m.bulkRun("started", rows, func(r boardRow) (string, error) {
+			return m.env.dispatch(r.bead.ID, kind, dispatchRole, false)
+		})
+	}}
+}
+
+// dispatchRolePick opens the [roles.<name>] role picker directly (D key),
+// defaulting to any role:<name> label on the bead, then confirms dispatch.
+func (m *board) dispatchRolePick(rows []boardRow, kind string) {
+	if len(rows) == 0 {
+		return
+	}
+	defRole := roleImplementer
+	if len(rows) == 1 {
+		labelRole, err := beadRole(rows[0].bead)
+		if err != nil {
+			m.status = err.Error()
+			return
+		}
+		if labelRole != "" {
+			defRole = labelRole
+		}
+	}
+	m.pickRoleAsk("dispatch "+rowIDs(rows)+" role", defRole, func(picked string) []cmd {
+		m.dispatchAsk(rows, kind, picked, true)
+		return nil
 	})
 }
 
+func (m *board) pickRoleAsk(prefix, defRole string, onPick func(role string) []cmd) {
+	names := m.cfg.roleNames()
+	if defRole == "" {
+		defRole = roleImplementer
+	}
+	var parts []string
+	var keys strings.Builder
+	keys.WriteString("\r")
+	limit := min(len(names), 9)
+	for i := 0; i < limit; i++ {
+		label := fmt.Sprintf("%d %s", i+1, names[i])
+		if names[i] == defRole {
+			label += "*"
+		}
+		parts = append(parts, label)
+		keys.WriteByte(byte('1' + i))
+	}
+	if len(names) > 9 {
+		parts = append(parts, "t type")
+		keys.WriteByte('t')
+	}
+	prompt := fmt.Sprintf("%s (↵ %s): %s", prefix, defRole, strings.Join(parts, " · "))
+	m.ask = &ask{prompt: prompt, keys: keys.String(), then: func(k string) []cmd {
+		if k == "\r" {
+			return onPick(defRole)
+		}
+		if k == "t" {
+			m.ask = &ask{prompt: prefix + " name: ", text: true, then: func(raw string) []cmd {
+				if _, err := m.cfg.resolveRole(raw); err != nil {
+					m.status = err.Error()
+					return nil
+				}
+				return onPick(raw)
+			}}
+			return nil
+		}
+		idx := int(k[0] - '1')
+		if idx < 0 || idx >= limit {
+			return nil
+		}
+		return onPick(names[idx])
+	}}
+}
+
+var boardAgentKeys = map[string]string{
+	"c": "claude",
+	"x": "codex",
+	"m": "muse",
+	"i": "pi",
+	"t": "agy",
+}
+
+// resumeAsk confirms resuming one or more exited workers, allowing an optional
+// agent kind override via a (picker) or c/x/m/i/t directly on the confirm line.
+func (m *board) resumeAsk(rows []boardRow, kind string) {
+	if len(rows) == 0 {
+		return
+	}
+	single := len(rows) == 1 && len(m.marked) == 0
+	var prompt string
+	switch {
+	case single && kind == "":
+		prompt = fmt.Sprintf("resume %s's last agent conversation in its worktree?  y/n · a agent (c/x/m/i/t)", rows[0].bead.ID)
+	case single:
+		prompt = fmt.Sprintf("resume %s with %s?  y/n · a agent (d/c/x/m/i/t)", rows[0].bead.ID, kind)
+	case kind == "":
+		prompt = fmt.Sprintf("resume %s?  y/n · a agent (c/x/m/i/t)", rowIDs(rows))
+	default:
+		prompt = fmt.Sprintf("resume %s with %s?  y/n · a agent (d/c/x/m/i/t)", rowIDs(rows), kind)
+	}
+	m.ask = &ask{prompt: prompt, keys: "yadcxmit", then: func(k string) []cmd {
+		switch k {
+		case "a":
+			m.pickResumeAgentAsk(rows)
+			return nil
+		case "d":
+			m.resumeAsk(rows, "")
+			return nil
+		case "c", "x", "m", "i", "t":
+			m.resumeAsk(rows, boardAgentKeys[k])
+			return nil
+		}
+		if single {
+			id := rows[0].bead.ID
+			m.status = "resuming " + id + "…"
+			return []cmd{func() msg {
+				text, err := m.env.resume(id, kind)
+				return doneMsg{text: text, err: err, reload: true, reloadAgents: true}
+			}}
+		}
+		return m.bulkRun("resumed", rows, func(r boardRow) (string, error) {
+			return m.env.resume(r.bead.ID, kind)
+		})
+	}}
+}
+
+func (m *board) pickResumeAgentAsk(rows []boardRow) {
+	prompt := fmt.Sprintf("resume %s agent: d default · c claude · x codex · m muse · i pi · t agy", rowIDs(rows))
+	m.ask = &ask{prompt: prompt, keys: "dcxmit", then: func(k string) []cmd {
+		if k == "d" {
+			m.resumeAsk(rows, "")
+			return nil
+		}
+		m.resumeAsk(rows, boardAgentKeys[k])
+		return nil
+	}}
+}
+
+// createAsk drives top-level bead creation (N): title, optional repo label
+// (when [repos] is configured), optional role, and create vs create+dispatch.
+func (m *board) createAsk() {
+	m.ask = &ask{prompt: "new bead title: ", text: true, then: func(title string) []cmd {
+		if len(m.cfg.Repos) > 0 {
+			m.pickCreateRepo(title)
+			return nil
+		}
+		m.pickCreateRole(title, "")
+		return nil
+	}}
+}
+
+func (m *board) pickCreateRepo(title string) {
+	repos := slices.Sorted(maps.Keys(m.cfg.Repos))
+	parts := []string{"0 default"}
+	var keys strings.Builder
+	keys.WriteString("\r0")
+	limit := min(len(repos), 9)
+	for i := 0; i < limit; i++ {
+		parts = append(parts, fmt.Sprintf("%d %s", i+1, repos[i]))
+		keys.WriteByte(byte('1' + i))
+	}
+	if len(repos) > 9 {
+		parts = append(parts, "t type")
+		keys.WriteByte('t')
+	}
+	prompt := fmt.Sprintf("repo for %q (↵ default): %s", shortTitle(title, 28), strings.Join(parts, " · "))
+	m.ask = &ask{prompt: prompt, keys: keys.String(), then: func(k string) []cmd {
+		if k == "\r" || k == "0" {
+			m.pickCreateRole(title, "")
+			return nil
+		}
+		if k == "t" {
+			m.ask = &ask{prompt: "repo name: ", text: true, then: func(raw string) []cmd {
+				if _, ok := m.cfg.Repos[raw]; !ok {
+					m.status = fmt.Sprintf("unknown repo %q", raw)
+					return nil
+				}
+				m.pickCreateRole(title, raw)
+				return nil
+			}}
+			return nil
+		}
+		idx := int(k[0] - '1')
+		if idx < 0 || idx >= limit {
+			return nil
+		}
+		m.pickCreateRole(title, repos[idx])
+		return nil
+	}}
+}
+
+func (m *board) pickCreateRole(title, repo string) {
+	m.pickRoleAsk(fmt.Sprintf("role for %q", shortTitle(title, 28)), roleImplementer, func(role string) []cmd {
+		if role == roleImplementer {
+			role = ""
+		}
+		m.confirmCreate(title, repo, role)
+		return nil
+	})
+}
+
+func (m *board) confirmCreate(title, repo, role string) {
+	var tags []string
+	if repo != "" {
+		tags = append(tags, "repo:"+repo)
+	}
+	if role != "" {
+		tags = append(tags, "role:"+role)
+	}
+	suffix := ""
+	if len(tags) > 0 {
+		suffix = " [" + strings.Join(tags, ", ") + "]"
+	}
+	prompt := fmt.Sprintf("create %q%s?  y create · d create+dispatch · n cancel", shortTitle(title, 36), suffix)
+	m.ask = &ask{prompt: prompt, keys: "yd", then: func(k string) []cmd {
+		if m.env.create == nil {
+			m.status = "bead creation unavailable"
+			return nil
+		}
+		dispatchNow := k == "d"
+		m.status = "creating bead…"
+		return []cmd{func() msg {
+			id, err := m.env.create(title, repo, role)
+			if err != nil {
+				return doneMsg{err: err}
+			}
+			if !dispatchNow {
+				return doneMsg{text: "created " + id, reload: true}
+			}
+			text, derr := m.env.dispatch(id, "", role, true)
+			if derr != nil {
+				return doneMsg{text: "created " + id, err: derr, reload: true}
+			}
+			return doneMsg{text: "created " + id + "; " + text, reload: true, quit: true}
+		}}
+	}}
+}
+
+// askCoordinatorBar opens an input bar (@) that sends a free-form natural-language
+// prompt to the running coordinator session/pane without leaving the board.
+func (m *board) askCoordinatorBar() {
+	m.ask = &ask{prompt: "@coordinator: ", text: true, then: func(text string) []cmd {
+		if m.env.askCoordinator == nil {
+			m.status = "coordinator prompt unavailable"
+			return nil
+		}
+		m.status = "sending to coordinator…"
+		return []cmd{func() msg {
+			res, err := m.env.askCoordinator(text)
+			return doneMsg{text: res, err: err}
+		}}
+	}}
+}
+
 // answer prompts the bead's worker with the user's reply. Only an idle (or
-// done) agent is prompted: a working one is mid-turn, and a blocked one is at
-// a tool-approval prompt, which the board must never answer.
+// done) agent is prompted with free text: a working one is mid-turn, and a
+// blocked one at a tool-approval prompt goes through openAnswer's hash-verified
+// option path instead of raw pane text.
 func (m *board) answer(r boardRow) {
 	id := r.bead.ID
 	if why := unanswerable(r.agent); why != "" {

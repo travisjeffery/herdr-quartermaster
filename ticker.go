@@ -915,7 +915,7 @@ func (t Ticker) nudgeCoordinator(st *TickerState, agents map[string]Agent, now t
 	events, _ := readInbox()
 	fresh := 0
 	for _, e := range events {
-		if e.At.After(st.LastNudge) {
+		if e.At.After(st.LastNudge) && !t.cfg.suppressInteractiveNudgeFor(e) {
 			fresh++
 		}
 	}

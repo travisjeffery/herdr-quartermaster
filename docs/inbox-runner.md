@@ -38,7 +38,16 @@ kinds = [                      # allowlisted non-human-gated event kinds (defaul
 ]
 # command = ["pi", "--no-approve", "--print", "--no-session", "--model", "quartermaster/coordinator-auto"]
 notify = true                  # emit privacy-safe desktop summary via notify-send on handled items or failure
+suppress_interactive_nudges = false  # opt-in: stop routine ticker nudges to the interactive coordinator for allowlisted kinds while enabled
 ```
+
+When `enabled = true` and `suppress_interactive_nudges = true`, the ticker stops
+nudging the interactive coordinator pane (and skips enqueueing `quartermaster.inbox`
+notices on a `pi` coordinator) for allowlisted routine inbox kinds handled by the
+headless runner. Human-gated events (`needs_you`, `prompt`, `breaker_tripped`,
+`lease_expired`, `unsafe_auto_merge`) and non-allowlisted kinds still nudge the
+interactive coordinator as usual. Leaving `suppress_interactive_nudges = false`
+(the default) or setting `enabled = false` preserves existing nudge behavior.
 
 ### Default command and custom `command`
 
