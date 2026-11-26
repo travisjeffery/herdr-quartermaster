@@ -80,6 +80,8 @@ type piResponse struct {
 	HandoffHash string `json:"handoff_hash,omitempty"`
 	Session     string `json:"session,omitempty"`
 	Ack         string `json:"ack,omitempty"`
+	WakeState   string `json:"wake_state,omitempty"`
+	IdleMs      *int64 `json:"idle_ms,omitempty"`
 	Ask         *piAsk `json:"ask"`
 }
 

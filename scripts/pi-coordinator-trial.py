@@ -147,36 +147,41 @@ try:
     after = snapshot()
     assert (before["text"], before["cursor"]) == (after["text"], after["cursor"]), (before, after)
     assert not delivered(c)
-    assert call("inbox_status")["queued"]
+    status = call("inbox_status")
+    assert status["queued"] and status["wake_state"] == "draft", status
     assert len(requests) == 1
     # Insert a character at the preserved cursor, then submit the draft ONLY
-    # with fixture user keystrokes. Human prompt must precede the custom event.
+    # with fixture user keystrokes. Human prompt must precede the custom wakeup.
     send("X")
     wait(lambda: snapshot()["text"].endswith("laXst"))
     send("\r")
     wait(lambda: delivered(c) and settled())
     inputs = [json.loads(line) for line in (root / "inputs.jsonl").read_text().splitlines()]
     assert len(inputs) == 2 and all(i["source"] == "interactive" for i in inputs), inputs
-    assert len(requests) == 2 # idle custom context does not start a competing run
+    assert len(requests) == 3 # human prompt (#2) + one guarded idle wakeup (#3)
     assert call(through=c)["ok"]
     time.sleep(1.3)
-    assert len(requests) == 2
-    print("PASS: Unicode multiline draft/cursor, user priority, empty editor, custom origin and duplicate reconnect", flush=True)
+    assert len(requests) == 3 # duplicate watermark never loops
+    print("PASS: Unicode multiline draft/cursor, user priority, guarded idle wakeup, custom origin and duplicate reconnect", flush=True)
 
-    # A notification arriving during an actual model request stays pending.
+    # A notification arriving during an actual model request stays pending while a draft exists,
+    # then triggers one guarded idle wakeup once the draft is cleared.
+    count = len(requests)
     hold.clear()
     send("active fixture turn\r")
-    wait(lambda: not snapshot()["idle"] and len(requests) == 3)
+    wait(lambda: not snapshot()["idle"] and len(requests) == count + 1)
     assert call(through=c+1)["ok"]
     send("draft during turn")
     hold.set()
     wait(lambda: snapshot()["idle"])
     time.sleep(1.3)
     assert not delivered(c+1) and snapshot()["text"] == "draft during turn"
+    assert len(requests) == count + 1
     send("\x15") # real editor clear-line binding, fixture only
     wait(lambda: snapshot()["text"] == "")
     wait(lambda: delivered(c+1) and settled())
-    print("PASS: active turn and newly composed pending draft", flush=True)
+    assert len(requests) == count + 2
+    print("PASS: active turn, pending draft preservation, and guarded idle wakeup after clear", flush=True)
 
     count = len(requests)
     hold.clear()
@@ -195,31 +200,40 @@ try:
     send("slow fixture prompt\r")
     wait(lambda: (root / "input-waiting").exists())
     assert call(through=c+2)["ok"]
-    wait(lambda: delivered(c+2) and settled())
-    assert len(requests) == count # custom context must not race the human run
+    time.sleep(1.4) # exceed 1s quiet window while earlier extension holds input preflight
+    preflight_status = call("inbox_status")
+    assert not delivered(c+2), preflight_status
+    assert preflight_status["wake_state"] == "preflight", preflight_status
+    assert len(requests) == count # idle wakeup must never race or reject human preflight
     (root / "slow-input").unlink()
-    wait(lambda: len(requests) == count + 1 and snapshot()["idle"])
+    wait(lambda: delivered(c+2) and settled())
+    assert len(requests) == count + 2 # human prompt first, then one inbox wakeup/continuation
     transcript = [json.loads(line) for line in Path(snapshot()["session"]).read_text().splitlines()]
     assert any(e.get("type") == "message" and e["message"].get("role") == "user" and "slow fixture prompt" in json.dumps(e["message"]["content"]) for e in transcript)
     c += 1
-    print("PASS: delayed human input preflight is never rejected by an idle notification", flush=True)
+    print("PASS: delayed human input preflight blocks idle wakeup and is never rejected", flush=True)
 
+    count = len(requests)
     send("/fixture-dialog\r")
     wait(lambda: snapshot()["focus"] != "CustomEditor")
     assert call(through=c+2)["ok"]
     time.sleep(1.3)
-    assert not delivered(c+2)
+    assert not delivered(c+2) and len(requests) == count
     send("\x1b")
     wait(lambda: delivered(c+2) and settled())
+    assert len(requests) == count + 1
+    count = len(requests)
     send("/model\r")
     wait(lambda: snapshot()["focus"] != "CustomEditor")
     assert call(through=c+3)["ok"]
     time.sleep(1.3)
-    assert not delivered(c+3)
+    assert not delivered(c+3) and len(requests) == count
     send("\x1b")
     wait(lambda: delivered(c+3) and settled())
+    assert len(requests) == count + 1
     print("PASS: extension dialog and built-in model selector", flush=True)
 
+    count = len(requests)
     hold.clear()
     send("/compact\r")
     wait(lambda: not snapshot()["idle"])
@@ -228,22 +242,26 @@ try:
     assert not delivered(c+4)
     hold.set()
     wait(lambda: delivered(c+4) and settled())
+    assert len(requests) >= count + 2 # compaction summary + one inbox wakeup
     print("PASS: real manual compaction", flush=True)
 
+    count = len(requests)
     (root / "cancel-tree").write_text("hold")
     send("/fixture-cancel-tree\r")
     wait(lambda: (root / "tree-waiting").exists() and not snapshot()["idle"])
     assert call(through=c+5)["ok"]
     time.sleep(1.3)
-    assert not delivered(c+5)
+    assert not delivered(c+5) and len(requests) == count
     (root / "cancel-tree").unlink()
     wait(lambda: delivered(c+5) and settled())
+    assert len(requests) == count + 1
     print("PASS: canceled real tree navigation recovers without another prompt", flush=True)
     c += 1
 
     # Crash with a pending event, reopen the exact saved session. No session
     # or draft restoration is asserted of pi itself; notification code never
     # writes the editor. The durable event survives the stale endpoint.
+    count = len(requests)
     send("restart fixture draft")
     wait(lambda: snapshot()["text"] == "restart fixture draft")
     session = snapshot()["session"]
@@ -252,6 +270,7 @@ try:
     start(session)
     wait(lambda: delivered(c+5) and settled())
     assert snapshot()["entries"].count(str(c+5)) == 1
+    assert len(requests) == count + 1
     assert not call(through=c+6, session="/stale/session")["ok"]
     assert not call(through=c+6, token="invalid")["ok"]
     assert not call("prompt")["ok"]
@@ -271,6 +290,7 @@ try:
 
     # Session replacement must neither deliver old pending events into the new
     # session nor accept requests addressed to the old one.
+    count = len(requests)
     send("pending across switch")
     wait(lambda: snapshot()["text"] == "pending across switch")
     assert call(through=c+7)["ok"]
@@ -279,16 +299,19 @@ try:
     wait(lambda: sock.exists())
     assert not call(through=c+7, session=session)["ok"]
     time.sleep(1.3)
-    assert snapshot()["entries"] == []
+    assert snapshot()["entries"] == [] and len(requests) == count
     send("new session fixture seed\r")
     wait(lambda: snapshot()["idle"] and Path(snapshot()["session"]).exists())
+    assert len(requests) == count + 1
     assert call(through=c+7)["ok"] # fresh ticker identity explicitly revalidates pending work
     wait(lambda: delivered(c+7) and settled())
+    assert len(requests) == count + 2
     stop()
     start(session)
+    count = len(requests)
     assert call(through=c+7)["ok"]
     time.sleep(1.3)
-    assert not delivered(c+7) and settled() # global ack prevents replay into A
+    assert not delivered(c+7) and settled() and len(requests) == count # global ack prevents replay into A
     print("PASS: session replacement rejects stale delivery, revalidates pending work, and shares acknowledgements", flush=True)
     (root / "result.json").write_text(json.dumps({"result": "PASS", "pi": options.pi, "tui_mode": options.tui_mode,
                                                  "requests": len(requests), "session": session}))

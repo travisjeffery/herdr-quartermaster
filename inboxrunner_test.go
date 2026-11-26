@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1098,5 +1100,155 @@ func TestInboxRunnerEnsureCoordinatorDirRefreshesGuide(t *testing.T) {
 		if !strings.Contains(string(updated), "Standing rule beta.") || strings.Contains(string(updated), "Standing rule alpha.") {
 			t.Errorf("%s was not refreshed with updated coordinator rules", name)
 		}
+	}
+}
+
+func TestInboxRunnerLivePiWakeupCoordination(t *testing.T) {
+	cfg, dir := setupInboxRunnerTestEnv(t)
+	cfg.InboxRunner.Command = []string{"true"}
+	cfg.InboxRunner.IdleSeconds = 120
+	now := time.Date(2026, 11, 26, 16, 0, 0, 0, time.UTC)
+	writeTestInboxEvent(t, Event{Bead: "task-90", Kind: EventMerged, Summary: "PR merged", At: now.Add(-10 * time.Minute)})
+
+	piSess := filepath.Join(dir, "coord-live.jsonl")
+	oldAct := fmt.Sprintf(`{"type":"custom","customType":"quartermaster.input","timestamp":%q,"data":{"source":"interactive"}}`+"\n", now.Add(-10*time.Minute).Format(time.RFC3339))
+	if err := os.WriteFile(piSess, []byte(oldAct), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	coord := Agent{
+		Name: cfg.CoordinatorName, Kind: "pi", Status: "idle", PaneID: "w1:p1", Seq: 20,
+		Session: AgentSession{Agent: "pi", Kind: "path", Value: piSess},
+	}
+
+	var curStatus *piCoordinatorStatus
+	runs := 0
+	env := inboxRunnerEnv{
+		now:        func() time.Time { return now },
+		listAgents: func() (map[string]Agent, bool, error) { return map[string]Agent{cfg.CoordinatorName: coord}, true, nil },
+		piCoordStatus: func(a Agent) (*piCoordinatorStatus, bool) {
+			if curStatus == nil {
+				return nil, false
+			}
+			return curStatus, true
+		},
+		readInbox:     readInbox,
+		headlessOwned: func(string) bool { return false },
+		tickerState:   func() TickerState { return TickerState{} },
+		coordDir:      coordinatorHome,
+		execCmd: func(_ context.Context, _ Config, _ string, _ []string, _ string) inboxRunnerExecResult {
+			runs++
+			return inboxRunnerExecResult{ExitCode: 0}
+		},
+		notify: func(_, _ string) desktopResult { return desktopResult{"submitted", "ok"} },
+	}
+	int64Ptr := func(v int64) *int64 { return &v }
+
+	// 1. Live pi coordinator waking / ready / quiet_wait -> skip with waking to avoid duplicate runs.
+	for _, ws := range []string{"ready", "quiet_wait", "waking"} {
+		_ = os.Remove(inboxRunnerStatePath())
+		curStatus = &piCoordinatorStatus{Session: piSess, Queued: true, WakeState: ws, IdleMs: int64Ptr(600_000)}
+		res, err := runInboxRunner(context.Background(), cfg, env, inboxRunnerOpts{Manual: false})
+		if err != nil || res.Ran || !res.Skipped || !strings.HasPrefix(res.SkipReason, "waking:") || res.Plan.Coordinator.WakeState != ws {
+			t.Fatalf("wake_state=%s should skip with waking: res=%+v err=%v", ws, res, err)
+		}
+	}
+
+	// 2. Live pi coordinator in human-input preflight / busy / compacting -> skip with busy.
+	for _, ws := range []string{"preflight", "busy", "compacting"} {
+		_ = os.Remove(inboxRunnerStatePath())
+		curStatus = &piCoordinatorStatus{Session: piSess, Queued: true, WakeState: ws, IdleMs: int64Ptr(5_000)}
+		res, err := runInboxRunner(context.Background(), cfg, env, inboxRunnerOpts{Manual: false})
+		if err != nil || res.Ran || !res.Skipped || !strings.HasPrefix(res.SkipReason, "busy:") || res.Plan.Coordinator.WakeState != ws {
+			t.Fatalf("wake_state=%s should skip with busy: res=%+v err=%v", ws, res, err)
+		}
+	}
+
+	// 3. Live pi coordinator with a draft typed 15s ago -> skip with recent_activity.
+	_ = os.Remove(inboxRunnerStatePath())
+	curStatus = &piCoordinatorStatus{Session: piSess, Queued: true, WakeState: "draft", IdleMs: int64Ptr(15_000)}
+	res, err := runInboxRunner(context.Background(), cfg, env, inboxRunnerOpts{Manual: false})
+	if err != nil || res.Ran || !res.Skipped || !strings.HasPrefix(res.SkipReason, "recent_activity:") {
+		t.Fatalf("recent draft typing should skip with recent_activity: res=%+v err=%v", res, err)
+	}
+
+	// 4. Live pi coordinator stuck on untouched draft for >= idle_seconds -> headless fallback proceeds!
+	_ = os.Remove(inboxRunnerStatePath())
+	curStatus = &piCoordinatorStatus{Session: piSess, Queued: true, WakeState: "draft", IdleMs: int64Ptr(300_000)}
+	res, err = runInboxRunner(context.Background(), cfg, env, inboxRunnerOpts{Manual: false})
+	if err != nil || !res.Ran || runs != 1 || !strings.Contains(res.Plan.Coordinator.Detail, "live wakeup blocked: draft") {
+		t.Fatalf("aged draft-blocked coordinator should allow headless fallback: runs=%d res=%+v err=%v", runs, res, err)
+	}
+
+	// 5. Failed live wakeup after idle_seconds -> headless fallback proceeds!
+	_ = os.Remove(inboxRunnerStatePath())
+	curStatus = &piCoordinatorStatus{Session: piSess, Queued: true, WakeState: "failed", IdleMs: int64Ptr(300_000)}
+	res, err = runInboxRunner(context.Background(), cfg, env, inboxRunnerOpts{Manual: false})
+	if err != nil || !res.Ran || runs != 2 || !strings.Contains(res.Plan.Coordinator.Detail, "live wakeup blocked: failed") {
+		t.Fatalf("failed live wakeup should allow headless fallback: runs=%d res=%+v err=%v", runs, res, err)
+	}
+
+	// 6. Same-tick Ticker handoff: nudgeCoordinator -> triggerInboxRunnerWithStatus prevents duplicate execution.
+	short, err := os.MkdirTemp("", "qm-coord-hand-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(short) })
+	t.Setenv("QUARTERMASTER_STATE_DIR", short)
+	writeTestInboxEvent(t, Event{Bead: "task-91", Kind: EventMerged, Summary: "PR merged", At: now.Add(-10 * time.Minute)})
+	if err := os.MkdirAll(piControlDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(piCoordinatorSocket()+".token", []byte("tok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", piCoordinatorSocket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		line, _ := bufio.NewReader(conn).ReadBytes('\n')
+		var req piRequest
+		_ = json.Unmarshal(line, &req)
+		_ = json.NewEncoder(conn).Encode(piResponse{
+			OK:        true,
+			Session:   req.Session,
+			Queued:    true,
+			WakeState: "ready",
+			IdleMs:    int64Ptr(600_000),
+		})
+	}()
+
+	var wg sync.WaitGroup
+	var tickRuns atomic.Int32
+	tickEnv := env
+	tickEnv.piCoordStatus = nil // prove same-tick handoff works without a second probe
+	tickEnv.execCmd = func(_ context.Context, _ Config, _ string, _ []string, _ string) inboxRunnerExecResult {
+		tickRuns.Add(1)
+		return inboxRunnerExecResult{ExitCode: 0}
+	}
+	cfg.Nudge = true
+	tk := Ticker{
+		cfg:            cfg,
+		log:            log.New(new(bytes.Buffer), "", 0),
+		inboxRunnerEnv: &tickEnv,
+		inboxRunnerCtx: context.Background(),
+		inboxRunnerWG:  &wg,
+	}
+	tkState := TickerState{Threads: map[string]Snapshot{}, PRs: map[string]PR{}}
+	agents := map[string]Agent{coord.Name: coord}
+	piStatus := tk.nudgeCoordinator(&tkState, agents, now)
+	if piStatus == nil || piStatus.WakeState != "ready" {
+		t.Fatalf("expected same-tick nudge status ready, got %+v", piStatus)
+	}
+	tk.triggerInboxRunnerWithStatus(&tkState, agents, piStatus, now)
+	wg.Wait()
+	if tickRuns.Load() != 0 {
+		t.Fatalf("same-tick live wakeup should suppress duplicate inbox-runner launch, got %d runs", tickRuns.Load())
 	}
 }

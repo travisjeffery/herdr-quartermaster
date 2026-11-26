@@ -153,3 +153,29 @@ func TestPiCoordinatorCompanionEmbedded(t *testing.T) {
 		}
 	}
 }
+
+func TestPiCoordinatorStatusAndWakeState(t *testing.T) {
+	idleMs := int64(42000)
+	ticker, coord, _ := coordinatorFixture(t, func(req piRequest) piResponse {
+		return piResponse{
+			OK:        true,
+			Session:   req.Session,
+			Queued:    true,
+			WakeState: "ready",
+			IdleMs:    &idleMs,
+		}
+	})
+	now := time.Now()
+	if err := writeEvent(Event{At: now.Add(-time.Minute), Bead: "task-1", Kind: EventMerged}); err != nil {
+		t.Fatal(err)
+	}
+	st := TickerState{}
+	got := ticker.nudgePiCoordinator(&st, coord, now)
+	if got == nil || got.WakeState != "ready" || !got.Queued || got.IdleMs == nil || *got.IdleMs != idleMs {
+		t.Fatalf("nudgePiCoordinator status = %+v, want ready/queued/42000ms", got)
+	}
+	probed, ok := probePiCoordinatorStatus(coord)
+	if !ok || probed == nil || probed.WakeState != "ready" || !probed.Queued || probed.IdleMs == nil || *probed.IdleMs != idleMs {
+		t.Fatalf("probePiCoordinatorStatus = %+v (%v), want ready/queued/42000ms", probed, ok)
+	}
+}
