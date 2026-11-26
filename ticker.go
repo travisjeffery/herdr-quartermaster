@@ -672,8 +672,8 @@ func (t Ticker) once(st *TickerState) error {
 	t.checkBlockers(st, allBeads, threads, agents, agentsComplete, freshPRs, knownPRs, ghRefreshed, promptedThisTick, relaunch, watchOutcomes, now)
 	t.advanceWorkflows(st, threads, now)
 	t.processJobs(st, threads, agents, now)
-	t.nudgeCoordinator(st, agents, now)
-	t.triggerInboxRunner(st, agents, now)
+	piCoordStatus := t.nudgeCoordinator(st, agents, now)
+	t.triggerInboxRunnerWithStatus(st, agents, piCoordStatus, now)
 	return nil
 }
 
@@ -889,19 +889,19 @@ func (t Ticker) checkWatches(threads []Thread, agents map[string]Agent, now time
 	return outcomes
 }
 
-func (t Ticker) nudgeCoordinator(st *TickerState, agents map[string]Agent, now time.Time) {
+func (t Ticker) nudgeCoordinator(st *TickerState, agents map[string]Agent, now time.Time) *piCoordinatorStatus {
 	coord, ok := agents[t.cfg.CoordinatorName]
 	if !ok {
 		st.CoordReady = time.Time{}
-		return
+		return nil
 	}
 	// Pi owns its editor/UI readiness. Never infer an empty draft from an
 	// idle process, and never fall back to terminal input for notifications.
 	if coord.Session.Agent == "pi" || (coord.Session.Agent == "" && t.cfg.CoordinatorAgent == "pi") {
 		if t.cfg.Nudge {
-			t.nudgePiCoordinator(st, coord, now)
+			return t.nudgePiCoordinator(st, coord, now)
 		}
-		return
+		return nil
 	}
 	if !agentReady(&coord) {
 		st.CoordReady = time.Time{}
@@ -910,7 +910,7 @@ func (t Ticker) nudgeCoordinator(st *TickerState, agents map[string]Agent, now t
 	}
 	st.CoordSeq = coord.Seq
 	if !t.cfg.Nudge || st.CoordReady.IsZero() || now.Sub(st.CoordReady) < t.cfg.idle() {
-		return
+		return nil
 	}
 	events, _ := readInbox()
 	fresh := 0
@@ -920,15 +920,16 @@ func (t Ticker) nudgeCoordinator(st *TickerState, agents map[string]Agent, now t
 		}
 	}
 	if fresh == 0 {
-		return
+		return nil
 	}
 	msg := fmt.Sprintf("[quartermaster ticker: automated, not the user, approves nothing] %d new inbox item(s). Run `quartermaster context`.", fresh)
 	if err := t.herdr.Prompt(coord.PaneID, msg); err != nil {
 		t.log.Printf("nudge: %v", err)
-		return
+		return nil
 	}
 	st.LastNudge = now
 	st.CoordReady = time.Time{}
+	return nil
 }
 
 func pidPath() string { return filepath.Join(stateDir(), "ticker.pid") }

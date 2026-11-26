@@ -17,15 +17,58 @@ import (
 // only a watermark for the existing durable inbox, never arbitrary user text.
 func piCoordinatorSocket() string { return piControlSocket("coordinator-inbox") }
 
-func (t Ticker) nudgePiCoordinator(st *TickerState, coord Agent, now time.Time) {
+// piCoordinatorStatus is the privacy-safe readiness snapshot returned by a
+// live local pi coordinator's inbox socket. It carries only fixed state enums
+// and idle durations, never editor text or user input.
+type piCoordinatorStatus struct {
+	Session   string
+	Ack       string
+	Queued    bool
+	WakeState string
+	IdleMs    *int64
+}
+
+func piCoordinatorStatusFromResponse(res piResponse) *piCoordinatorStatus {
+	var idleMs *int64
+	if res.IdleMs != nil {
+		v := *res.IdleMs
+		idleMs = &v
+	}
+	return &piCoordinatorStatus{
+		Session:   res.Session,
+		Ack:       res.Ack,
+		Queued:    res.Queued,
+		WakeState: res.WakeState,
+		IdleMs:    idleMs,
+	}
+}
+
+// probePiCoordinatorStatus reads the live local pi coordinator's readiness
+// without enqueueing a notification or starting a model turn.
+func probePiCoordinatorStatus(coord Agent) (*piCoordinatorStatus, bool) {
+	if !isLocalPi(&coord) || coord.Session.Kind != "path" || !filepath.IsAbs(coord.Session.Value) {
+		return nil, false
+	}
+	c, ok := piControlFor("coordinator-inbox")
+	if !ok {
+		return nil, false
+	}
+	res, err := c.call(piRequest{Op: "inbox_status", Session: coord.Session.Value})
+	if err != nil || res.Session != coord.Session.Value {
+		return nil, false
+	}
+	return piCoordinatorStatusFromResponse(res), true
+}
+
+func (t Ticker) nudgePiCoordinator(st *TickerState, coord Agent, now time.Time) *piCoordinatorStatus {
 	if !isLocalPi(&coord) || coord.Session.Kind != "path" || !filepath.IsAbs(coord.Session.Value) {
 		// Unknown identity is not permission to type into a terminal.
-		return
+		return nil
 	}
 	events, err := readInbox()
 	if err != nil {
 		t.log.Printf("coordinator inbox: %v", err)
-		return
+		return nil
 	}
 	latest := st.LastNudge
 	for _, e := range events {
@@ -38,7 +81,7 @@ func (t Ticker) nudgePiCoordinator(st *TickerState, coord Agent, now time.Time) 
 	}
 	c, ok := piControlFor("coordinator-inbox")
 	if !ok {
-		return
+		return nil
 	} // events remain in the durable inbox, even across restart
 	// Reconcile even when all events were archived before state.json was saved.
 	// A status request does not enqueue a message or start a model turn.
@@ -49,25 +92,26 @@ func (t Ticker) nudgePiCoordinator(st *TickerState, coord Agent, now time.Time) 
 	res, err := c.call(req)
 	if err != nil {
 		t.log.Printf("coordinator inbox retained: %v", err)
-		return
+		return nil
 	}
 	if res.Session != coord.Session.Value {
 		t.log.Printf("coordinator inbox: session mismatch")
-		return
+		return nil
 	}
+	status := piCoordinatorStatusFromResponse(res)
 	// Only a transcript-backed delivery ack advances the ticker. Acceptance
 	// alone must be retried/re-addressed if the coordinator switches sessions.
 	// The receiver shares a bounded ack journal across those replacements.
 	if len(res.Ack) != 19 {
-		return
+		return status
 	}
 	ns, err := strconv.ParseInt(res.Ack, 10, 64)
 	if err != nil {
-		return
+		return status
 	}
 	ack := time.Unix(0, ns)
 	if !ack.After(st.LastNudge) {
-		return
+		return status
 	}
 	// The unread set is not an upper bound: it shrinks on archival. Instead
 	// require an exact durable event (unread OR done), a nonfuture watermark,
@@ -76,10 +120,11 @@ func (t Ticker) nudgePiCoordinator(st *TickerState, coord Agent, now time.Time) 
 	if ns <= 0 || fmt.Sprintf("%019d", ns) != res.Ack || ack.After(now) ||
 		!coordinatorEventExists(res.Ack, ack) || !coordinatorReceiptExists(coord.Session.Value, res.Ack) {
 		t.log.Printf("coordinator inbox: unverified acknowledgement retained")
-		return
+		return status
 	}
 	st.LastNudge = ack
 	st.CoordReady = time.Time{}
+	return status
 }
 
 func coordinatorEventExists(cursor string, at time.Time) bool {

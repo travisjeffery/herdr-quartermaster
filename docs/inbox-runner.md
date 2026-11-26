@@ -8,9 +8,9 @@ terminal keystrokes, or racing human input.
 It is **opt-in** (`[inbox_runner] enabled = false` by default) and separate
 from both:
 
-- the passive [draft-safe pi coordinator inbox](pi-coordinator-inbox.md)
-  (`pi/coordinator.ts`), which delivers unread-inbox notices into a live TUI
-  session without starting a model turn, and
+- the [draft-safe pi coordinator inbox](pi-coordinator-inbox.md)
+  (`pi/coordinator.ts`), which triggers guarded idle turns inside a live TUI
+  session when the editor is empty and safe, and
 - the fenced post-merge [headless pi coordinator](pi-headless.md)
   (`quartermaster headless`), which operates only on explicitly enrolled
   native `pi-rpc` workers.
@@ -125,16 +125,21 @@ background so the ticker loop is never blocked.
    non-blocking `flock` on `<state>/inbox-runner.lock` (mode `0600`).
    Overlapping ticker ticks or manual invocations skip immediately rather than
    queuing concurrent coordinator runs.
-3. **Interactive coordinator busy / recent-activity skip.** Before running, the
-   runner checks the interactive coordinator via Herdr and its session
-   transcript (when readable). If the interactive coordinator is working,
-   blocked, had recent human input/turn activity within `idle_seconds`, or
+3. **Interactive coordinator busy / waking / recent-activity skip.** Before
+   running, the runner checks the interactive coordinator via Herdr, its
+   session transcript (when readable), and — for a live local `pi` coordinator —
+   its read-only `inbox_status` readiness (`wake_state` and `idle_ms`). If the
+   interactive coordinator is working, blocked, compacting, in human-input
+   preflight, actively waking on unread inbox events (`ready`, `quiet_wait`,
+   `waking`), had recent human/turn/UI activity within `idle_seconds`, or
    changed Herdr state within `idle_seconds`, the runner skips without touching
-   the TUI. Passive `quartermaster.inbox` TUI notifications do not count as
-   human input. If Herdr is live (socket present) but listing agents fails, the
-   runner fails closed and skips. If no interactive coordinator is running (or
-   Herdr is closed), the runner proceeds so autonomous follow-through works
-   AFK.
+   the TUI. Passive `quartermaster.inbox` TUI notifications without a model
+   turn do not count as activity. If Herdr is live (socket present) but listing
+   agents fails, the runner fails closed and skips. If no interactive
+   coordinator is running (or Herdr is closed), or a live `pi` coordinator has
+   been blocked from waking (for example by an untouched draft, dialog, or
+   failed wakeup) for at least `idle_seconds`, the runner proceeds so
+   autonomous follow-through works AFK.
 4. **Strict allowlist excluding human-gated kinds.** `kinds` is validated at
    config load (must be non-empty and known) and enforced again at runtime.
    Human-gated and escalation kinds — `needs_you`, `prompt`, `needs_me`,

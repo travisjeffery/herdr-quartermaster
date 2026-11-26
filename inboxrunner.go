@@ -372,12 +372,13 @@ func probeInboxRunnerLocked() bool {
 
 // coordinatorCheck describes the interactive coordinator's observed readiness.
 type coordinatorCheck struct {
-	State      string `json:"state"` // absent, idle, busy, recent_activity, unknown
+	State      string `json:"state"` // absent, idle, busy, waking, recent_activity, unknown
 	Proceed    bool   `json:"proceed"`
 	Detail     string `json:"detail,omitempty"`
 	PaneID     string `json:"pane_id,omitempty"`
 	AgentKind  string `json:"agent_kind,omitempty"`
 	AgentState string `json:"agent_status,omitempty"`
+	WakeState  string `json:"wake_state,omitempty"`
 	Seq        int64  `json:"seq,omitempty"`
 	IdleSince  string `json:"idle_since,omitempty"`
 }
@@ -441,7 +442,11 @@ type inboxRunnerOpts struct {
 	DryRun bool
 	// PreloadedAgents avoids a duplicate herdr call when triggered from Ticker.once.
 	PreloadedAgents map[string]Agent
-	TickerState     *TickerState
+	// PiCoordStatus carries the live pi coordinator's readiness returned by
+	// nudgeCoordinator on the same tick so triggerInboxRunner avoids a second
+	// socket round-trip and immediately sees newly queued wakeups.
+	PiCoordStatus *piCoordinatorStatus
+	TickerState   *TickerState
 }
 
 type inboxRunnerExecResult struct {
@@ -455,6 +460,7 @@ type inboxRunnerExecResult struct {
 type inboxRunnerEnv struct {
 	now           func() time.Time
 	listAgents    func() (map[string]Agent, bool, error) // agents, socketPresent, err
+	piCoordStatus func(coord Agent) (*piCoordinatorStatus, bool)
 	readInbox     func() ([]InboxItem, error)
 	showBead      func(id string) (Bead, error)
 	headlessOwned func(id string) bool
@@ -490,6 +496,7 @@ func liveInboxRunnerEnv(cfg Config, h Herdr, logf func(string, ...any)) inboxRun
 			}
 			return byName, true, nil
 		},
+		piCoordStatus: probePiCoordinatorStatus,
 		readInbox:     readInbox,
 		showBead:      (Beads{}).Show,
 		headlessOwned: headlessOwned,
@@ -723,9 +730,40 @@ func checkInteractiveCoordinator(cfg Config, env inboxRunnerEnv, st InboxRunnerS
 
 	idle := cfg.InboxRunner.idle()
 
+	// Query live local pi coordinator readiness (if connected) so the headless
+	// runner steps aside while the live coordinator is waking, in human-input
+	// preflight, or busy, while still covering draft/dialog/error-blocked states
+	// once idle_seconds have elapsed.
+	var piStatus *piCoordinatorStatus
+	if isLocalPi(&coord) {
+		if opts.PiCoordStatus != nil && opts.PiCoordStatus.Session == coord.Session.Value {
+			piStatus = opts.PiCoordStatus
+		} else if env.piCoordStatus != nil {
+			if s, ok := env.piCoordStatus(coord); ok && s != nil && s.Session == coord.Session.Value {
+				piStatus = s
+			}
+		}
+	}
+	if piStatus != nil && piStatus.WakeState != "" {
+		base.WakeState = piStatus.WakeState
+		switch piStatus.WakeState {
+		case "busy", "compacting", "preflight":
+			base.State = "busy"
+			base.Proceed = false
+			base.Detail = fmt.Sprintf("interactive pi coordinator is %s", piStatus.WakeState)
+			return base, coord.PaneID, coord.Seq, time.Time{}, true
+		}
+	}
+
 	// Determine the coordinator's idle baseline from persisted seq tracking,
-	// session transcript activity, and ticker state.
+	// session transcript activity, live pi UI activity, and ticker state.
 	lastAct, hasTranscript := coordinatorLastActivity(&coord)
+	var uiAct time.Time
+	hasUIActivity := false
+	if piStatus != nil && piStatus.IdleMs != nil && *piStatus.IdleMs >= 0 {
+		uiAct = now.Add(-time.Duration(*piStatus.IdleMs) * time.Millisecond)
+		hasUIActivity = true
+	}
 	var idleSince time.Time
 	switch {
 	case st.CoordPane == coord.PaneID && st.CoordSeq == coord.Seq && !st.CoordIdleSince.IsZero():
@@ -735,6 +773,8 @@ func checkInteractiveCoordinator(cfg Config, env inboxRunnerEnv, st InboxRunnerS
 		idleSince = now
 	case hasTranscript:
 		idleSince = lastAct
+	case hasUIActivity:
+		idleSince = uiAct
 	default:
 		var ts TickerState
 		if opts.TickerState != nil {
@@ -751,15 +791,33 @@ func checkInteractiveCoordinator(cfg Config, env inboxRunnerEnv, st InboxRunnerS
 	if hasTranscript && lastAct.After(idleSince) {
 		idleSince = lastAct
 	}
+	if hasUIActivity && uiAct.After(idleSince) {
+		idleSince = uiAct
+	}
 
 	if !idleSince.IsZero() {
 		base.IdleSince = idleSince.UTC().Format(time.RFC3339)
+	}
+	if piStatus != nil {
+		switch piStatus.WakeState {
+		case "waking", "ready", "quiet_wait":
+			base.State = "waking"
+			base.Proceed = false
+			base.Detail = fmt.Sprintf("interactive pi coordinator waking on inbox (%s)", piStatus.WakeState)
+			return base, coord.PaneID, coord.Seq, idleSince, true
+		}
 	}
 	if idle > 0 {
 		if hasTranscript && now.Sub(lastAct) < idle {
 			base.State = "recent_activity"
 			base.Proceed = false
 			base.Detail = fmt.Sprintf("interactive coordinator active %s (idle threshold %ds)", ago(lastAct, now), cfg.InboxRunner.IdleSeconds)
+			return base, coord.PaneID, coord.Seq, idleSince, true
+		}
+		if hasUIActivity && now.Sub(uiAct) < idle {
+			base.State = "recent_activity"
+			base.Proceed = false
+			base.Detail = fmt.Sprintf("interactive pi coordinator active %s (wake_state=%s, idle threshold %ds)", ago(uiAct, now), piStatus.WakeState, cfg.InboxRunner.IdleSeconds)
 			return base, coord.PaneID, coord.Seq, idleSince, true
 		}
 		if idleSince.IsZero() || now.Sub(idleSince) < idle {
@@ -773,6 +831,9 @@ func checkInteractiveCoordinator(cfg Config, env inboxRunnerEnv, st InboxRunnerS
 	base.State = "idle"
 	base.Proceed = true
 	base.Detail = fmt.Sprintf("interactive coordinator idle since %s", ago(idleSince, now))
+	if piStatus != nil && piStatus.WakeState != "" && piStatus.WakeState != "idle" {
+		base.Detail += fmt.Sprintf(" (live wakeup blocked: %s)", piStatus.WakeState)
+	}
 	return base, coord.PaneID, coord.Seq, idleSince, true
 }
 
@@ -1599,6 +1660,10 @@ func executeInboxRunnerLocked(ctx context.Context, cfg Config, env inboxRunnerEn
 // and, when eligible work exists, launches the headless runner asynchronously
 // while holding the single-flight flock so the ticker loop never blocks.
 func (t Ticker) triggerInboxRunner(st *TickerState, agents map[string]Agent, now time.Time) {
+	t.triggerInboxRunnerWithStatus(st, agents, nil, now)
+}
+
+func (t Ticker) triggerInboxRunnerWithStatus(st *TickerState, agents map[string]Agent, piStatus *piCoordinatorStatus, now time.Time) {
 	if !t.cfg.InboxRunner.Enabled {
 		return
 	}
@@ -1621,6 +1686,7 @@ func (t Ticker) triggerInboxRunner(st *TickerState, agents map[string]Agent, now
 	opts := inboxRunnerOpts{
 		Manual:          false,
 		PreloadedAgents: agents,
+		PiCoordStatus:   piStatus,
 		TickerState:     st,
 	}
 	plan, err := evaluateInboxRunner(t.cfg, env, runnerState, opts, now)
