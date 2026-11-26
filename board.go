@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -2109,8 +2110,92 @@ func waitInputOrWake(stdinFD, wakeFD, timeout int) (stdinReady, woke bool, err e
 		if n == 0 {
 			return false, false, nil
 		}
-		return fds[0].Revents&unix.POLLIN != 0, len(fds) > 1 && fds[1].Revents&unix.POLLIN != 0, nil
+		return fds[0].Revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR) != 0, len(fds) > 1 && fds[1].Revents&unix.POLLIN != 0, nil
 	}
+}
+
+// wakePipe is a non-blocking self-pipe for waking unix.Poll on SIGWINCH or
+// async command completion. Go's os.File.Fd puts the descriptor back into
+// blocking mode on every call, so we capture each raw fd once, enable
+// O_NONBLOCK afterward, and read/write via unix.Read/unix.Write directly.
+type wakePipe struct {
+	mu     sync.RWMutex
+	closed bool
+	r, w   *os.File
+	rFD    int
+	wFD    int
+}
+
+func newWakePipe() (*wakePipe, error) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	rFD := int(r.Fd())
+	wFD := int(w.Fd())
+	if err := unix.SetNonblock(rFD, true); err != nil {
+		_ = r.Close()
+		_ = w.Close()
+		return nil, err
+	}
+	if err := unix.SetNonblock(wFD, true); err != nil {
+		_ = r.Close()
+		_ = w.Close()
+		return nil, err
+	}
+	return &wakePipe{r: r, w: w, rFD: rFD, wFD: wFD}, nil
+}
+
+func (p *wakePipe) fd() int {
+	if p == nil {
+		return -1
+	}
+	return p.rFD
+}
+
+func (p *wakePipe) signal() {
+	if p == nil {
+		return
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed {
+		return
+	}
+	_, _ = unix.Write(p.wFD, []byte{1})
+}
+
+func (p *wakePipe) drain() {
+	if p == nil {
+		return
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed {
+		return
+	}
+	var buf [64]byte
+	for {
+		n, err := unix.Read(p.rFD, buf[:])
+		if n > 0 || err == unix.EINTR {
+			continue
+		}
+		return
+	}
+}
+
+func (p *wakePipe) close() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
+	p.closed = true
+	_ = p.r.Close()
+	_ = p.w.Close()
 }
 
 // boardRunOpts configures the initial mode of `quartermaster board`.
@@ -2159,20 +2244,10 @@ func runBoardWithOpts(cfg Config, opts boardRunOpts) error {
 
 	// Self-pipe wakes unix.Poll instantaneously on SIGWINCH resize or async
 	// command completion, eliminating 1s redraw stalls on Moshi/Ghostty.
-	wakeR, wakeW, pipeErr := os.Pipe()
-	wakeFD := -1
-	if pipeErr == nil {
-		_ = unix.SetNonblock(int(wakeR.Fd()), true)
-		_ = unix.SetNonblock(int(wakeW.Fd()), true)
-		wakeFD = int(wakeR.Fd())
-		defer wakeR.Close()
-		defer wakeW.Close()
-	}
-	wake := func() {
-		if wakeW != nil {
-			_, _ = wakeW.Write([]byte{1})
-		}
-	}
+	wp, _ := newWakePipe()
+	defer wp.close()
+	wakeFD := wp.fd()
+	wake := wp.signal
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
 	stopWinch := make(chan struct{})
@@ -2212,7 +2287,6 @@ func runBoardWithOpts(cfg Config, opts boardRunOpts) error {
 		}
 	}
 	buf := make([]byte, 256)
-	var drainBuf [64]byte
 	var partial []byte
 	for !m.quit {
 		start(m.tick())
@@ -2227,12 +2301,8 @@ func runBoardWithOpts(cfg Config, opts boardRunOpts) error {
 		if err != nil {
 			return err
 		}
-		if woke && wakeR != nil {
-			for {
-				if n, _ := wakeR.Read(drainBuf[:]); n <= 0 {
-					break
-				}
-			}
+		if woke {
+			wp.drain()
 		}
 		for drained := false; !drained; {
 			select {
