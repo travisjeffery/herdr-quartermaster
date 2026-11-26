@@ -182,3 +182,92 @@ func TestEnforceDispatchBudget(t *testing.T) {
 		t.Errorf("TJ's dispatch: %v", err)
 	}
 }
+
+func TestAutoTagHyphenatedActorAndInboxRunnerRepeatedRun(t *testing.T) {
+	note := "AUTO: [inbox-runner L5 C3] Triaged checks_failing on PR #42 — unrelated flake"
+	if got := autoClass(note); got != 3 {
+		t.Errorf("autoClass(%q) = %d, want 3", note, got)
+	}
+	if got := autoActor(note); got != "inbox-runner" {
+		t.Errorf("autoActor(%q) = %q, want inbox-runner", note, got)
+	}
+	if got := autoWhat(note); got != "Triaged checks_failing on PR #42" {
+		t.Errorf("autoWhat(%q) = %q", note, got)
+	}
+
+	// Three identical inbox-runner triage notes must NOT trip the worker's breaker.
+	if repeatedRun([]string{note, note, note}) {
+		t.Error("inbox-runner triage notes must not trigger repeatedRun")
+	}
+
+	// Three identical worker notes still trip even when interleaved with inbox-runner notes.
+	wNote := "AUTO: [worker L5 C2] retried flaky step — attempt"
+	if !repeatedRun([]string{wNote, note, wNote, note, wNote}) {
+		t.Error("three repeated worker steps should still trigger repeatedRun")
+	}
+}
+
+func TestFailedRunDistinctProbesVsRepeatedStepAndProbeFlag(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	now := time.Now()
+
+	// 3 distinct candidate actions/classes (class=6, deploy, rollout) must NOT trip at 3.
+	distinct := []journalRecord{
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 6, Action: "", Pass: false},
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 6, Action: "deploy", Pass: false},
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 6, Action: "rollout", Pass: false},
+	}
+	if failedRun(distinct, "b-1") {
+		t.Error("3 distinct classification failures should not trip failedRun")
+	}
+
+	// Interleaved rollout(7), class(6), rollout(7) is only 1 identical trailing retry -> must NOT trip.
+	interleaved := []journalRecord{
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 7, Action: "rollout", Pass: false},
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 6, Action: "", Pass: false},
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 7, Action: "rollout", Pass: false},
+	}
+	if failedRun(interleaved, "b-1") {
+		t.Error("interleaved distinct failures should not trip failedRun")
+	}
+
+	// 3 consecutive identical (action, class) failures DO trip.
+	same := []journalRecord{
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 7, Action: "rollout", Pass: false},
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 7, Action: "rollout", Pass: false},
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 7, Action: "rollout", Pass: false},
+	}
+	if !failedRun(same, "b-1") {
+		t.Error("3 consecutive identical failures must trip failedRun")
+	}
+
+	// 6 consecutive failures across mixed actions trip the total backstop.
+	mixedSix := []journalRecord{
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 6, Action: "", Pass: false},
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 6, Action: "deploy", Pass: false},
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 7, Action: "rollout", Pass: false},
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 8, Action: "delete", Pass: false},
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 8, Action: "secret", Pass: false},
+		{At: now, Kind: journalCheck, Bead: "b-1", Class: 7, Action: "apply", Pass: false},
+	}
+	if !failedRun(mixedSix, "b-1") {
+		t.Error("6 consecutive mixed failures must trip failedRun backstop")
+	}
+
+	// --probe checks fail closed at level 5 without journaling or tripping the breaker.
+	cfg := defaultConfig()
+	cfg.Autonomy.Level = 5
+	f := &fakeAutonomy{bead: Bead{ID: "b-probe", Status: StatusInProgress}}
+	for range 5 {
+		err := autonomyCmd(cfg, f.env(), []string{"check", "b-probe"}, autonomyOpts{Class: 7, Probe: true}, io.Discard)
+		if !errors.Is(err, errNotAutonomous) {
+			t.Fatalf("probe check class 7 at level 5: err = %v, want errNotAutonomous", err)
+		}
+	}
+	if recs, err := readJournal(time.Time{}); err != nil || len(recs) != 0 {
+		t.Fatalf("--probe must not write journal entries: recs=%+v err=%v", recs, err)
+	}
+	if lvl, why := cfg.beadLevel(f.bead, false); lvl != 5 || why != "" {
+		t.Fatalf("--probe must not trip circuit breaker: level=%d why=%q", lvl, why)
+	}
+}

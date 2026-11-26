@@ -874,3 +874,229 @@ func TestInboxRunnerFailureRecordingAndDisabledTickerNoop(t *testing.T) {
 		t.Fatalf("expected failed attempt recorded for %s: %+v", itemFile, persisted.Attempts)
 	}
 }
+
+func TestInboxRunnerAutoAnswerNeedsMeValidationAndFiltering(t *testing.T) {
+	cfg, dir := setupInboxRunnerTestEnv(t)
+	cfg.InboxRunner.Command = []string{"true"}
+	cfg.Autonomy.Level = 5
+	cfg.Autonomy.Max = 7
+
+	// Config validation: auto_answer_max_class accepts 0-7 and rejects <0 or >=8.
+	cfgDir := filepath.Join(dir, "config")
+	writeCfg := func(body string) (Config, error) {
+		full := fmt.Sprintf("repo = %q\n%s\n", cfg.Repo, body)
+		if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(full), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return loadConfig()
+	}
+	if loaded, err := writeCfg("[inbox_runner]\nenabled = true\nauto_answer_needs_me = true\nauto_answer_max_class = 6\n"); err != nil {
+		t.Fatalf("valid auto_answer_max_class=6 failed: %v", err)
+	} else if !loaded.InboxRunner.AutoAnswerNeedsMe || loaded.InboxRunner.effectiveAutoAnswerMaxClass() != 6 {
+		t.Fatalf("unexpected loaded auto-answer config: %+v", loaded.InboxRunner)
+	}
+	for _, bad := range []string{"-1", "8", "9"} {
+		if _, err := writeCfg("[inbox_runner]\nauto_answer_needs_me = true\nauto_answer_max_class = " + bad + "\n"); err == nil || !strings.Contains(err.Error(), "auto_answer_max_class") {
+			t.Errorf("auto_answer_max_class=%s: err = %v, want validation error", bad, err)
+		}
+	}
+
+	now := time.Date(2026, 11, 25, 18, 0, 0, 0, time.UTC)
+	old := now.Add(-10 * time.Minute)
+	maxC := 5
+	cfg.InboxRunner.AutoAnswerNeedsMe = true
+	cfg.InboxRunner.AutoAnswerMaxClass = &maxC
+
+	beads := map[string]Bead{
+		"task-elig": {
+			ID:     "task-elig",
+			Status: StatusNeedsMe,
+			Notes:  "QUESTION: Close superseded 0-diff PR? Recommendation: 1 — all changes already landed on main.\nOPTIONS:\n1. Close superseded PR and bead\n2. Keep PR open\nCLASS: 3 — closing superseded PR and bead",
+		},
+		"task-critical": {
+			ID:     "task-critical",
+			Status: StatusNeedsMe,
+			Notes:  "CRITICAL: Prod data deletion\nQUESTION: Delete table? Recommendation: 2 — keep it.\nOPTIONS:\n1. Delete\n2. Keep\nCLASS: 3 — low stated class but CRITICAL",
+		},
+		"task-run": {
+			ID:     "task-run",
+			Status: StatusNeedsMe,
+			Notes:  "RUN: aws sso login\nQUESTION: Did login succeed? Recommendation: 1 — yes.\nOPTIONS:\n1. Yes\n2. No\nCLASS: 3 — check",
+		},
+		"task-norec": {
+			ID:     "task-norec",
+			Status: StatusNeedsMe,
+			Notes:  "QUESTION: Pick option A or B?\nOPTIONS:\n1. Option A\n2. Option B\nCLASS: 3 — routine choice",
+		},
+		"task-noclass": {
+			ID:     "task-noclass",
+			Status: StatusNeedsMe,
+			Notes:  "QUESTION: Close superseded PR? Recommendation: 1 — yes.\nOPTIONS:\n1. Close\n2. Keep",
+		},
+		"task-above-max": {
+			ID:     "task-above-max",
+			Status: StatusNeedsMe,
+			Labels: []string{"autonomy:7"},
+			Notes:  "QUESTION: Apply sandbox stack? Recommendation: 1 — preview clean.\nOPTIONS:\n1. Apply\n2. Hold\nCLASS: 6 — sandbox apply",
+		},
+		"task-above-lvl": {
+			ID:     "task-above-lvl",
+			Status: StatusNeedsMe,
+			Labels: []string{"autonomy:2"},
+			Notes:  "QUESTION: Close superseded PR? Recommendation: 1 — yes.\nOPTIONS:\n1. Close\n2. Keep\nCLASS: 3 — close",
+		},
+		"task-freetext": {
+			ID:     "task-freetext",
+			Status: StatusNeedsMe,
+			Notes:  "Should we rename the package?",
+		},
+		"task-active": {
+			ID:     "task-active",
+			Status: StatusInProgress,
+			Notes:  "QUESTION: Close superseded PR? Recommendation: 1 — yes.\nOPTIONS:\n1. Close\n2. Keep\nCLASS: 3 — close",
+		},
+	}
+
+	writeNM := func(id string, offset time.Duration) string {
+		return writeTestInboxEvent(t, Event{
+			Bead:    id,
+			Kind:    EventNeedsYou,
+			Summary: id + " needs_me",
+			At:      old.Add(offset),
+			Clears:  &InboxCondition{Kind: "needs_me", Bead: id, Key: "k-" + id},
+		})
+	}
+	eligFile := writeNM("task-elig", 0)
+	writeNM("task-critical", time.Second)
+	writeNM("task-run", 2*time.Second)
+	writeNM("task-norec", 3*time.Second)
+	writeNM("task-noclass", 4*time.Second)
+	writeNM("task-above-max", 5*time.Second)
+	writeNM("task-above-lvl", 6*time.Second)
+	writeNM("task-freetext", 7*time.Second)
+	writeNM("task-active", 8*time.Second)
+	writeTestInboxEvent(t, Event{
+		Bead:    "task-prompt",
+		Kind:    EventNeedsYou,
+		Summary: "approval prompt",
+		At:      old.Add(9 * time.Second),
+		Clears:  &InboxCondition{Kind: "prompt", Bead: "task-prompt", Key: "hash1234"},
+	})
+	writeTestInboxEvent(t, Event{
+		Bead:    "task-breaker",
+		Kind:    EventBreaker,
+		Summary: "breaker tripped",
+		At:      old.Add(10 * time.Second),
+	})
+
+	var gotPrompt string
+	env := inboxRunnerEnv{
+		now:        func() time.Time { return now },
+		listAgents: func() (map[string]Agent, bool, error) { return nil, false, nil },
+		readInbox:  readInbox,
+		showBead: func(id string) (Bead, error) {
+			b, ok := beads[id]
+			if !ok {
+				return Bead{}, errors.New("not found")
+			}
+			return b, nil
+		},
+		headlessOwned: func(string) bool { return false },
+		coordDir:      coordinatorHome,
+		execCmd: func(_ context.Context, _ Config, _ string, _ []string, prompt string) inboxRunnerExecResult {
+			gotPrompt = prompt
+			_, _ = inboxDoneFiles([]string{eligFile})
+			return inboxRunnerExecResult{ExitCode: 0, Output: "answered task-elig"}
+		},
+		notify: func(_, _ string) desktopResult { return desktopResult{"submitted", "ok"} },
+	}
+
+	// Verify status --json reports auto-answer config and exact per-item reasons.
+	var statusJSON bytes.Buffer
+	if err := inboxRunnerCmd(cfg, env, []string{"status", "--json"}, &statusJSON); err != nil {
+		t.Fatalf("status --json: %v", err)
+	}
+	var rep InboxRunnerStatusReport
+	if err := json.Unmarshal(statusJSON.Bytes(), &rep); err != nil {
+		t.Fatalf("unmarshal status JSON: %v", err)
+	}
+	if !rep.Config.AutoAnswerNeedsMe || rep.Config.AutoAnswerMaxClass != 5 || rep.Inbox.EligibleNow != 1 || rep.Inbox.Excluded != 10 {
+		t.Fatalf("unexpected status report: config=%+v inbox=%+v", rep.Config, rep.Inbox)
+	}
+	reasons := map[string]string{}
+	for _, iv := range rep.Inbox.Items {
+		reasons[iv.Bead] = iv.Reason
+	}
+	wantReasons := map[string]string{
+		"task-elig":      "",
+		"task-critical":  "needs_me_critical",
+		"task-run":       "needs_me_run_command",
+		"task-norec":     "needs_me_no_recommendation",
+		"task-noclass":   "needs_me_no_class",
+		"task-above-max": "needs_me_above_max_class (C6 > max 5)",
+		"task-above-lvl": "needs_me_above_level (C3 > L2)",
+		"task-freetext":  "needs_me_not_structured",
+		"task-active":    "needs_me_not_active",
+		"task-prompt":    "human_gated",
+		"task-breaker":   "human_gated",
+	}
+	for beadID, want := range wantReasons {
+		if got := reasons[beadID]; got != want {
+			t.Errorf("%s reason = %q, want %q", beadID, got, want)
+		}
+	}
+
+	// Run: only task-elig enters the prompt, with atomic answer --question instructions.
+	res, err := runInboxRunner(context.Background(), cfg, env, inboxRunnerOpts{Manual: false})
+	if err != nil {
+		t.Fatalf("runInboxRunner: %v", err)
+	}
+	if !res.Ran || !slices.Equal(res.Eligible, []string{eligFile}) || res.Acked != 1 {
+		t.Fatalf("unexpected run result: %+v", res)
+	}
+	q, _ := parseNeedsMeQuestion(beads["task-elig"].Notes)
+	for _, want := range []string{
+		"## Dial-eligible needs_me questions",
+		"task-elig",
+		q.Hash,
+		"stated CLASS: 3",
+		"stated recommendation: 1",
+		"quartermaster answer <bead> <choice> --question --expect <hash> --class <C> --by inbox-runner",
+		"NEVER touch, answer, resolve, or acknowledge `prompt`",
+	} {
+		if !strings.Contains(gotPrompt, want) {
+			t.Errorf("prompt missing %q:\n%s", want, gotPrompt)
+		}
+	}
+	for _, forbid := range []string{"task-critical", "task-run", "task-prompt", "task-above-max", "task-above-lvl"} {
+		if strings.Contains(gotPrompt, forbid) {
+			t.Errorf("prompt leaked ineligible bead %q:\n%s", forbid, gotPrompt)
+		}
+	}
+}
+
+func TestInboxRunnerEnsureCoordinatorDirRefreshesGuide(t *testing.T) {
+	cfg, _ := setupInboxRunnerTestEnv(t)
+	dir := coordinatorHome()
+	cfg.CoordinatorRules = []string{"Standing rule alpha."}
+	if err := ensureCoordinatorDir(cfg, dir); err != nil {
+		t.Fatalf("initial ensureCoordinatorDir: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil || !strings.Contains(string(data), "Standing rule alpha.") {
+		t.Fatalf("initial AGENTS.md missing rule: err=%v", err)
+	}
+	cfg.CoordinatorRules = []string{"Standing rule beta."}
+	if err := ensureCoordinatorDir(cfg, dir); err != nil {
+		t.Fatalf("refresh ensureCoordinatorDir: %v", err)
+	}
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+		updated, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if !strings.Contains(string(updated), "Standing rule beta.") || strings.Contains(string(updated), "Standing rule alpha.") {
+			t.Errorf("%s was not refreshed with updated coordinator rules", name)
+		}
+	}
+}

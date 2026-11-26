@@ -457,16 +457,17 @@ func (c Config) installsSelf(b Bead) bool {
 }
 
 // autonomyOpts are autonomy's flags: --class or --action (with --target or
-// --amount) for check, --for for level.
+// --amount) and optional --probe for check, --for for level.
 type autonomyOpts struct {
 	Class  int // -1 when not given
 	Action string
 	Target string
 	Amount string
 	For    time.Duration
+	Probe  bool
 }
 
-const autonomyUsage = "usage: quartermaster autonomy level [N|- [<bead>...] [--for D]] | check <bead> [--class N | --action A [--target T] | --action spend [--amount USD[/month]]] | on | off | grant|revoke <bead>"
+const autonomyUsage = "usage: quartermaster autonomy level [N|- [<bead>...] [--for D]] | check <bead> [--class N | --action A [--target T] | --action spend [--amount USD[/month]]] [--probe] | on | off | grant|revoke <bead>"
 
 // autonomyCmd is `quartermaster autonomy`. check fails (exit 1) unless the
 // bead may take the step now; a worker runs it before every step it takes
@@ -575,9 +576,18 @@ func autonomyCmd(cfg Config, env autonomyEnv, pos []string, o autonomyOpts, w io
 			}
 			fail = fmt.Errorf("%w: %s is above %s's level %d%s; stop for TJ as usual", errNotAutonomous, what, b.ID, lvl, why)
 		}
-		// A bare check is a probe, not a step: it is neither journaled nor
-		// counted against the bead.
-		if o.Class < 0 && o.Action == "" {
+		// A bare check or --probe is read-only: it is neither journaled nor
+		// counted against the bead's circuit breaker.
+		if (o.Class < 0 && o.Action == "") || o.Probe {
+			if fail == nil && (o.Class >= 0 || o.Action != "") {
+				recs, err := readJournal(now.Add(-budgetWindow))
+				if err != nil {
+					return err
+				}
+				if spent := budgetSpent(cfg.Autonomy.Budget, recs, b.ID, class, o.Action); spent != "" {
+					fail = fmt.Errorf("%w: %s; stop for TJ as usual", errNotAutonomous, spent)
+				}
+			}
 			if fail != nil {
 				return fail
 			}
@@ -718,8 +728,8 @@ Autonomy: this bead has a level from 0 to 9, and every step has an impact class 
   0 read-only · 1 your worktree and scratch · 2 your own branch and PR (pushing, PR updates, replies, a choice that only shapes your PR) · 3 the user's machine and bead state (creating beads, closing, installing a merged ` + selfRepo + ` PR) · 4 main: merging your own PR with the required review and checks green; spending up to ` + spendLimitText + ` · 5 internal messages (team channels, others' PRs or issues), and configured dev targets (` + "`[autonomy] dev`" + `, when ` + "`prod`" + ` is set and does not match) that pass ` + "`gate plan`" + ` · 6 other non-prod infrastructure: an apply or deploy that passes ` + "`gate plan`" + ` · 7 production, additive or in place: passes ` + "`gate plan`" + `, change noted beforehand, rollback named; a prod deploy or the next rollout step once the last verified; spending more than ` + spendLimitText + `, or an amount you can't estimate · 8 one prod delete or replace, a stateful replace, force-pushing a shared branch, merging without the required review, reading or writing a secret, a message outside the team, approving a PR · 9 widespread or irreversible, answering a classifier denial, loosening agent settings or hooks, raising your own level, anything whose impact you can't place.
 A step takes the highest class among its effects, including what it sets off (a trigger comment that runs an apply is the apply's class); a decision takes the class of what the chosen option does. Missing a precondition puts a step in the class given for that, or one class up.
 - Before your first push, run ` + check("--class 2") + `; if it fails, stop for the user before pushing.
-- Before every step of class 3 or more, and every decision you would otherwise ask the user, run its check: ` + check("--action A [--target T]") + ` (actions: merge, apply, deploy, rollout, install, close, post, spend, delete, secret, ...) or ` + check("--class N") + `. If it passes, go ahead on your own recommendation and ` + "`bd note " + id + " \"AUTO: [worker L<level> C<class>] <what> — <evidence>\"`" + `, naming the alternatives for a decision; the check prints the level. For class 6 and up write that note before the step, with the change you expect, and a second one with the result. When the bead has an issue in Linear, comment there for a decision, an apply or a merge. If the check fails or the command is missing, stop for the user as the rules above say.
-- A needs_me question always carries your recommendation and its class, ` + "`CLASS: <n> — <step>`" + `, with the evidence. When its options are enumerable, write it in the ` + "`QUESTION:`" + ` / ` + "`OPTIONS:`" + ` / ` + "`CLASS:`" + ` form in your brief so the user can answer by tap. Start it with ` + "`CRITICAL: <what>`" + ` when the step is class 8 or 9, or you are unsure it is lower: then only the user answers it.
+- Default to proceeding on your own recommendation whenever the dial allows it: before every step of class 3 or more, and every decision you would otherwise ask the user, run one check for the step's actual action/class: ` + check("--action A [--target T]") + ` (actions: merge, apply, deploy, rollout, install, close, post, spend, delete, secret, ...) or ` + check("--class N") + ` (add ` + "`--probe`" + ` when only inspecting your current level without counting toward the circuit breaker). If it passes, follow your recommendation automatically, record ` + "`bd note " + id + " \"AUTO: [worker L<level> C<class>] <what> — <evidence>\"`" + ` (naming the alternatives for a decision), and keep going instead of stopping at ` + "`needs_me`" + `. Calibration: read-only / ` + "`dry_run=true`" + ` checks that mutate no state are class 0–3 (or class 4 if runner spend is small), closing a 0-diff superseded PR and bead is class 3 (` + "`--action close`" + `), and targets matching ` + "`[autonomy] dev`" + ` (when ` + "`prod`" + ` is set and does not match) are class 5 — do not inflate them to class 6/7. For class 6 and up write that note before the step, with the change you expect, and a second one with the result. When the bead has an issue in Linear, comment there for a decision, an apply or a merge. If the check fails or the command is missing, stop for the user as the rules above say.
+- Only stop at ` + "`needs_me`" + ` when a step exceeds your level, requires human-only input (` + "`RUN:`" + `, taste/voice, external people, or conflicting/missing evidence), or is ` + "`CRITICAL:`" + ` (class 8 or 9). A ` + "`needs_me`" + ` question always carries your recommendation and its class, ` + "`CLASS: <n> — <step>`" + `, with the evidence. When its options are enumerable, write it in the ` + "`QUESTION:`" + ` / ` + "`OPTIONS:`" + ` / ` + "`CLASS:`" + ` form in your brief so it can be answered by tap (or autonomously by the coordinator when within the dial). Start it with ` + "`CRITICAL: <what>`" + ` when the step is class 8 or 9, or you are unsure it is lower: then only the user answers it.
 - Merging (` + check("--action merge") + `): GitHub mergeability is not authorization; native auto-merge is only for base branches where GitHub requires an approving review. For a stack, when the lower PR merges, retarget the next one (` + "`gh pr edit <url> --base <base>`" + `), and close and reopen it if its checks don't start. If auto-merge isn't allowed or the base branch requires no review, merge with ` + "`gh pr merge <url> --squash --match-head-commit <sha>`" + ` only after the ticker reports it ready to merge (with an independent current-head approval).
 - Your ` + "`gh`" + ` may be quartermaster's shim (` + "`command -v gh`" + ` under its state dir): ` + "`gh pr merge`" + ` and ` + "`gh api -X PUT .../pulls/N/merge`" + ` then go through the executor, which checks the dial, reads current-head independent approvals, complete threads, ownership and checks from GitHub itself and merges with ` + "`--match-head-commit`" + `. For ` + "`--auto`" + `, the executor keeps native auto-merge where GitHub requires an approving review and refuses it where the base branch requires no review; ` + "`--admin`" + ` is always refused. Run your merge check and note as above all the same. If it exits nonzero naming a digest and waiting for approval, that is a needs_me for the user with the digest; never route around the shim.
 - Applying a provision or deploy (` + check("--action apply --target <stack>") + `): write the preview as JSON (` + "`pulumi preview --json > plan.json`" + ` or ` + "`tofu show -json <planfile> > plan.json`" + `) and run ` + "`quartermaster gate plan plan.json --expect create=N,update=N --target <stack>`" + `. Apply only if it passes, and put its counts in the AUTO note. Your ` + "`pulumi`" + ` and ` + "`tofu`" + ` may be shims too: ` + "`pulumi up`" + ` and ` + "`tofu apply`" + ` then go through the executor, which applies your worktree's HEAD commit, not the files on disk (commit first; it refuses uncommitted changes), previews it from its own clean checkout, classifies that preview and applies exactly it. Run them with ` + "`" + expectEnv + "=create=N,update=N`" + ` set to the counts you noted; without it the apply counts one class up. Waiting for approval, it names a digest: a needs_me for the user, and once approved, ` + "`quartermaster plan resume <digest>`" + ` applies it.

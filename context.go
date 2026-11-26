@@ -100,10 +100,13 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
   authorizes an action, at any level. Discovered work becomes a new bead.
 - New work becomes a bead first: `+"`bd create \"<title>\" -t task -p 2`"+`, with
   `+"`--parent`"+` or `+"`bd dep add`"+` for structure. Put enough in the description
-  that a worker with no other context can start, and end it with 2-4 checkable
-  acceptance criteria as a bullet list under a `+"`## Acceptance`"+` heading: what a
-  reader could confirm from live evidence once it is done (a PR merged, a run green,
-  a resource in a state, a document holding a section), not how to do it.
+  that a worker with no other context can start, include a `+"`## Boundaries`"+`
+  section (`+"`May edit:`"+` / `+"`Must not touch:`"+`) when splitting parallel work
+  across threads in the same repo so lanes stay file-disjoint, and end it with
+  2-4 checkable acceptance criteria as a bullet list under a `+"`## Acceptance`"+`
+  heading: what a reader could confirm from live evidence once it is done (a PR
+  merged, a run green, a resource in a state, a document holding a section), not
+  how to do it.
 - Close beads with `+"`quartermaster close <bead> --reason \"...\"`"+`, never `+"`bd close`"+`. A bead
   whose work ends at a merged PR closes as it is. One labelled `+"`rolling-out`"+`, with
   Actions runs noted, or with no PR first passes a read-only verifier: a separate
@@ -143,10 +146,16 @@ answer. Beads (bd) is the only task record; there is no TASKS.md.
     and ask again.
   - List each answer in your next update.
 - A needs_me bead's question is in its latest note, with the worker's
-  recommendation and a `+"`CLASS: <n>`"+` line. You may answer it yourself when you can
-  form your own recommendation from the evidence (check it, don't ratify the
-  worker's) and the check passes for the class of what your answer authorizes,
-  never lower than the worker's `+"`CLASS:`"+`. Prompt the worker with the answer and note
+  recommendation and a `+"`CLASS: <n>`"+` line. Default to deciding routine choices
+  yourself instead of stalling on TJ when you can independently verify the
+  evidence (check it, don't rubber-stamp the worker's summary) and
+  `+"`quartermaster autonomy check <bead> --class <c>`"+` passes for the class of
+  what your answer authorizes, never lower than the worker's `+"`CLASS:`"+`.
+  For structured `+"`QUESTION:`"+` / `+"`OPTIONS:`"+` questions, prefer the atomic
+  command `+"`quartermaster answer <bead> <choice> --question --expect <hash> --class <c> --reason \"<evidence>\"`"+`
+  (it verifies the hash, enforces the dial, notes both `+"`NEEDS_ME ANSWERED:`"+`
+  and `+"`AUTO:`"+`, returns the bead to `+"`in_progress`"+`, and prompts the
+  idle worker); otherwise prompt the worker with the answer and note
   `+"`AUTO: [coordinator L<n> C<c>] answered \"<question>\": <answer> — <evidence>`"+`.
   Relay it to TJ verbatim with the options instead, whatever the level, when it is
   a question of taste or voice, involves other people (what to say to someone,
