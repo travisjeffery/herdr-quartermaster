@@ -1,14 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"maps"
 	"os"
-	"os/exec"
+	"os/signal"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -99,6 +101,10 @@ type boardEnv struct {
 	readPrompt    func(id string) (ApprovalPrompt, error)
 	answerPrompt  func(id, choice, expect string) (string, error)
 	answerNeedsMe func(id, choice, text, expect string) (string, error)
+	completeRun   func(id, command, result string) (string, error)
+	snoozes       func() SnoozeState
+	snooze        func(id, dur string) (string, error)
+	clearSnooze   func(id string) (string, error)
 
 	note           func(id, text string) error
 	setStatus      func(id, status string) error
@@ -150,6 +156,44 @@ func askBoardCoordinator(cfg Config, listAgents func() ([]Agent, error), send fu
 	return "sent to coordinator (" + coord.Name + ")", nil
 }
 
+// completeBoardRun records a completed RUN: command as RAN: on the bead,
+// returns the bead to in_progress, and prompts an idle worker to continue.
+func completeBoardRun(env promptEnv, id, command, result string) (string, error) {
+	b, err := env.show(id)
+	if err != nil {
+		return "", err
+	}
+	res := strings.TrimSpace(result)
+	if res == "" {
+		res = "ok"
+	}
+	note := fmt.Sprintf("RAN: %s → %s", command, res)
+	if err := env.note(id, note); err != nil {
+		return "", fmt.Errorf("noting RAN on %s failed: %w", id, err)
+	}
+	if env.setStatus == nil {
+		return "", fmt.Errorf("RAN noted on %s but setting status is unavailable", id)
+	}
+	if err := env.setStatus(id, StatusInProgress); err != nil {
+		return "", fmt.Errorf("RAN noted on %s but returning to in_progress failed: %w", id, err)
+	}
+	msg := fmt.Sprintf("recorded RAN on %s; bead is in_progress", id)
+	host, a := questionWorker(env, b)
+	switch {
+	case a == nil:
+		return msg + " (no worker running)", nil
+	case !agentReady(a):
+		return msg + fmt.Sprintf(" (worker is %s)", a.Status), nil
+	case env.tell == nil:
+		return msg, nil
+	}
+	prompt := fmt.Sprintf("User ran the requested RUN command:\n%s\nResult: %s\nRecorded as `RAN:` on the bead and returned to in_progress. Carry on.", command, res)
+	if err := env.tell(host, a, prompt); err != nil {
+		return msg + " (prompting worker failed: " + err.Error() + ")", nil
+	}
+	return msg + "; prompted worker", nil
+}
+
 func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 	bd := Beads{}
 	cache := boardCachePath()
@@ -186,6 +230,20 @@ func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 		},
 		answerNeedsMe: func(id, choice, text, expect string) (string, error) {
 			return answerNeedsMeTextVia(pEnv, id, choice, text, expect, "board")
+		},
+		completeRun: func(id, command, result string) (string, error) {
+			return completeBoardRun(pEnv, id, command, result)
+		},
+		snoozes: loadSnoozeState,
+		snooze: func(id, dur string) (string, error) {
+			var buf bytes.Buffer
+			err := snoozeCmd(cfg, liveSnoozeEnv(cfg), []string{id, dur}, &buf)
+			return strings.TrimSpace(buf.String()), err
+		},
+		clearSnooze: func(id string) (string, error) {
+			var buf bytes.Buffer
+			err := snoozeCmd(cfg, liveSnoozeEnv(cfg), []string{id, "--clear"}, &buf)
+			return strings.TrimSpace(buf.String()), err
 		},
 
 		note:      bd.Note,
@@ -244,8 +302,8 @@ func liveBoardEnv(cfg Config, h Herdr) boardEnv {
 			_, err := inboxDoneFiles(files)
 			return err
 		},
-		copy: func(text string) error { return exec.Command("wl-copy", text).Run() },
-		open: openURL,
+		copy: func(text string) error { return copyViaTerminal(os.Stdout, text) },
+		open: func(u string) string { return openBoardURL(os.Stdout, u) },
 	}
 }
 
@@ -264,8 +322,9 @@ type (
 		err    error
 	}
 	localMsg struct {
-		st    TickerState
-		inbox []InboxItem
+		st     TickerState
+		inbox  []InboxItem
+		snooze SnoozeState
 	}
 	gcMsg struct {
 		items []gcItem
@@ -281,6 +340,8 @@ type (
 		reloadAgents bool
 		gc           bool
 		closeAnswer  bool
+		advanceQueue bool
+		answeredID   string
 		quit         bool
 	}
 )
@@ -293,6 +354,7 @@ const (
 	viewGC
 	viewEvents
 	viewAnswer
+	viewQueue
 	viewHelp
 )
 
@@ -300,11 +362,12 @@ const (
 // answer, a reason), one key of a few (a status, a priority), or y to
 // confirm. Esc cancels any of them.
 type ask struct {
-	prompt string
-	text   bool
-	keys   string
-	buf    string
-	then   func(answer string) []cmd
+	prompt     string
+	text       bool
+	allowEmpty bool
+	keys       string
+	buf        string
+	then       func(answer string) []cmd
 }
 
 // confirm asks y/n before do runs; any key but y cancels.
@@ -350,9 +413,21 @@ type board struct {
 	// marked tracks main-board multi-selected bead IDs for bulk actions.
 	marked map[string]bool
 
-	// ans holds the live approval prompt or structured needs_me question shown
-	// in viewAnswer.
+	// ans holds the live approval prompt, structured needs_me question, or RUN
+	// command shown in viewAnswer.
 	ans *answerState
+
+	// Responsive layout mode and hit targets for SGR mouse/touch interaction.
+	layout layoutMode
+	hits   boardHits
+
+	// Decision Queue (Q / --queue) state: prioritized items needing user input.
+	queueHome        bool
+	queue            []queueItem
+	queueCur         int
+	queueSnoozed     int
+	queueShowSnoozed bool
+	queueDone        map[string]bool
 
 	// Live Events / Inbox view (E) state.
 	feed      []NotifyFeedEvent
@@ -380,13 +455,14 @@ type board struct {
 
 func newBoard(cfg Config, env boardEnv, data boardData, now func() time.Time) *board {
 	m := &board{
-		cfg:      cfg,
-		env:      env,
-		now:      now,
-		data:     data,
-		details:  map[string]*beadDetail{},
-		marked:   map[string]bool{},
-		gcMarked: map[string]bool{},
+		cfg:       cfg,
+		env:       env,
+		now:       now,
+		data:      data,
+		details:   map[string]*beadDetail{},
+		marked:    map[string]bool{},
+		gcMarked:  map[string]bool{},
+		queueDone: map[string]bool{},
 	}
 	m.rebuild()
 	m.rebuildEvents()
@@ -422,6 +498,7 @@ func (m *board) rebuild() {
 	if m.cur < 0 {
 		m.cur = nextSelectable(m.rows, 0, 1)
 	}
+	m.rebuildQueue()
 }
 
 func (m *board) sel() *boardRow {
@@ -450,7 +527,11 @@ func (m *board) tick() []cmd {
 		m.localLoading = true
 		cmds = append(cmds, func() msg {
 			st, inbox := m.env.local()
-			return localMsg{st, inbox}
+			var sn SnoozeState
+			if m.env.snoozes != nil {
+				sn = m.env.snoozes()
+			}
+			return localMsg{st: st, inbox: inbox, snooze: sn}
 		})
 	}
 	if !m.beadsLoading && now.Sub(m.beadsTried) >= beadsEvery {
@@ -458,6 +539,8 @@ func (m *board) tick() []cmd {
 	}
 	if m.view == viewDetail {
 		cmds = append(cmds, m.loadDetail()...)
+	} else if m.view == viewList || m.view == viewQueue {
+		cmds = append(cmds, m.loadDetailIfWide()...)
 	}
 	if m.view == viewGC && !m.gcLoaded && !m.gcLoading {
 		cmds = append(cmds, m.loadGC())
@@ -501,6 +584,10 @@ func (m *board) loadDetail() []cmd {
 	if r == nil {
 		return nil
 	}
+	return m.loadDetailFor(*r)
+}
+
+func (m *board) loadDetailFor(r boardRow) []cmd {
 	id := r.bead.ID
 	if _, ok := m.details[id]; ok {
 		return nil
@@ -563,6 +650,7 @@ func (m *board) apply(x msg) []cmd {
 		}
 		m.beadsErr = ""
 		m.data.Beads, m.data.BeadsAt = x.beads, x.at
+		m.queueDone = map[string]bool{}
 		// Notes and status may have moved: look the details up again.
 		m.details = map[string]*beadDetail{}
 		m.rebuild()
@@ -578,6 +666,9 @@ func (m *board) apply(x msg) []cmd {
 		m.localLoading = false
 		m.localAt = m.now()
 		m.data.State, m.data.Inbox = x.st, x.inbox
+		if x.snooze.Beads != nil || m.env.snoozes != nil {
+			m.data.Snooze = x.snooze
+		}
 		m.rebuild()
 		m.rebuildEvents()
 	case eventsMsg:
@@ -623,10 +714,19 @@ func (m *board) apply(x msg) []cmd {
 			m.view = m.ans.back
 			m.ans = nil
 		}
+		var cmds []cmd
+		if x.advanceQueue && x.err == nil {
+			if x.answeredID != "" {
+				m.queueDone[x.answeredID] = true
+			}
+			m.rebuildQueue()
+			if m.view == viewAnswer && m.ans != nil && m.ans.fromQueue {
+				cmds = append(cmds, m.openQueueStep(min(m.queueCur, max(0, len(m.queue)-1)))...)
+			}
+		}
 		if x.quit && x.err == nil {
 			m.quit = true
 		}
-		var cmds []cmd
 		if x.reload {
 			cmds = append(cmds, m.loadBeads())
 		}
@@ -680,11 +780,14 @@ func edit(buf *string, k string) (submit, cancel bool) {
 	return false, false
 }
 
-// key handles one keypress and returns the work it starts.
+// key handles one keypress (or SGR mouse/touch sequence) and returns the work it starts.
 func (m *board) key(k string) []cmd {
 	if k == "\x03" {
 		m.quit = true
 		return nil
+	}
+	if ev, ok := parseSGRMouse(k); ok {
+		return m.handleMouse(ev)
 	}
 	if a := m.ask; a != nil {
 		if a.text {
@@ -692,7 +795,7 @@ func (m *board) key(k string) []cmd {
 			switch {
 			case cancel:
 				m.ask, m.status = nil, "cancelled"
-			case submit && strings.TrimSpace(a.buf) == "":
+			case submit && strings.TrimSpace(a.buf) == "" && !a.allowEmpty:
 				m.ask, m.status = nil, "cancelled: nothing typed"
 			case submit:
 				m.ask = nil
@@ -728,6 +831,8 @@ func (m *board) key(k string) []cmd {
 		return m.eventsKey(k)
 	case viewAnswer:
 		return m.answerKey(k)
+	case viewQueue:
+		return m.queueKey(k)
 	case viewDetail:
 		if m.detailKey(k) {
 			return nil
@@ -820,27 +925,37 @@ func (m *board) listKey(k string) []cmd {
 		return nil
 	case "j", "\x1b[B":
 		m.move(1)
-		return nil
+		return m.loadDetailIfWide()
 	case "k", "\x1b[A":
 		m.move(-1)
-		return nil
+		return m.loadDetailIfWide()
 	case "\x04", "\x1b[6~":
 		m.move(page)
-		return nil
+		return m.loadDetailIfWide()
 	case "\x15", "\x1b[5~":
 		m.move(-page)
-		return nil
+		return m.loadDetailIfWide()
 	case "g", "\x1b[H":
 		m.cur = nextSelectable(m.rows, 0, 1)
-		return nil
+		return m.loadDetailIfWide()
 	case "G", "\x1b[F":
 		m.cur = nextSelectable(m.rows, len(m.rows)-1, -1)
-		return nil
+		return m.loadDetailIfWide()
 	case "]", "\t":
 		m.jumpSection(1)
-		return nil
+		return m.loadDetailIfWide()
 	case "[", "\x1b[Z":
 		m.jumpSection(-1)
+		return m.loadDetailIfWide()
+	case "J":
+		if effectiveLayout(m.layout, m.hits.width) == layoutWide {
+			m.scroll += 5
+		}
+		return nil
+	case "K":
+		if effectiveLayout(m.layout, m.hits.width) == layoutWide {
+			m.scroll = max(0, m.scroll-5)
+		}
 		return nil
 	case "/":
 		m.filter.typing = true
@@ -853,6 +968,11 @@ func (m *board) listKey(k string) []cmd {
 		m.rebuild()
 		m.status = "sorted by " + m.sort.String()
 		return nil
+	case "L":
+		m.cycleLayout()
+		return m.loadDetailIfWide()
+	case "Q":
+		return m.openQueue()
 	case "r":
 		m.status = "refreshing…"
 		m.agentsAt, m.localAt = time.Time{}, time.Time{}
@@ -1004,6 +1124,11 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 		}}
 	case "A":
 		return m.openAnswer(r)
+	case "f":
+		return m.followRecommendation(r, false)
+	case "z":
+		m.snoozeAsk(id, false)
+		return nil
 	case "n":
 		if len(m.marked) > 0 {
 			targets, ok := m.boardTargets()
@@ -1164,7 +1289,7 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 		}
 		m.status = m.env.open(r.prs[0].URL)
 	case "l":
-		m.status = openLinear(m.cfg, r)
+		m.status = openLinearWith(m.cfg, r, m.env.open)
 	case "y":
 		m.status = m.copied(id, "copied "+id)
 	case "p":
@@ -1931,8 +2056,8 @@ func nextSelectable(rows []boardRow, from, dir int) int {
 	return -1
 }
 
-// waitInput waits up to timeout ms (-1: forever) for a key on fd. Polling
-// rather than a reader goroutine leaves stdin alone while a pager has it.
+// waitInput waits up to timeout ms (-1: forever) for a key on fd. Kept for
+// callers like rpcview that only poll stdin.
 func waitInput(fd, timeout int) (bool, error) {
 	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 	for {
@@ -1944,13 +2069,45 @@ func waitInput(fd, timeout int) (bool, error) {
 	}
 }
 
+// waitInputOrWake waits up to timeout ms (-1: forever) for input on stdinFD or
+// an async/SIGWINCH wake byte on wakeFD. Polling rather than a reader goroutine
+// leaves stdin alone while a pager has it.
+func waitInputOrWake(stdinFD, wakeFD, timeout int) (stdinReady, woke bool, err error) {
+	fds := []unix.PollFd{{Fd: int32(stdinFD), Events: unix.POLLIN}}
+	if wakeFD >= 0 {
+		fds = append(fds, unix.PollFd{Fd: int32(wakeFD), Events: unix.POLLIN})
+	}
+	for {
+		n, err := unix.Poll(fds, timeout)
+		if err == unix.EINTR {
+			return false, true, nil
+		}
+		if err != nil {
+			return false, false, err
+		}
+		if n == 0 {
+			return false, false, nil
+		}
+		return fds[0].Revents&unix.POLLIN != 0, len(fds) > 1 && fds[1].Revents&unix.POLLIN != 0, nil
+	}
+}
+
+// boardRunOpts configures the initial mode of `quartermaster board`.
+type boardRunOpts struct {
+	Queue bool
+}
+
 // startBoard is the board's first state: beads from the last board's cache,
 // so the first paint waits on nothing slow, and agents and ticker state read
 // now, since both are cheap. The first tick loads beads from bd.
 func startBoard(cfg Config, env boardEnv, cache string, now func() time.Time) *board {
 	beads, at := loadBoardCache(cache)
 	st, inbox := env.local()
-	m := newBoard(cfg, env, boardData{Beads: beads, BeadsAt: at, State: st, Inbox: inbox}, now)
+	var sn SnoozeState
+	if env.snoozes != nil {
+		sn = env.snoozes()
+	}
+	m := newBoard(cfg, env, boardData{Beads: beads, BeadsAt: at, State: st, Inbox: inbox, Snooze: sn}, now)
 	m.localAt = now()
 	if agents, err := env.agents(); err == nil {
 		m.data.Agents = agents
@@ -1960,29 +2117,81 @@ func startBoard(cfg Config, env boardEnv, cache string, now func() time.Time) *b
 	return m
 }
 
+const (
+	boardEnterScreen = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h"
+	boardLeaveScreen = "\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l"
+)
+
 func runBoard(cfg Config) error {
+	return runBoardWithOpts(cfg, boardRunOpts{})
+}
+
+func runBoardWithOpts(cfg Config, opts boardRunOpts) error {
 	fd := int(os.Stdin.Fd())
 	old, err := term.MakeRaw(fd)
 	if err != nil {
 		return err
 	}
 	defer term.Restore(fd, old)
-	fmt.Print("\x1b[?1049h\x1b[?25l")
-	defer fmt.Print("\x1b[?25h\x1b[?1049l")
+	fmt.Print(boardEnterScreen)
+	defer fmt.Print(boardLeaveScreen)
+
+	// Self-pipe wakes unix.Poll instantaneously on SIGWINCH resize or async
+	// command completion, eliminating 1s redraw stalls on Moshi/Ghostty.
+	wakeR, wakeW, pipeErr := os.Pipe()
+	wakeFD := -1
+	if pipeErr == nil {
+		_ = unix.SetNonblock(int(wakeR.Fd()), true)
+		_ = unix.SetNonblock(int(wakeW.Fd()), true)
+		wakeFD = int(wakeR.Fd())
+		defer wakeR.Close()
+		defer wakeW.Close()
+	}
+	wake := func() {
+		if wakeW != nil {
+			_, _ = wakeW.Write([]byte{1})
+		}
+	}
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	stopWinch := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-winch:
+				wake()
+			case <-stopWinch:
+				return
+			}
+		}
+	}()
+	defer func() {
+		signal.Stop(winch)
+		close(stopWinch)
+	}()
 
 	// The same server the ticker reads, so focus and dispatch act on the agents shown.
 	h := newHerdr().on(cfg.coordSocket())
 	m := startBoard(cfg, liveBoardEnv(cfg, h), boardCachePath(), time.Now)
+	if opts.Queue {
+		m.queueHome = true
+		m.view = viewQueue
+		m.rebuildQueue()
+	}
 
 	results := make(chan msg, 64)
 	start := func(cmds []cmd) {
 		for _, c := range cmds {
 			if c != nil {
-				go func() { results <- c() }()
+				go func() {
+					results <- c()
+					wake()
+				}()
 			}
 		}
 	}
 	buf := make([]byte, 256)
+	var drainBuf [64]byte
 	var partial []byte
 	for !m.quit {
 		start(m.tick())
@@ -1991,10 +2200,18 @@ func runBoard(cfg Config) error {
 			w, hgt = 100, 30
 		}
 		fmt.Print(renderBoard(m, w, hgt))
-		// Wake at least each second: ages tick and refreshes come due.
-		ready, err := waitInput(fd, 1000)
+		// Wake immediately on input, resize (SIGWINCH), or async completion,
+		// and at least each second so ages tick and refreshes come due.
+		ready, woke, err := waitInputOrWake(fd, wakeFD, 1000)
 		if err != nil {
 			return err
+		}
+		if woke && wakeR != nil {
+			for {
+				if n, _ := wakeR.Read(drainBuf[:]); n <= 0 {
+					break
+				}
+			}
 		}
 		for drained := false; !drained; {
 			select {
@@ -2017,7 +2234,7 @@ func runBoard(cfg Config) error {
 			start(m.key(k))
 			if f := m.handoff; f != nil {
 				m.handoff = nil
-				fmt.Print("\x1b[?25h\x1b[?1049l")
+				fmt.Print(boardLeaveScreen)
 				term.Restore(fd, old)
 				if err := f(); err != nil {
 					m.status = err.Error()
@@ -2025,7 +2242,7 @@ func runBoard(cfg Config) error {
 				if _, err := term.MakeRaw(fd); err != nil {
 					return err
 				}
-				fmt.Print("\x1b[?1049h\x1b[?25l")
+				fmt.Print(boardEnterScreen)
 				// Keys buffered beside the viewer/pager entry key belong to
 				// that transition, not to the board after it returns. Never
 				// let a pasted Vn become a task-label write on viewer close.

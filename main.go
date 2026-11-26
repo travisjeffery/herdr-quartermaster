@@ -76,8 +76,8 @@ Usage:
                 [--by WHO]                             (default 7); --release reopens them
   quartermaster verify [<bead>...] [--yes]             stale beads with evidence they are already done; --yes
                                                        closes (at autonomy level 3+) or flags them like the ticker
-  quartermaster board                                  every open bead by state: act on them, tidy up
-                                                       finished work (runs as the plugin popup)
+  quartermaster board [--queue]                        every open bead by state (or --queue for the Needs You
+                                                       decision queue): act on them, tidy up finished work
   quartermaster ticker run|start|stop|status|notifications  background loop and desktop delivery receipts
   quartermaster tick                                   one ticker pass in the foreground
   quartermaster router [status|sync]                   inspect Pi virtual-model router chains, thresholds, sync state
@@ -305,6 +305,7 @@ func run(args []string) error {
 	questionFlag := fs.Bool("question", false, "answer: answer a bead's structured needs_me QUESTION/OPTIONS note instead of a live pane approval prompt")
 	probeFlag := fs.Bool("probe", false, "autonomy check: read-only check that never journals or counts toward the circuit breaker")
 	questionsFlag := fs.Bool("questions", false, "inbox: list live approval prompts and needs_me OPTIONS questions")
+	queueFlag := fs.Bool("queue", false, "board: open directly in the Needs You Decision Queue")
 	jsonFlag := fs.Bool("json", false, "context, digest, inbox, show, memory, roles: emit JSON output")
 	reasonFlag := fs.String("reason", "", "close: what shipped and how it was verified")
 	by := fs.String("by", "coordinator", "dispatch, focus, resume, stale --release, answer, close: who decided; anyone but TJ needs the bead's autonomy level to reach the step's class")
@@ -526,7 +527,7 @@ func run(args []string) error {
 	case "tap":
 		return tapCmd(cfg, livePromptEnv(cfg, h.on(cfg.coordSocket())), pos)
 	case "board":
-		return runBoard(cfg)
+		return runBoardWithOpts(cfg, boardRunOpts{Queue: *queueFlag})
 	case "action":
 		// Plugin actions: open one of this plugin's panes.
 		if len(pos) != 1 {

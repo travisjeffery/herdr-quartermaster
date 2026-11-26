@@ -42,6 +42,7 @@ type boardData struct {
 	Agents  []Agent   `json:"-"`
 	State   TickerState
 	Inbox   []InboxItem
+	Snooze  SnoozeState              `json:"-"`
 	Native  map[string]rpcVisibility `json:"-"`
 }
 
