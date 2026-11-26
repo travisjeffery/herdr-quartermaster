@@ -31,10 +31,13 @@ type detailResult struct {
 }
 
 const (
-	detailDescLines    = 10
-	detailHistoryLines = 12
-	detailTailLines    = 10
-	detailTimeout      = 5 * time.Second
+	detailDescLines           = 10
+	detailHistoryLines        = 12
+	detailHistoryNoteMaxLines = 2
+	detailDoneMax             = 5
+	detailDoneNoteMaxLines    = 2
+	detailTailLines           = 10
+	detailTimeout             = 5 * time.Second
 )
 
 // linkedPRs is every PR the ticker's last pass knows a bead by: the one it is
@@ -135,10 +138,56 @@ func noteLines(notes string) []string {
 }
 
 // waitingNotes is how many of a needs_me bead's last notes say what it
-// waits on: the last two (a question and its options, or a RUN: and its
-// why), reaching back up to four for the latest note that asks something,
-// since a worker often notes progress after posing the question.
+// waits on: a full structured QUESTION:/Details:/Evidence:/OPTIONS:/CLASS:
+// block (never chopping it across Waiting and History), a RUN: and its why,
+// or the last two notes reaching back up to four for the latest note that
+// asks something.
 func waitingNotes(notes []string) int {
+	if len(notes) == 0 {
+		return 0
+	}
+	// Skip trailing CLASS: and non-answer housekeeping lines (e.g. autonomy
+	// level changes or AUTO handoff notes) when checking for a live structured
+	// QUESTION:/OPTIONS: block at the tail.
+	end := len(notes) - 1
+	for end >= 0 && (isClassLine(notes[end]) || isNonAnswerHousekeepingNote(notes[end])) {
+		end--
+	}
+	if end >= 0 && questionOptionRe.MatchString(notes[end]) {
+		optStart := end
+		for optStart > 0 && questionOptionRe.MatchString(notes[optStart-1]) {
+			optStart--
+		}
+		if optStart > 0 && notes[optStart-1] == "OPTIONS:" {
+			for j := optStart - 2; j >= 0; j-- {
+				if isAnswerBoundaryLine(notes[j]) {
+					break
+				}
+				if strings.HasPrefix(notes[j], "QUESTION:") {
+					start := j
+					if start > 0 && strings.HasPrefix(notes[start-1], "CRITICAL:") {
+						start--
+					}
+					return len(notes) - start
+				}
+			}
+		}
+	}
+	// Structured free-text QUESTION: (with Details:/Evidence:/CLASS:) without
+	// OPTIONS: also stays intact up to 10 lines back unless an answer intervened.
+	for j := end; j >= 0 && j >= len(notes)-10; j-- {
+		if isAnswerBoundaryLine(notes[j]) {
+			break
+		}
+		if strings.HasPrefix(notes[j], "QUESTION:") {
+			start := j
+			if start > 0 && strings.HasPrefix(notes[start-1], "CRITICAL:") {
+				start--
+			}
+			return len(notes) - start
+		}
+	}
+
 	n := min(2, len(notes))
 	for i := len(notes) - 1; i >= 0 && i >= len(notes)-4; i-- {
 		if asks(notes[i]) {
@@ -146,6 +195,194 @@ func waitingNotes(notes []string) int {
 		}
 	}
 	return n
+}
+
+var questionRecSplitRe = regexp.MustCompile(`(?i)\bRecommendation:\s*`)
+
+// questionParts separates a structured NeedsMeQuestion into scannable pieces so
+// the board can show the crisp question, highlighted recommendation, and
+// numbered options before longer Details/Evidence prose.
+type questionParts struct {
+	critical       string
+	question       string
+	recommendation string
+	details        []string
+	evidence       []string
+}
+
+func splitQuestionParts(q NeedsMeQuestion) questionParts {
+	var p questionParts
+	for _, raw := range q.Lines {
+		l := strings.TrimSpace(raw)
+		if l == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(l, "CRITICAL:"):
+			if p.critical == "" {
+				p.critical = l
+			} else {
+				p.details = append(p.details, l)
+			}
+		case len(l) >= len("Details:") && strings.EqualFold(l[:len("Details:")], "Details:"):
+			if body := strings.TrimSpace(l[len("Details:"):]); body != "" {
+				p.details = append(p.details, body)
+			}
+		case len(l) >= len("Evidence:") && strings.EqualFold(l[:len("Evidence:")], "Evidence:"):
+			if body := strings.TrimSpace(l[len("Evidence:"):]); body != "" {
+				p.evidence = append(p.evidence, body)
+			}
+		case p.question == "":
+			if loc := questionRecSplitRe.FindStringIndex(l); loc != nil {
+				qText := strings.TrimSpace(l[:loc[0]])
+				recText := strings.TrimSpace(l[loc[1]:])
+				if qText != "" {
+					p.question = qText
+				} else {
+					p.question = l
+				}
+				if recText != "" {
+					p.recommendation = recText
+				}
+			} else {
+				p.question = l
+			}
+		default:
+			if loc := questionRecSplitRe.FindStringIndex(l); loc != nil && p.recommendation == "" && loc[0] == 0 {
+				p.recommendation = strings.TrimSpace(l[loc[1]:])
+			} else {
+				p.details = append(p.details, l)
+			}
+		}
+	}
+	return p
+}
+
+// extractDoneHighlights picks high-signal completed milestones from earlier
+// bead notes and merged PRs so you can scan what has already been accomplished
+// without reading raw agent logs.
+func extractDoneHighlights(r boardRow, earlier []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] || len(out) >= detailDoneMax {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	for i := len(earlier) - 1; i >= 0 && len(out) < detailDoneMax; i-- {
+		l := strings.TrimSpace(earlier[i])
+		if l == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(l, "MILESTONE ["):
+			add(strings.TrimSpace(strings.TrimPrefix(l, "MILESTONE ")))
+		case strings.HasPrefix(l, "MILESTONE:"):
+			add(strings.TrimSpace(strings.TrimPrefix(l, "MILESTONE:")))
+		case strings.HasPrefix(l, "APPLIED"),
+			strings.HasPrefix(l, "VERIFIED:"),
+			strings.HasPrefix(l, "RAN:"),
+			strings.HasPrefix(l, "DONE:"),
+			strings.HasPrefix(l, "NEEDS_ME ANSWERED:"),
+			strings.HasPrefix(l, "PROMPT ANSWERED:"),
+			strings.HasPrefix(l, "DECISION:"),
+			strings.HasPrefix(l, "FINDINGS"):
+			add(l)
+		case strings.HasPrefix(l, "TJ ") && strings.Contains(l, "DECISION"):
+			add(l)
+		}
+	}
+	for _, pr := range r.prs {
+		if len(out) >= detailDoneMax {
+			break
+		}
+		if pr.State != "MERGED" {
+			continue
+		}
+		tag := fmt.Sprintf("#%d", pr.Number)
+		covered := false
+		for _, item := range out {
+			if pr.Number > 0 && strings.Contains(item, tag) {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		label := "Merged " + prName(pr)
+		if pr.Title != "" {
+			label += " — " + pr.Title
+		}
+		add(label)
+	}
+	return out
+}
+
+func historyNoteStyle(note string) string {
+	switch {
+	case strings.HasPrefix(note, "MILESTONE"),
+		strings.HasPrefix(note, "VERIFIED:"),
+		strings.HasPrefix(note, "APPLIED"),
+		strings.HasPrefix(note, "RAN:"),
+		strings.HasPrefix(note, "DONE:"):
+		return ansiGreen
+	case strings.HasPrefix(note, "NEEDS_ME ANSWERED:"),
+		strings.HasPrefix(note, "PROMPT ANSWERED:"),
+		strings.HasPrefix(note, "DECISION:"),
+		strings.HasPrefix(note, "TJ "):
+		return ansiYellow
+	case strings.HasPrefix(note, "QUESTION:"),
+		strings.HasPrefix(note, "CRITICAL:"),
+		strings.HasPrefix(note, "RUN:"):
+		return ansiCyan
+	case isHousekeepingNote(note):
+		return ansiDim
+	default:
+		return ""
+	}
+}
+
+func appendWrappedCapped(out *[]styledLine, firstStyle, contStyle, firstIndent, contIndent, text string, w, maxLines int) {
+	firstW := max(1, w-utf8.RuneCountInString(firstIndent))
+	lines := wrap(text, firstW)
+	if len(lines) == 0 {
+		return
+	}
+	limit := len(lines)
+	truncated := false
+	if maxLines > 0 && limit > maxLines {
+		limit = maxLines
+		truncated = true
+	}
+	for i := 0; i < limit; i++ {
+		indent := firstIndent
+		style := firstStyle
+		if i > 0 {
+			indent = contIndent
+			style = contStyle
+		}
+		line := lines[i]
+		avail := max(1, w-utf8.RuneCountInString(indent))
+		if truncated && i == limit-1 {
+			r := []rune(line)
+			if len(r) >= avail {
+				if avail > 1 {
+					line = string(r[:avail-1]) + "…"
+				} else {
+					line = "…"
+				}
+			} else {
+				line += "…"
+			}
+		} else if utf8.RuneCountInString(line) > avail {
+			line = string([]rune(line)[:avail])
+		}
+		*out = append(*out, styledLine{text: indent + line, style: style})
+	}
 }
 
 var asksRE = regexp.MustCompile(`\?|(?i)\bquestion\b|\boptions?\b|\(a\)|^RUN:`)
@@ -205,9 +442,19 @@ type styledLine struct {
 	style string
 }
 
+type detailOpts struct {
+	omitWaiting   bool
+	decisionFirst bool
+	compactDesc   int
+}
+
 // detailLines renders the pane for row r in width w. d holds whatever of the
 // slow lookups has finished.
 func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
+	return detailLinesWithOpts(r, d, w, detailOpts{})
+}
+
+func detailLinesWithOpts(r boardRow, d *beadDetail, w int, opts detailOpts) []styledLine {
 	if d == nil {
 		d = &beadDetail{}
 	}
@@ -218,7 +465,7 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 	var out []styledLine
 	add := func(style, text string) { out = append(out, styledLine{text, style}) }
 	para := func(style, indent, text string) {
-		for _, l := range wrap(text, w-len(indent)) {
+		for _, l := range wrap(text, max(1, w-utf8.RuneCountInString(indent))) {
 			add(style, indent+l)
 		}
 	}
@@ -258,24 +505,6 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 		para(ansiDim, "", strings.Join(when, " · "))
 	}
 
-	section("Description")
-	switch {
-	case d.full != nil && strings.TrimSpace(b.Description) == "":
-		add(ansiDim, "  (none)")
-	case d.full != nil:
-		lines := wrap(strings.TrimSpace(b.Description), w-2)
-		for _, l := range lines[:min(len(lines), detailDescLines)] {
-			add("", "  "+l)
-		}
-		if more := len(lines) - detailDescLines; more > 0 {
-			para(ansiDim, "  ", fmt.Sprintf("… %d more lines (b shows all)", more))
-		}
-	case d.fullErr != "":
-		para(ansiRed, "  ", d.fullErr)
-	default:
-		add(ansiDim, "  loading…")
-	}
-
 	notes := noteLines(b.Notes)
 	shown := 1
 	state := r.state
@@ -283,29 +512,102 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 		derived := deriveThreadState(Thread{Bead: r.bead, Agent: r.agent})
 		state = &derived
 	}
-	// The slow full-bead lookup supplies prose, not a second classification.
 	if state.Kind == ThreadWaiting {
 		shown = waitingNotes(notes)
-		section("Waiting on you")
-		if len(notes) == 0 {
-			add(ansiDim, "  (no note says what for)")
+	}
+	earlier := notes[:max(0, len(notes)-shown)]
+	done := extractDoneHighlights(r, earlier)
+
+	descLimit := detailDescLines
+	if opts.compactDesc > 0 {
+		descLimit = opts.compactDesc
+	}
+	renderDesc := func() {
+		section("Description")
+		switch {
+		case d.full != nil && strings.TrimSpace(b.Description) == "":
+			add(ansiDim, "  (none)")
+		case d.full != nil:
+			lines := wrap(strings.TrimSpace(b.Description), max(1, w-2))
+			for _, l := range lines[:min(len(lines), descLimit)] {
+				add("", "  "+l)
+			}
+			if more := len(lines) - descLimit; more > 0 {
+				para(ansiDim, "  ", fmt.Sprintf("… %d more lines (b shows all)", more))
+			}
+		case d.fullErr != "":
+			para(ansiRed, "  ", d.fullErr)
+		default:
+			add(ansiDim, "  loading…")
 		}
-		for _, n := range notes[len(notes)-shown:] {
-			para("", "  ", n)
+	}
+
+	renderWaiting := func() {
+		if opts.omitWaiting {
+			return
 		}
-		if cmd := r.run; cmd != "" {
-			para(ansiRed, "  ", "run: "+cmd+" (p copies)")
+		if state.Kind == ThreadWaiting {
+			section("Waiting on you")
+			if q, ok := parseNeedsMeQuestion(b.Notes); ok && r.run == "" {
+				parts := splitQuestionParts(q)
+				if parts.critical != "" {
+					para(ansiRed+ansiBold, "  ", parts.critical)
+				}
+				if parts.question != "" {
+					para(ansiBold, "  ", parts.question)
+				}
+				if parts.recommendation != "" {
+					para(ansiGreen+ansiBold, "  ", "★ Recommendation: "+parts.recommendation)
+				}
+				rec := q.recommendation()
+				for _, o := range q.Options {
+					st, suf := "", ""
+					if rec != nil && *rec == o.Number {
+						st, suf = ansiGreen+ansiBold, " ★"
+					}
+					para(st, "  ", fmt.Sprintf("%d. %s%s", o.Number, o.Label, suf))
+				}
+				for _, det := range parts.details {
+					appendWrappedCapped(&out, ansiDim, ansiDim, "  Details: ", "    ", det, w, 3)
+				}
+				for _, ev := range parts.evidence {
+					appendWrappedCapped(&out, ansiDim, ansiDim, "  Evidence: ", "    ", ev, w, 2)
+				}
+				if q.Class != "" {
+					para(ansiDim, "  ", "Class "+q.Class)
+				}
+				para(ansiDim, "  ", fmt.Sprintf("1-%d pick · f ★rec · t text · A opens the structured question", len(q.Options)))
+				return
+			}
+			if len(notes) == 0 {
+				add(ansiDim, "  (no note says what for)")
+			} else {
+				tail := notes[len(notes)-shown:]
+				var clean []string
+				for _, n := range tail {
+					if !isNonAnswerHousekeepingNote(n) {
+						clean = append(clean, n)
+					}
+				}
+				if len(clean) == 0 {
+					clean = tail
+				}
+				for _, n := range clean {
+					appendWrappedCapped(&out, "", ansiDim, "  ", "    ", n, w, 4)
+				}
+			}
+			if cmd := r.run; cmd != "" {
+				para(ansiRed, "  ", "run: "+cmd+" (p copies)")
+			}
+			if r.agent != nil && r.agent.Status == "blocked" {
+				para(ansiDim, "  ", "A opens the approval prompt (enter focuses pane)")
+			} else if why := unanswerable(r.agent); why != "" {
+				para(ansiDim, "  ", why)
+			} else {
+				para(ansiDim, "  ", "A answers "+r.agent.Name)
+			}
+			return
 		}
-		if r.agent != nil && r.agent.Status == "blocked" {
-			para(ansiDim, "  ", "A opens the approval prompt (enter focuses pane)")
-		} else if _, ok := parseNeedsMeQuestion(b.Notes); ok && r.run == "" {
-			para(ansiDim, "  ", "A opens the structured question")
-		} else if why := unanswerable(r.agent); why != "" {
-			para(ansiDim, "  ", why)
-		} else {
-			para(ansiDim, "  ", "A answers "+r.agent.Name)
-		}
-	} else {
 		section("Latest note")
 		if len(notes) == 0 {
 			add(ansiDim, "  (none)")
@@ -317,28 +619,48 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 		}
 	}
 
-	if earlier := notes[:max(0, len(notes)-shown)]; len(earlier) > 0 {
+	renderDone := func() {
+		if len(done) == 0 {
+			return
+		}
+		add("", "")
+		para(ansiGreen+ansiBold, "", "Done")
+		for _, item := range done {
+			appendWrappedCapped(&out, ansiGreen, ansiDim, "  ✓ ", "    ", item, w, detailDoneNoteMaxLines)
+		}
+	}
+
+	renderHistory := func() {
+		if len(earlier) == 0 {
+			return
+		}
 		section(fmt.Sprintf("History (%d earlier notes, newest first)", len(earlier)))
 		for i := len(earlier) - 1; i >= 0 && i >= len(earlier)-detailHistoryLines; i-- {
-			para(ansiDim, "  ", earlier[i])
+			n := earlier[i]
+			appendWrappedCapped(&out, historyNoteStyle(n), ansiDim, "  ", "    ", n, w, detailHistoryNoteMaxLines)
 		}
 		if older := len(earlier) - detailHistoryLines; older > 0 {
 			para(ansiDim, "  ", fmt.Sprintf("… %d older (b shows all)", older))
 		}
 	}
 
-	section("PRs")
-	if len(r.prs) == 0 {
-		add(ansiDim, "  (none known)")
-	}
-	for _, pr := range r.prs {
-		para("", "  ", prSummary(pr))
-		if pr.Title != "" {
-			para(ansiDim, "    ", pr.Title)
+	renderPRs := func() {
+		section("PRs")
+		if len(r.prs) == 0 {
+			add(ansiDim, "  (none known)")
+		}
+		for _, pr := range r.prs {
+			para("", "  ", prSummary(pr))
+			if pr.Title != "" {
+				para(ansiDim, "    ", pr.Title)
+			}
 		}
 	}
 
-	if r.linear != "" {
+	renderLinear := func() {
+		if r.linear == "" {
+			return
+		}
 		section("Linear")
 		para("", "  ", r.linear)
 		for _, m := range r.moves {
@@ -346,7 +668,10 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 		}
 	}
 
-	if len(r.runs) > 0 {
+	renderRuns := func() {
+		if len(r.runs) == 0 {
+			return
+		}
 		section("Runs")
 		for _, run := range r.runs {
 			state := run.Status
@@ -360,7 +685,10 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 		}
 	}
 
-	if r.agent != nil {
+	renderAgent := func() {
+		if r.agent == nil {
+			return
+		}
 		a := r.agent
 		section(fmt.Sprintf("Agent %s · %s %s", a.Name, a.Kind, a.Status))
 		switch {
@@ -375,12 +703,38 @@ func detailLines(r boardRow, d *beadDetail, w int) []styledLine {
 		}
 	}
 
-	if len(d.inbox) > 0 {
+	renderInbox := func() {
+		if len(d.inbox) == 0 {
+			return
+		}
 		section(fmt.Sprintf("Inbox (%d)", len(d.inbox)))
 		for _, it := range d.inbox {
 			para("", "  ", fmt.Sprintf("%s [%s] %s", it.At.Local().Format("15:04"), it.Kind, it.Summary))
 		}
 	}
+
+	if opts.decisionFirst {
+		renderWaiting()
+		renderDone()
+		renderPRs()
+		renderLinear()
+		renderRuns()
+		renderDesc()
+		renderHistory()
+		renderAgent()
+		renderInbox()
+		return out
+	}
+
+	renderDesc()
+	renderWaiting()
+	renderDone()
+	renderHistory()
+	renderPRs()
+	renderLinear()
+	renderRuns()
+	renderAgent()
+	renderInbox()
 	return out
 }
 

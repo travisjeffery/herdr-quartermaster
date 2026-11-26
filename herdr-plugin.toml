@@ -69,8 +69,8 @@ command = ["bin/quartermaster", "focus", "--agent", "agy"]
 id = "board"
 title = "Quartermaster"
 placement = "popup"
-width = "85%"
-height = "80%"
+width = "100%"
+height = "100%"
 command = ["bin/quartermaster", "board"]
 
 [[panes]]

@@ -198,6 +198,9 @@ func (m *board) handleMouse(ev mouseEvent) []cmd {
 		return nil
 	case viewQueue:
 		if inRightPane {
+			if opt, ok := m.hits.optionRows[ev.row]; ok && opt >= 1 && opt <= 9 {
+				return m.key(strconv.Itoa(opt))
+			}
 			return nil
 		}
 		if idx, ok := m.hits.rowTargets[ev.row]; ok && idx >= 0 && idx < len(m.queue) {
@@ -209,6 +212,9 @@ func (m *board) handleMouse(ev mouseEvent) []cmd {
 		}
 	case viewList, viewDetail:
 		if inRightPane {
+			if opt, ok := m.hits.optionRows[ev.row]; ok && opt >= 1 && opt <= 9 {
+				return m.key(strconv.Itoa(opt))
+			}
 			return nil
 		}
 		if idx, ok := m.hits.rowTargets[ev.row]; ok && idx >= 0 && idx < len(m.rows) && m.rows[idx].header == "" {
@@ -445,9 +451,15 @@ func compactRowBadge(r boardRow) string {
 	return ""
 }
 
+type previewLine struct {
+	styledLine
+	optNum int
+}
+
 // wideSplitLines renders a side-by-side desktop split pane: left pane holds the
 // main list or Decision Queue, right pane shows the selected bead's live
-// decision card (if needs_me/RUN) and full detail view.
+// decision card (if needs_me/RUN, without duplicating Waiting in detailLines)
+// followed by Done milestones, PRs, compact Description, and scannable History.
 func (m *board) wideSplitLines(w, body, rowOffset int, forQueue bool) []string {
 	leftW := max(48, min(72, w*46/100))
 	rightW := w - leftW - 1
@@ -473,16 +485,28 @@ func (m *board) wideSplitLines(w, body, rowOffset int, forQueue bool) []string {
 		if selRow.bead.ID != m.scrolledOn {
 			m.scroll, m.scrolledOn = 0, selRow.bead.ID
 		}
-		var detail []styledLine
-		detail = append(detail, decisionPreviewLines(*selRow, rightW)...)
-		detail = append(detail, rpcBoardDetail(*selRow, m.now())...)
-		detail = append(detail, detailLines(*selRow, m.details[selRow.bead.ID], rightW)...)
+		dec := m.decisionPreviewLines(*selRow, rightW)
+		detail := make([]previewLine, 0, len(dec)+32)
+		detail = append(detail, dec...)
+		for _, l := range rpcBoardDetail(*selRow, m.now()) {
+			detail = append(detail, previewLine{styledLine: l})
+		}
+		for _, l := range detailLinesWithOpts(*selRow, m.details[selRow.bead.ID], rightW, detailOpts{
+			omitWaiting:   len(dec) > 0,
+			decisionFirst: true,
+			compactDesc:   5,
+		}) {
+			detail = append(detail, previewLine{styledLine: l})
+		}
 		m.scroll = min(m.scroll, max(0, len(detail)-1))
 		vis := detail[m.scroll:]
 		if len(vis) > body && body > 1 {
-			vis = append(vis[:body-1:body-1], styledLine{"… more below (J/K scrolls, A answers)", ansiDim})
+			vis = append(vis[:body-1:body-1], previewLine{styledLine: styledLine{"… more below (J/K scrolls, A opens full view)", ansiDim}})
 		}
 		for i := 0; i < len(vis) && i < body; i++ {
+			if vis[i].optNum > 0 {
+				m.hits.recordOption(rowOffset+i, vis[i].optNum)
+			}
 			right = append(right, vis[i].style+rpcViewFit(vis[i].text, rightW)+ansiReset)
 		}
 	}
@@ -503,15 +527,28 @@ func (m *board) wideSplitLines(w, body, rowOffset int, forQueue bool) []string {
 	return out
 }
 
-// decisionPreviewLines puts an actionable needs_me / RUN / approval banner at
-// the top of the wide desktop right-hand preview pane so you can read the full
-// options and hit f (follow recommendation) or A (answer) without switching views.
-func decisionPreviewLines(r boardRow, w int) []styledLine {
-	var out []styledLine
-	add := func(style, text string) { out = append(out, styledLine{text, style}) }
+// decisionPreviewLines puts an actionable Open Question / RUN / approval card
+// at the top of the wide desktop right-hand preview pane so you can read the
+// question, recommendation, and clickable 1-9 options immediately without
+// scrolling past Details or duplicating the Waiting section below.
+func (m *board) decisionPreviewLines(r boardRow, w int) []previewLine {
+	var out []previewLine
+	add := func(style, text string) { out = append(out, previewLine{styledLine: styledLine{text, style}}) }
 	para := func(style, indent, text string) {
 		for _, l := range wrap(text, max(1, w-utf8.RuneCountInString(indent))) {
 			add(style, indent+l)
+		}
+	}
+	paraOpt := func(optNum int, style, indent, text string) {
+		for _, l := range wrap(text, max(1, w-utf8.RuneCountInString(indent))) {
+			out = append(out, previewLine{styledLine: styledLine{indent + l, style}, optNum: optNum})
+		}
+	}
+	addCapped := func(firstStyle, contStyle, firstIndent, contIndent, text string, maxLines int) {
+		var tmp []styledLine
+		appendWrappedCapped(&tmp, firstStyle, contStyle, firstIndent, contIndent, text, w, maxLines)
+		for _, l := range tmp {
+			out = append(out, previewLine{styledLine: l})
 		}
 	}
 
@@ -523,42 +560,102 @@ func decisionPreviewLines(r boardRow, w int) []styledLine {
 	if r.bead.Status != StatusNeedsMe {
 		return nil
 	}
-	if cmd := pendingCommand(r.bead.Notes); cmd != "" {
-		add(ansiCyan+ansiBold, "Waiting: RUN command (press A to copy/complete, p to copy)")
-		para(ansiBold, "  $ ", cmd)
-		if why := pendingCommandReason(r.bead.Notes); why != "" {
-			para(ansiDim, "  ", why)
+	notes := r.bead.Notes
+	if d := m.details[r.bead.ID]; d != nil && d.full != nil {
+		notes = d.full.Notes
+	}
+	if cmd := pendingCommand(notes); cmd != "" {
+		add(ansiCyan+ansiBold, "Waiting: RUN command (c/p copy · A record RAN · z snooze)")
+		para(ansiYellow+ansiBold, "  $ ", cmd)
+		if why := pendingCommandReason(notes); why != "" {
+			addCapped(ansiDim, ansiDim, "  Why: ", "    ", why, 3)
 		}
 		add("", "")
 		return out
 	}
-	if q, ok := parseNeedsMeQuestion(r.bead.Notes); ok {
-		hdr := "Waiting: needs_me decision"
+	if q, ok := parseNeedsMeQuestion(notes); ok {
+		hdr := "Open Question"
+		var meta []string
 		if q.ClassN >= 0 {
-			hdr += fmt.Sprintf(" (C%d)", q.ClassN)
+			meta = append(meta, fmt.Sprintf("C%d", q.ClassN))
 		}
+		meta = append(meta, fmt.Sprintf("1-%d pick", len(q.Options)))
 		rec := q.recommendation()
 		if rec != nil {
-			hdr += fmt.Sprintf(" · f follows ★%d · A opens answer", *rec)
-		} else {
-			hdr += " · A opens answer"
+			meta = append(meta, fmt.Sprintf("f ★%d", *rec))
 		}
+		meta = append(meta, "t text", "A full")
+		hdr += " (" + strings.Join(meta, " · ") + ")"
 		add(ansiYellow+ansiBold, hdr)
-		for _, l := range q.Lines {
-			st := ""
-			if strings.HasPrefix(l, "CRITICAL:") {
-				st = ansiRed + ansiBold
-			}
-			para(st, "  ", l)
+
+		parts := splitQuestionParts(q)
+		if parts.critical != "" {
+			para(ansiRed+ansiBold, "  ", parts.critical)
+		}
+		if parts.question != "" {
+			para(ansiBold, "  ", parts.question)
+		}
+		if parts.recommendation != "" {
+			para(ansiGreen+ansiBold, "  ", "★ Recommendation: "+parts.recommendation)
+		}
+		add("", "")
+		pending := 0
+		if m.pendingOptBead == r.bead.ID && m.pendingOpt > 0 {
+			pending = m.pendingOpt
 		}
 		for _, o := range q.Options {
+			prefix := "  "
 			st := ""
 			suf := ""
 			if rec != nil && *rec == o.Number {
 				st = ansiGreen + ansiBold
 				suf = " ★"
 			}
-			para(st, "  ", fmt.Sprintf("%d. %s%s", o.Number, o.Label, suf))
+			if pending == o.Number {
+				prefix = "❯ "
+				st = ansiInvert + ansiBold
+			}
+			paraOpt(o.Number, st, "  ", fmt.Sprintf("%s%d. %s%s", prefix, o.Number, o.Label, suf))
+		}
+		if pending > 0 {
+			add("", "")
+			para(ansiYellow+ansiBold, "  ", fmt.Sprintf("▸ Option %d selected — y / ↵ send · e +note · 1-%d switch · esc cancel", pending, len(q.Options)))
+		}
+		if len(parts.details) > 0 {
+			add("", "")
+			for _, det := range parts.details {
+				addCapped(ansiDim, ansiDim, "  Details: ", "    ", det, 3)
+			}
+		}
+		if len(parts.evidence) > 0 {
+			for _, ev := range parts.evidence {
+				addCapped(ansiDim, ansiDim, "  Evidence: ", "    ", ev, 2)
+			}
+		}
+		add("", "")
+		return out
+	}
+	if q, ok := parseFreeTextNeedsMeQuestion(notes); ok {
+		hdr := "Open Question (free text · t answer · A full · z snooze)"
+		if q.ClassN >= 0 {
+			hdr = fmt.Sprintf("Open Question (C%d · free text · t answer · A full)", q.ClassN)
+		}
+		add(ansiYellow+ansiBold, hdr)
+		parts := splitQuestionParts(q)
+		if parts.critical != "" {
+			para(ansiRed+ansiBold, "  ", parts.critical)
+		}
+		if parts.question != "" {
+			para(ansiBold, "  ", parts.question)
+		}
+		if parts.recommendation != "" {
+			para(ansiGreen+ansiBold, "  ", "★ Recommendation: "+parts.recommendation)
+		}
+		for _, det := range parts.details {
+			addCapped(ansiDim, ansiDim, "  ", "    ", det, 3)
+		}
+		for _, ev := range parts.evidence {
+			addCapped(ansiDim, ansiDim, "  Evidence: ", "    ", ev, 2)
 		}
 		add("", "")
 		return out
