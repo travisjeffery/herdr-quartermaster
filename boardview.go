@@ -68,11 +68,15 @@ func renderBoard(m *board, w, hgt int) string {
 
 	preview := ""
 	if r := m.sel(); r != nil && m.view == viewList {
-		if latest, _ := notesSplit(r.bead.Notes); latest != "" {
+		if r.pending != nil {
+			preview = r.pending.bannerLine()
+		} else if latest, _ := notesSplit(r.bead.Notes); latest != "" {
 			preview = latest
 		}
 	} else if it := m.queueSel(); it != nil && m.view == viewQueue {
-		if it.rec != nil && it.recLabel != "" {
+		if it.row.pending != nil {
+			preview = it.row.pending.bannerLine()
+		} else if it.rec != nil && it.recLabel != "" {
 			preview = fmt.Sprintf("★ rec %d: %s  (f follow · ↵ open · z snooze)", *it.rec, it.recLabel)
 		} else if it.runCmd != "" {
 			preview = "RUN: " + it.runCmd + "  (↵ copy/complete · p copy · z snooze)"
@@ -217,6 +221,8 @@ func (m *board) titleLine() string {
 			}
 			if m.ans.loading {
 				parts = append(parts, "loading…")
+			} else if pa := m.pendingAnswerFor(m.ans.beadID); pa != nil {
+				parts = append(parts, pa.optionTag())
 			}
 		}
 		return strings.Join(parts, " · ")
@@ -326,21 +332,17 @@ func (m *board) listLinesWithHits(w, body, rowOffset int, detail ...[]styledLine
 	if len(detail) > 0 {
 		det = detail[0]
 	}
-	lines := listLines(m.rows, m.cur, m.marked, det, m.now(), w, body)
 	listH := body
 	if det != nil {
 		listH = min(len(m.rows), max(3, body/3))
 	}
-	start := 0
-	if m.cur >= listH {
-		start = m.cur - listH + 1
-	}
-	if start > 0 && start == m.cur && m.rows[start-1].header != "" {
-		start--
-	}
-	for i := start; i < len(m.rows) && i-start < listH; i++ {
+	m.listHeight = listH
+	m.listCompact = false
+	m.listScroll = clampListScroll(m.rows, m.cur, m.listScroll, listH)
+	lines := listLinesAt(m.rows, m.cur, m.listScroll, m.marked, det, m.now(), w, body)
+	for i := m.listScroll; i < len(m.rows) && i-m.listScroll < listH; i++ {
 		if m.rows[i].header == "" {
-			m.hits.recordRow(rowOffset+(i-start), i)
+			m.hits.recordRow(rowOffset+(i-m.listScroll), i)
 		}
 	}
 	return lines
@@ -349,6 +351,15 @@ func (m *board) listLinesWithHits(w, body, rowOffset int, detail ...[]styledLine
 // listLines is the list, scrolled to keep the selection in view, and below it
 // the detail pane when one is open: the list then gets a third of the body.
 func listLines(rows []boardRow, cur int, marked map[string]bool, detail []styledLine, now time.Time, w, body int) []string {
+	listH := body
+	if detail != nil {
+		listH = min(len(rows), max(3, body/3))
+	}
+	start := clampListScroll(rows, cur, 0, listH)
+	return listLinesAt(rows, cur, start, marked, detail, now, w, body)
+}
+
+func listLinesAt(rows []boardRow, cur, start int, marked map[string]bool, detail []styledLine, now time.Time, w, body int) []string {
 	var out []string
 	if len(rows) == 0 {
 		return []string{ansiDim + fit("  nothing open", w) + ansiReset}
@@ -357,14 +368,7 @@ func listLines(rows []boardRow, cur int, marked map[string]bool, detail []styled
 	if detail != nil {
 		listH = min(len(rows), max(3, body/3))
 	}
-	start := 0
-	if cur >= listH {
-		start = cur - listH + 1
-	}
-	// Keep a section's header in view when its first row is selected.
-	if start > 0 && start == cur && rows[start-1].header != "" {
-		start--
-	}
+	start = clampListScroll(rows, cur, start, listH)
 	idW := 6
 	for _, r := range rows {
 		idW = max(idW, len([]rune(r.bead.ID)))
@@ -385,7 +389,9 @@ func listLines(rows []boardRow, cur int, marked map[string]bool, detail []styled
 		}
 		glyph, gColor := agentGlyph(r.agent)
 		if r.native != nil {
-			r.line = rpcViewOneLine(rpcBoardBrief(*r.native, now))
+			if r.pending == nil {
+				r.line = rpcViewOneLine(rpcBoardBrief(*r.native, now))
+			}
 			r.bead.Title = rpcViewOneLine(r.bead.Title)
 			if r.linear != "" && !strings.Contains(r.bead.Title, r.linear) {
 				r.bead.Title = r.linear + " " + r.bead.Title

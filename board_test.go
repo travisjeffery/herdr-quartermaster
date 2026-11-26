@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -322,5 +324,240 @@ func TestWrap(t *testing.T) {
 	want := []string{"the quick", "brown fox", "", "https://ex", "ample.com/", "long"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("wrap = %q, want %q", got, want)
+	}
+}
+
+func TestRebuildKeepsCursorInSectionWhenBeadMovesOrLeaves(t *testing.T) {
+	question := func(label string) string {
+		return "QUESTION: " + label + "? Recommendation: 1 — proceed.\nOPTIONS:\n1. Proceed\n2. Hold\nCLASS: 3 — routine"
+	}
+	makeFleet := func() *fakeBoard {
+		return &fakeBoard{
+			beads: []Bead{
+				{ID: "bk-n1", Title: "Need 1", Status: StatusNeedsMe, Priority: 1, Notes: question("First"), UpdatedAt: t0},
+				{ID: "bk-n2", Title: "Need 2", Status: StatusNeedsMe, Priority: 2, Notes: question("Second"), UpdatedAt: t0},
+				{ID: "bk-n3", Title: "Need 3", Status: StatusNeedsMe, Priority: 3, Notes: question("Third"), UpdatedAt: t0},
+				boardBead("bk-w1", StatusInProgress, 1),
+				boardBead("bk-w2", StatusInProgress, 2),
+				boardBead("bk-b1", StatusOpen, 1),
+				boardBead("bk-b2", StatusOpen, 2),
+			},
+			agents: []Agent{
+				{Name: "bk-n1", Kind: "pi", Status: "idle", PaneID: "w:p1"},
+				{Name: "bk-n2", Kind: "pi", Status: "idle", PaneID: "w:p2"},
+				{Name: "bk-n3", Kind: "pi", Status: "idle", PaneID: "w:p3"},
+				{Name: "bk-w1", Kind: "pi", Status: "working", PaneID: "w:p4"},
+				{Name: "bk-w2", Kind: "pi", Status: "working", PaneID: "w:p5"},
+			},
+		}
+	}
+
+	// 1. Answering the middle needs_me item moves it to idle; cursor stays in
+	// needs you on the next item (bk-n3), never following bk-n2 down to idle.
+	f := makeFleet()
+	m := testModel(t, f)
+	selectBead(t, m, "bk-n2")
+	press(t, m, "1", "y")
+	if r := m.sel(); r == nil || r.bead.ID != "bk-n3" || r.group != GroupNeedsYou {
+		t.Fatalf("after answering middle needs_me item, selected %+v, want bk-n3 in needs you", r)
+	}
+
+	// 2. Answering the last remaining item in needs you (bk-n3) moves cursor to
+	// the previous item in needs you (bk-n1), never following bk-n3 or resetting.
+	press(t, m, "1", "y")
+	if r := m.sel(); r == nil || r.bead.ID != "bk-n1" || r.group != GroupNeedsYou {
+		t.Fatalf("after answering last needs_me item, selected %+v, want bk-n1 in needs you", r)
+	}
+
+	// 3. Closing the last item at the bottom of the board (bk-b2 in backlog)
+	// keeps cursor in backlog on bk-b1 instead of jumping back to index 0.
+	f = makeFleet()
+	env := f.env()
+	env.close = func(id, reason string) error {
+		f.beads = slices.DeleteFunc(f.beads, func(b Bead) bool { return b.ID == id })
+		return nil
+	}
+	m = newBoard(Config{}, env, boardData{Beads: slices.Clone(f.beads), Agents: slices.Clone(f.agents), BeadsAt: t0}, func() time.Time { return t0 })
+	m.agentsAt, m.localAt, m.beadsTried = t0, t0, t0
+	selectBead(t, m, "bk-b2")
+	press(t, m, "C")
+	typeText(t, m, "done\r")
+	press(t, m, "y")
+	if r := m.sel(); r == nil || r.bead.ID != "bk-b1" || r.group != sectionBacklog {
+		t.Fatalf("after closing last backlog item, selected %+v, want bk-b1 in backlog", r)
+	}
+
+	// 4. Closing the sole remaining item in backlog empties that section; cursor
+	// stays on the nearest selectable row (bk-w2) instead of jumping to index 0.
+	press(t, m, "C")
+	typeText(t, m, "done\r")
+	press(t, m, "y")
+	if r := m.sel(); r == nil || r.bead.ID != "bk-w2" {
+		t.Fatalf("after emptying bottom section, selected %+v, want nearest row bk-w2 (not top)", r)
+	}
+
+	// 5. Filtered view: when the selected item disappears from the filtered list,
+	// cursor stays at the next item in that section instead of resetting to 0.
+	f = makeFleet()
+	m = testModel(t, f)
+	press(t, m, "/")
+	typeText(t, m, "needs_me\r")
+	selectBead(t, m, "bk-n2")
+	press(t, m, "1", "y")
+	if r := m.sel(); r == nil || r.bead.ID != "bk-n3" {
+		t.Fatalf("filtered needs_me after answering bk-n2: selected %+v, want bk-n3", r)
+	}
+	press(t, m, "1", "y")
+	if r := m.sel(); r == nil || r.bead.ID != "bk-n1" {
+		t.Fatalf("filtered needs_me after answering last bk-n3: selected %+v, want bk-n1", r)
+	}
+
+	// 6. Normal background refresh where the selected bead stays in its section
+	// keeps tracking that exact bead ID even when another item appears above it.
+	f = makeFleet()
+	m = testModel(t, f)
+	selectBead(t, m, "bk-n2")
+	f.beads = append([]Bead{{ID: "bk-n0", Title: "Urgent", Status: StatusNeedsMe, Priority: 0, Notes: question("Zero"), UpdatedAt: t0}}, f.beads...)
+	drive(t, m, []cmd{m.loadBeads()})
+	if r := m.sel(); r == nil || r.bead.ID != "bk-n2" {
+		t.Fatalf("background refresh lost tracked bead bk-n2: got %+v", r)
+	}
+}
+
+func TestRebuildDoesNotYankCursorIfUserMovedBeforeAsyncReload(t *testing.T) {
+	qNote := "QUESTION: Ship it? Recommendation: 1 — ready.\nOPTIONS:\n1. Ship\n2. Wait\nCLASS: 3 — routine"
+	f := &fakeBoard{
+		beads: []Bead{
+			{ID: "bk-n1", Title: "Need 1", Status: StatusNeedsMe, Priority: 1, Notes: qNote, UpdatedAt: t0},
+			{ID: "bk-n2", Title: "Need 2", Status: StatusNeedsMe, Priority: 2, Notes: qNote, UpdatedAt: t0},
+			{ID: "bk-n3", Title: "Need 3", Status: StatusNeedsMe, Priority: 3, Notes: qNote, UpdatedAt: t0},
+			boardBead("bk-w1", StatusInProgress, 1),
+		},
+		agents: []Agent{
+			{Name: "bk-n1", Kind: "pi", Status: "idle", PaneID: "w:p1"},
+			{Name: "bk-w1", Kind: "pi", Status: "working", PaneID: "w:p2"},
+		},
+	}
+	m := testModel(t, f)
+	selectBead(t, m, "bk-n1")
+
+	// Start answering bk-n1 without running its async command yet.
+	press(t, m, "1")
+	inFlight := m.key("y")
+	if len(inFlight) == 0 {
+		t.Fatal("expected async answer command")
+	}
+
+	// User navigates away to bk-n3 while bk-n1's answer is still in flight.
+	press(t, m, "j", "j")
+	if r := m.sel(); r == nil || r.bead.ID != "bk-n3" {
+		t.Fatalf("expected cursor on bk-n3 before async completion, got %+v", r)
+	}
+
+	// Async doneMsg + beadsMsg reload now complete (moving bk-n1 out of needs you).
+	drive(t, m, inFlight)
+	if r := m.sel(); r == nil || r.bead.ID != "bk-n3" {
+		t.Fatalf("async answer completion yanked cursor from bk-n3 to %+v", r)
+	}
+
+	// Also test moving across sections (onto bk-w1) while bk-n2's answer is in flight.
+	selectBead(t, m, "bk-n2")
+	press(t, m, "1")
+	inFlight = m.key("y")
+	selectBead(t, m, "bk-w1")
+	drive(t, m, inFlight)
+	if r := m.sel(); r == nil || r.bead.ID != "bk-w1" {
+		t.Fatalf("async answer completion yanked cursor from bk-w1 to %+v", r)
+	}
+}
+
+func TestRebuildPreservesScrollOffsetSmoothly(t *testing.T) {
+	qNote := "QUESTION: Approve? Recommendation: 1 — yes.\nOPTIONS:\n1. Yes\n2. No\nCLASS: 3 — routine"
+	var beads []Bead
+	beads = append(beads,
+		Bead{ID: "bk-a1", Title: "Need 1", Status: StatusNeedsMe, Priority: 1, Notes: qNote, UpdatedAt: t0},
+		Bead{ID: "bk-a2", Title: "Need 2", Status: StatusNeedsMe, Priority: 2, Notes: qNote, UpdatedAt: t0},
+	)
+	for i := range 20 {
+		beads = append(beads, boardBead(fmt.Sprintf("bk-z%02d", i), StatusOpen, 2))
+	}
+	f := &fakeBoard{beads: beads}
+	m := testModel(t, f)
+
+	// Render a compact viewport (height 12 -> body 8) and scroll deep into backlog.
+	selectBead(t, m, "bk-z10")
+	_ = renderBoard(m, 90, 12)
+	if m.listScroll == 0 {
+		t.Fatalf("expected non-zero listScroll when viewing bk-z10, got %d", m.listScroll)
+	}
+	// Step up two rows so bk-z08 sits cleanly inside the middle of the viewport.
+	press(t, m, "k", "k")
+	_ = renderBoard(m, 90, 12)
+	beforeScroll := m.listScroll
+	beforeRel := m.cur - m.listScroll
+
+	// Background refresh removes bk-a1 above the viewport (moves it out of needs you).
+	f.beads[0].Status = StatusClosed
+	drive(t, m, []cmd{m.loadBeads()})
+	if r := m.sel(); r == nil || r.bead.ID != "bk-z08" {
+		t.Fatalf("selected bead changed across refresh: %+v", r)
+	}
+	if gotRel := m.cur - m.listScroll; gotRel != beforeRel {
+		t.Fatalf("viewport jumped: relative cursor row changed from %d to %d (scroll %d -> %d)", beforeRel, gotRel, beforeScroll, m.listScroll)
+	}
+
+	// Closing the selected item in the scrolled backlog keeps both cursor and
+	// scroll offset anchored cleanly at the user's place.
+	scrollBeforeClose := m.listScroll
+	f.beads = slices.DeleteFunc(f.beads, func(b Bead) bool { return b.ID == "bk-z08" })
+	drive(t, m, []cmd{m.loadBeads()})
+	if r := m.sel(); r == nil || r.bead.ID != "bk-z09" {
+		t.Fatalf("after bk-z08 left backlog, selected %+v, want bk-z09", r)
+	}
+	if m.listScroll != scrollBeforeClose {
+		t.Fatalf("scroll offset jumped on in-viewport removal: got %d, want %d", m.listScroll, scrollBeforeClose)
+	}
+}
+
+func TestQueuePreservesCursorPositionOnAnswerAndSnooze(t *testing.T) {
+	qNote := "QUESTION: Decide? Recommendation: 1 — ok.\nOPTIONS:\n1. Ok\n2. Skip\nCLASS: 3 — routine"
+	f := &fakeBoard{
+		beads: []Bead{
+			{ID: "bk-q1", Title: "Q1", Status: StatusNeedsMe, Priority: 1, Notes: qNote, UpdatedAt: t0.Add(-40 * time.Minute)},
+			{ID: "bk-q2", Title: "Q2", Status: StatusNeedsMe, Priority: 1, Notes: qNote, UpdatedAt: t0.Add(-30 * time.Minute)},
+			{ID: "bk-q3", Title: "Q3", Status: StatusNeedsMe, Priority: 1, Notes: qNote, UpdatedAt: t0.Add(-20 * time.Minute)},
+			{ID: "bk-q4", Title: "Q4", Status: StatusNeedsMe, Priority: 1, Notes: qNote, UpdatedAt: t0.Add(-10 * time.Minute)},
+		},
+	}
+	sn := &SnoozeState{Version: 1, Beads: map[string]SnoozeEntry{}}
+	env := wireExtendedFakeEnv(f, f.env(), sn)
+	m := newBoard(Config{Repo: "/r"}, env, boardData{Beads: slices.Clone(f.beads), BeadsAt: t0}, func() time.Time { return t0 })
+	m.agentsAt, m.localAt, m.beadsTried = t0, t0, t0
+
+	press(t, m, "Q", "j", "j") // select bk-q3 (index 2)
+	if it := m.queueSel(); it == nil || it.row.bead.ID != "bk-q3" {
+		t.Fatalf("expected bk-q3 selected, got %+v", it)
+	}
+
+	// Answering bk-q3 keeps cursor at index 2 (bk-q4), not jumping back to index 0 (bk-q1).
+	press(t, m, "1", "y")
+	if it := m.queueSel(); it == nil || it.row.bead.ID != "bk-q4" {
+		t.Fatalf("after answering bk-q3 in queue, selected %+v, want bk-q4", it)
+	}
+
+	// Snoozing the last item (bk-q4) keeps cursor on the previous item (bk-q2), not index 0.
+	press(t, m, "z", "1")
+	if it := m.queueSel(); it == nil || it.row.bead.ID != "bk-q2" {
+		t.Fatalf("after snoozing last queue item bk-q4, selected %+v, want bk-q2", it)
+	}
+
+	// Moving away while an answer is in flight does not yank queueCur when doneMsg arrives.
+	press(t, m, "g") // bk-q1
+	press(t, m, "1")
+	inFlight := m.key("y")
+	press(t, m, "j") // move to bk-q2 while bk-q1 is in flight
+	drive(t, m, inFlight)
+	if it := m.queueSel(); it == nil || it.row.bead.ID != "bk-q2" {
+		t.Fatalf("async queue completion yanked cursor from bk-q2 to %+v", it)
 	}
 }

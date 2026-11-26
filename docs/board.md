@@ -42,6 +42,21 @@ them back into view).
   option highlights inline (`❯`) with an inline confirmation banner — press `y`
   or `↵` to send, `e` to attach a note, another digit `1`–`9` to switch options,
   or `n`/`esc` to cancel. Press `t` to enter a custom free-text answer.
+- **Immediate optimistic answer feedback:** submitting an option (`1`–`9`),
+  custom free-text answer (`t`), approval prompt choice, `RUN:` completion, or
+  direct worker reply immediately marks the row, detail/preview pane, and Answer
+  view as in-flight (`✓ sending:` / `✓ Submitting:`), blocks accidental
+  duplicate submissions while the write and reload are pending, transitions to
+  `✓ answered:` once recorded, and rolls back cleanly with an error status if
+  the write fails.
+- **Section-stable cursor and scroll position:** when answering, snoozing,
+  closing, or changing status moves the selected item out of its section or
+  filtered view, the cursor stays at your place in that section (next row,
+  previous row if last, or nearest selectable row if the section emptied) and
+  preserves the list scroll offset instead of following the moved item to the
+  bottom or jumping back to index 0. Moving to another row while a previous
+  answer is still in flight keeps focus on your new row when the async reload
+  completes.
 - **Accept recommendation in one confirm (`f` in queue/list, or `f` / `↵` inside Answer view):**
   confirms the worker's stated `★` recommendation (`y/n · ↵ send · e +note`).
 - **Scannable Open Question, Done, and History panes:** wide split and detail

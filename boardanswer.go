@@ -12,7 +12,102 @@ const (
 	answerKindPrompt answerKind = iota
 	answerKindNeedsMe
 	answerKindRun
+	answerKindDirect
 )
+
+type pendingAnswerPhase int
+
+const (
+	pendingAnswerSending pendingAnswerPhase = iota
+	pendingAnswerSent
+)
+
+// pendingAnswer tracks an optimistic in-flight or just-recorded answer so the
+// board row, detail pane, and answer view immediately confirm registration and
+// prevent accidental duplicate submissions until the reload catches up.
+type pendingAnswer struct {
+	beadID        string
+	kind          answerKind
+	option        int // 1-9 for numbered choices; 0 for free text / RUN / direct reply
+	label         string
+	phase         pendingAnswerPhase
+	clearAfterSeq int
+}
+
+func (p pendingAnswer) rowLine() string {
+	if p.phase == pendingAnswerSent {
+		return "✓ answered: " + p.label
+	}
+	return "✓ sending: " + p.label
+}
+
+func (p pendingAnswer) rowColor() string {
+	return ansiGreen + ansiBold
+}
+
+func (p pendingAnswer) compactBadge() string {
+	if p.phase == pendingAnswerSent {
+		return " [✓ SENT]"
+	}
+	return " [SENDING]"
+}
+
+func (p pendingAnswer) queueBadge() string {
+	if p.phase == pendingAnswerSent {
+		return "SENT"
+	}
+	return "SENDING"
+}
+
+func (p pendingAnswer) bannerLine() string {
+	if p.phase == pendingAnswerSent {
+		return "✓ Answered: " + p.label + " (updating board…)"
+	}
+	return "✓ Submitting: " + p.label + " (saving…)"
+}
+
+func (p pendingAnswer) optionTag() string {
+	if p.phase == pendingAnswerSent {
+		return "answered"
+	}
+	return "sending…"
+}
+
+func (p pendingAnswer) inFlightStatus(id string) string {
+	if p.phase == pendingAnswerSent {
+		return fmt.Sprintf("%s: already answered (%s); refreshing…", id, p.label)
+	}
+	return fmt.Sprintf("%s: answer already in flight (%s)", id, p.label)
+}
+
+func (m *board) pendingAnswerFor(id string) *pendingAnswer {
+	if id == "" || m.pendingAnswers == nil {
+		return nil
+	}
+	return m.pendingAnswers[id]
+}
+
+func (m *board) guardAnswerInFlight(id string) bool {
+	if pa := m.pendingAnswerFor(id); pa != nil {
+		m.status = pa.inFlightStatus(id)
+		return true
+	}
+	return false
+}
+
+func (m *board) startPendingAnswer(id string, pa pendingAnswer) {
+	if id == "" {
+		return
+	}
+	if m.pendingAnswers == nil {
+		m.pendingAnswers = map[string]*pendingAnswer{}
+	}
+	pa.beadID = id
+	pa.phase = pendingAnswerSending
+	cp := pa
+	m.pendingAnswers[id] = &cp
+	m.rebuild()
+}
 
 // answerState holds the live approval prompt, structured needs_me question, or
 // pending RUN: command shown in viewAnswer so the user can inspect the full
@@ -266,16 +361,26 @@ func (m *board) answerKey(k string) []cmd {
 			m.status = m.copied(a.runCmd, "copied RUN command")
 			return nil
 		case "d", "\r":
+			if m.guardAnswerInFlight(a.beadID) {
+				return nil
+			}
 			id, runCmd, fromQueue := a.beadID, a.runCmd, a.fromQueue
 			m.ask = &ask{prompt: "RAN result for " + id + " (enter for ok): ", text: true, allowEmpty: true, then: func(res string) []cmd {
 				if strings.TrimSpace(res) == "" {
 					res = "ok"
 				}
 				m.ask = confirm(fmt.Sprintf("record RAN on %s (%s) and resume worker?", id, shortTitle(res, 36)), func() []cmd {
+					if m.guardAnswerInFlight(id) {
+						return nil
+					}
+					m.startPendingAnswer(id, pendingAnswer{
+						kind:  answerKindRun,
+						label: "RAN: " + shortTitle(res, 34),
+					})
 					m.status = "recording RAN on " + id + "…"
 					return []cmd{func() msg {
 						if m.env.completeRun == nil {
-							return doneMsg{err: fmt.Errorf("RUN completion is unavailable")}
+							return doneMsg{err: fmt.Errorf("RUN completion is unavailable"), answeredID: id}
 						}
 						text, err := m.env.completeRun(id, runCmd, res)
 						return doneMsg{
@@ -298,6 +403,9 @@ func (m *board) answerKey(k string) []cmd {
 
 	// One-key accept stated recommendation: f or Enter inside viewAnswer.
 	if (k == "f" || k == "\r") && a.kind == answerKindNeedsMe && a.question != nil {
+		if m.guardAnswerInFlight(a.beadID) {
+			return nil
+		}
 		rec := a.question.recommendation()
 		if rec == nil || *rec < 1 || *rec > len(a.question.Options) {
 			m.status = "no stated recommendation; pick 1-" + strconv.Itoa(len(a.question.Options)) + " or t"
@@ -309,6 +417,9 @@ func (m *board) answerKey(k string) []cmd {
 
 	// Numbered option pick: 1-9.
 	if len(k) == 1 && k[0] >= '1' && k[0] <= '9' {
+		if m.guardAnswerInFlight(a.beadID) {
+			return nil
+		}
 		n := int(k[0] - '0')
 		switch a.kind {
 		case answerKindPrompt:
@@ -329,6 +440,9 @@ func (m *board) answerKey(k string) []cmd {
 
 	// Custom free-text answer (needs_me questions only; never approval prompts).
 	if k == "t" && a.kind == answerKindNeedsMe && a.question != nil {
+		if m.guardAnswerInFlight(a.beadID) {
+			return nil
+		}
 		m.askCustomNeedsMe(a.beadID, *a.question, a.fromQueue)
 		return nil
 	}
@@ -354,6 +468,9 @@ func (m *board) activeStructuredQuestion(r boardRow) (NeedsMeQuestion, bool) {
 }
 
 func (m *board) pickNeedsMeOption(id string, q NeedsMeQuestion, n int, fromQueue bool) []cmd {
+	if m.guardAnswerInFlight(id) {
+		return nil
+	}
 	if n < 1 || n > len(q.Options) {
 		m.status = fmt.Sprintf("no option %d (1-%d)", n, len(q.Options))
 		return nil
@@ -366,6 +483,9 @@ func (m *board) pickNeedsMeOption(id string, q NeedsMeQuestion, n int, fromQueue
 }
 
 func (m *board) askFreeTextNeedsMe(r boardRow, fromQueue bool) {
+	if m.guardAnswerInFlight(r.bead.ID) {
+		return
+	}
 	notes := r.bead.Notes
 	if d := m.details[r.bead.ID]; d != nil && d.full != nil {
 		notes = d.full.Notes
@@ -379,12 +499,22 @@ func (m *board) askFreeTextNeedsMe(r boardRow, fromQueue bool) {
 }
 
 func (m *board) askCustomNeedsMe(id string, q NeedsMeQuestion, fromQueue bool) {
+	if m.guardAnswerInFlight(id) {
+		return
+	}
 	m.ask = &ask{prompt: "custom answer for " + id + ": ", text: true, then: func(text string) []cmd {
 		m.ask = confirm(fmt.Sprintf("answer %s with custom text: %q?", id, shortTitle(text, 45)), func() []cmd {
+			if m.guardAnswerInFlight(id) {
+				return nil
+			}
+			m.startPendingAnswer(id, pendingAnswer{
+				kind:  answerKindNeedsMe,
+				label: "custom: " + shortTitle(text, 34),
+			})
 			m.status = fmt.Sprintf("recording custom answer on %s…", id)
 			return []cmd{func() msg {
 				if m.env.answerNeedsMe == nil {
-					return doneMsg{err: fmt.Errorf("needs_me answering is unavailable")}
+					return doneMsg{err: fmt.Errorf("needs_me answering is unavailable"), answeredID: id}
 				}
 				res, err := m.env.answerNeedsMe(id, tapChoiceFreeText, text, q.Hash)
 				return doneMsg{
@@ -403,6 +533,9 @@ func (m *board) askCustomNeedsMe(id string, q NeedsMeQuestion, fromQueue bool) {
 }
 
 func (m *board) confirmPromptOption(id string, p ApprovalPrompt, o PromptOption, fromQueue bool) {
+	if m.guardAnswerInFlight(id) {
+		return
+	}
 	m.pendingOpt = o.Number
 	m.pendingOptBead = id
 	warn := ""
@@ -428,10 +561,18 @@ func (m *board) confirmPromptOption(id string, p ApprovalPrompt, o PromptOption,
 			}
 			return nil
 		}
+		if m.guardAnswerInFlight(id) {
+			return nil
+		}
+		m.startPendingAnswer(id, pendingAnswer{
+			kind:   answerKindPrompt,
+			option: o.Number,
+			label:  fmt.Sprintf("%d. %s", o.Number, shortTitle(o.Label, 34)),
+		})
 		m.status = fmt.Sprintf("answering %s [%s]…", id, p.Hash)
 		return []cmd{func() msg {
 			if m.env.answerPrompt == nil {
-				return doneMsg{err: fmt.Errorf("prompt answering is unavailable")}
+				return doneMsg{err: fmt.Errorf("prompt answering is unavailable"), answeredID: id}
 			}
 			text, err := m.env.answerPrompt(id, strconv.Itoa(o.Number), p.Hash)
 			return doneMsg{
@@ -451,6 +592,9 @@ func (m *board) confirmPromptOption(id string, p ApprovalPrompt, o PromptOption,
 // optional e (+note) shortcut, and 1-9 option switching so extra context can
 // ride along and pressing another digit updates the choice instead of cancelling.
 func (m *board) confirmNeedsMeOption(id string, q NeedsMeQuestion, o PromptOption, isRec, fromQueue bool) {
+	if m.guardAnswerInFlight(id) {
+		return
+	}
 	m.pendingOpt = o.Number
 	m.pendingOptBead = id
 	tag := ""
@@ -458,10 +602,22 @@ func (m *board) confirmNeedsMeOption(id string, q NeedsMeQuestion, o PromptOptio
 		tag = "★ "
 	}
 	send := func(extra string) []cmd {
+		if m.guardAnswerInFlight(id) {
+			return nil
+		}
+		lbl := fmt.Sprintf("%d. %s", o.Number, shortTitle(o.Label, 34))
+		if extra != "" {
+			lbl = fmt.Sprintf("%d. %s (+note)", o.Number, shortTitle(o.Label, 26))
+		}
+		m.startPendingAnswer(id, pendingAnswer{
+			kind:   answerKindNeedsMe,
+			option: o.Number,
+			label:  lbl,
+		})
 		m.status = fmt.Sprintf("recording answer on %s…", id)
 		return []cmd{func() msg {
 			if m.env.answerNeedsMe == nil {
-				return doneMsg{err: fmt.Errorf("needs_me answering is unavailable")}
+				return doneMsg{err: fmt.Errorf("needs_me answering is unavailable"), answeredID: id}
 			}
 			text, err := m.env.answerNeedsMe(id, strconv.Itoa(o.Number), extra, q.Hash)
 			return doneMsg{
@@ -529,12 +685,18 @@ func (m *board) answerLines(w, body, rowOffset int) []string {
 		}
 	}
 
+	pa := m.pendingAnswerFor(a.beadID)
+
 	switch a.kind {
 	case answerKindRun:
 		meta := fmt.Sprintf("%s · RUN command · manual step", a.beadID)
 		para(ansiCyan+ansiBold, "", meta)
 		if a.beadTitle != "" {
 			para(ansiBold, "", a.beadTitle)
+		}
+		if pa != nil {
+			add("", "")
+			para(ansiGreen+ansiBold, "  ", pa.bannerLine())
 		}
 		add("", "")
 		add(ansiBold, "Command to run (press c to copy via clipboard/OSC 52)")
@@ -561,6 +723,10 @@ func (m *board) answerLines(w, body, rowOffset int) []string {
 		if a.beadTitle != "" {
 			para(ansiBold, "", a.beadTitle)
 		}
+		if pa != nil {
+			add("", "")
+			para(ansiGreen+ansiBold, "  ", pa.bannerLine())
+		}
 		if p.Countdown != "" {
 			para(ansiRed+ansiBold, "", "auto-deny in "+p.Countdown+" (class 9)")
 		}
@@ -575,7 +741,7 @@ func (m *board) answerLines(w, body, rowOffset int) []string {
 		add("", "")
 		add(ansiBold, "Options (press or tap 1-"+strconv.Itoa(len(p.Options))+")")
 		pending := 0
-		if m.pendingOptBead == a.beadID && m.pendingOpt > 0 {
+		if pa == nil && m.pendingOptBead == a.beadID && m.pendingOpt > 0 {
 			pending = m.pendingOpt
 		}
 		for _, o := range p.Options {
@@ -590,11 +756,19 @@ func (m *board) answerLines(w, body, rowOffset int) []string {
 				tag = " [class 9]"
 				style = ansiYellow + ansiBold
 			}
-			if pending == o.Number {
+			if pa != nil && pa.option == o.Number {
+				cur = "✓ "
+				style = ansiGreen + ansiBold
+				tag += "  (" + pa.optionTag() + ")"
+			} else if pending == o.Number {
 				cur = "❯ "
 				style = ansiInvert + ansiBold
 			}
-			paraOpt(o.Number, style, "  ", fmt.Sprintf("%s%d. %s%s", cur, o.Number, o.Label, tag))
+			optTarget := o.Number
+			if pa != nil {
+				optTarget = 0
+			}
+			paraOpt(optTarget, style, "  ", fmt.Sprintf("%s%d. %s%s", cur, o.Number, o.Label, tag))
 		}
 		if pending > 0 {
 			add("", "")
@@ -615,6 +789,10 @@ func (m *board) answerLines(w, body, rowOffset int) []string {
 		if a.beadTitle != "" {
 			para(ansiBold, "", a.beadTitle)
 		}
+		if pa != nil {
+			add("", "")
+			para(ansiGreen+ansiBold, "  ", pa.bannerLine())
+		}
 		parts := splitQuestionParts(*q)
 		add("", "")
 		if parts.critical != "" {
@@ -634,7 +812,7 @@ func (m *board) answerLines(w, body, rowOffset int) []string {
 		add("", "")
 		rec := q.recommendation()
 		pending := 0
-		if m.pendingOptBead == a.beadID && m.pendingOpt > 0 {
+		if pa == nil && m.pendingOptBead == a.beadID && m.pendingOpt > 0 {
 			pending = m.pendingOpt
 		}
 		if len(q.Options) > 0 {
@@ -652,11 +830,19 @@ func (m *board) answerLines(w, body, rowOffset int) []string {
 					style = ansiGreen + ansiBold
 					suffix = "  ★ recommended"
 				}
-				if pending == o.Number {
+				if pa != nil && pa.option == o.Number {
+					prefix = "✓ "
+					style = ansiGreen + ansiBold
+					suffix += "  (" + pa.optionTag() + ")"
+				} else if pending == o.Number {
 					prefix = "❯ "
 					style = ansiInvert + ansiBold
 				}
-				paraOpt(o.Number, style, "  ", fmt.Sprintf("%s%d. %s%s", prefix, o.Number, o.Label, suffix))
+				optTarget := o.Number
+				if pa != nil {
+					optTarget = 0
+				}
+				paraOpt(optTarget, style, "  ", fmt.Sprintf("%s%d. %s%s", prefix, o.Number, o.Label, suffix))
 			}
 			if pending > 0 {
 				add("", "")
