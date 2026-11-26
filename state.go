@@ -328,6 +328,7 @@ func isHousekeepingNote(line string) bool {
 		"AUTO:", "auto:", "VERIFY:", "PR:", "Linear:", "MILESTONE:",
 		"WATCH TRIGGERED", "WATCH EXPIRED",
 		"SNOOZE:", "SNOOZED:",
+		"autonomy level ",
 		"quartermaster relaunched the worker ",
 		"quartermaster could not relaunch the worker ",
 		"pi-rpc fork prepared,",

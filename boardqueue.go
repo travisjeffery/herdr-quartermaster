@@ -373,15 +373,46 @@ func (m *board) queueKey(k string) []cmd {
 		return nil
 	}
 	r := it.row
+	if len(k) == 1 && k[0] >= '1' && k[0] <= '9' {
+		n := int(k[0] - '0')
+		switch it.kind {
+		case queueKindPrompt:
+			cmds := m.openAnswerFrom(r, true, m.queueCur, len(m.queue))
+			m.status = "loading approval prompt…"
+			return cmds
+		case queueKindRun:
+			m.status = "RUN command: press c/p to copy or ↵/A to record RAN"
+			return nil
+		default:
+			if q, ok := m.activeStructuredQuestion(r); ok {
+				return m.pickNeedsMeOption(r.bead.ID, q, n, true)
+			}
+			if it.question != nil && len(it.question.Options) > 0 {
+				return m.pickNeedsMeOption(r.bead.ID, *it.question, n, true)
+			}
+			m.status = "free-text question: press t to type an answer (or ↵ to view)"
+			return nil
+		}
+	}
 	switch k {
 	case "\r", "A", " ":
 		return m.openAnswerFrom(r, true, m.queueCur, len(m.queue))
 	case "f":
 		return m.followRecommendation(r, true)
+	case "t":
+		switch it.kind {
+		case queueKindPrompt:
+			m.status = "approval prompts require picking a numbered option (press ↵)"
+		case queueKindRun:
+			m.status = "RUN command: press c/p to copy or ↵/A to record RAN"
+		default:
+			m.askFreeTextNeedsMe(r, true)
+		}
+		return nil
 	case "z":
 		m.snoozeAsk(r.bead.ID, true)
 		return nil
-	case "p":
+	case "p", "c":
 		if it.runCmd != "" {
 			m.status = m.copied(it.runCmd, "copied RUN command")
 		}

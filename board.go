@@ -416,6 +416,10 @@ type board struct {
 	// ans holds the live approval prompt, structured needs_me question, or RUN
 	// command shown in viewAnswer.
 	ans *answerState
+	// pendingOpt tracks a numbered option (1-9) currently awaiting y/↵
+	// confirmation so viewAnswer and wide split previews highlight it inline.
+	pendingOpt     int
+	pendingOptBead string
 
 	// Responsive layout mode and hit targets for SGR mouse/touch interaction.
 	layout layoutMode
@@ -795,15 +799,19 @@ func (m *board) key(k string) []cmd {
 			switch {
 			case cancel:
 				m.ask, m.status = nil, "cancelled"
+				m.pendingOpt, m.pendingOptBead = 0, ""
 			case submit && strings.TrimSpace(a.buf) == "" && !a.allowEmpty:
 				m.ask, m.status = nil, "cancelled: nothing typed"
+				m.pendingOpt, m.pendingOptBead = 0, ""
 			case submit:
 				m.ask = nil
+				m.pendingOpt, m.pendingOptBead = 0, ""
 				return a.then(strings.TrimSpace(a.buf))
 			}
 			return nil
 		}
 		m.ask = nil
+		m.pendingOpt, m.pendingOptBead = 0, ""
 		if k == "\n" && strings.Contains(a.keys, "\r") {
 			k = "\r"
 		}
@@ -1171,6 +1179,19 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 			return doneMsg{text: id + " " + word, err: m.env.setLabel(id, LabelNext, on), reload: true}
 		}}
 	case "U", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		// When a structured needs_me question with numbered OPTIONS is visible on
+		// the selected bead, digits 1-9 answer that question directly instead of
+		// changing its autonomy level (U and 0 still manage autonomy).
+		if len(k) == 1 && k[0] >= '1' && k[0] <= '9' {
+			if q, ok := m.activeStructuredQuestion(r); ok {
+				n := int(k[0] - '0')
+				if n > len(q.Options) {
+					m.status = fmt.Sprintf("no option %d (1-%d; press U for autonomy)", n, len(q.Options))
+					return nil
+				}
+				return m.pickNeedsMeOption(id, q, n, false)
+			}
+		}
 		lvl, _ := m.cfg.beadLevel(r.bead, autonomyStopped())
 		n, _ := strconv.Atoi(k)
 		if k == "U" {

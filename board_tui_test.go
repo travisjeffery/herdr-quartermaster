@@ -373,10 +373,13 @@ func TestBoardResponsiveLayoutsNoOverflow(t *testing.T) {
 		t.Errorf("mobile 42-col compact card should show bead title:\n%s", mobileScreen)
 	}
 
-	// Wide desktop (>=130) list renders live split pane with │ divider and decision preview!
+	// Wide desktop (>=130) list renders live split pane with │ divider, Open Question preview, and no duplicate Waiting section!
 	wideScreen := strings.Join(screenLines(renderBoard(m, 150, 30)), "\n")
-	if !strings.Contains(wideScreen, "│") || !strings.Contains(wideScreen, "Waiting: needs_me decision") {
-		t.Errorf("wide 150-col split pane missing divider or live decision preview:\n%s", wideScreen)
+	if !strings.Contains(wideScreen, "│") || !strings.Contains(wideScreen, "Open Question") {
+		t.Errorf("wide 150-col split pane missing divider or Open Question preview:\n%s", wideScreen)
+	}
+	if strings.Contains(wideScreen, "Waiting on you") {
+		t.Errorf("wide split pane should not duplicate Waiting on you below Open Question:\n%s", wideScreen)
 	}
 
 	// L cycles auto -> compact -> standard -> wide -> auto.
@@ -480,4 +483,178 @@ func TestOSC52ClipboardAndSSHOpenURL(t *testing.T) {
 	if buf.String() != osc52Sequence("https://github.com/example/repo/pull/42") {
 		t.Fatalf("OSC 52 output mismatch: %q", buf.String())
 	}
+}
+
+func TestAutonomyLevelNotePreservesStructuredQuestion(t *testing.T) {
+	notes := strings.Join([]string{
+		"MILESTONE [merged]: PR #42 merged to main",
+		"QUESTION: Run fast dry run on main? Recommendation: 1 — verifies discovery in 3m.",
+		"Details: PR #42 merged. Dry run writes nothing to storage.",
+		"Evidence: PR https://github.com/example/repo/pull/42",
+		"OPTIONS:",
+		"1. Run fast dry run",
+		"2. Run full dry run",
+		"3. Wait for sibling PR",
+		"CLASS: 6 — dispatch verification workflow",
+		"autonomy level - set by TJ",
+	}, "\n")
+
+	q, ok := parseNeedsMeQuestion(notes)
+	if !ok {
+		t.Fatal("parseNeedsMeQuestion returned false when trailing 'autonomy level - set by TJ' note was present")
+	}
+	if len(q.Options) != 3 || q.ClassN != 6 {
+		t.Fatalf("unexpected parsed question: options=%d class=%d", len(q.Options), q.ClassN)
+	}
+	if rec := q.recommendation(); rec == nil || *rec != 1 {
+		t.Fatalf("expected recommendation 1, got %v", rec)
+	}
+	// waitingNotes must keep the entire structured question block together (9 lines from QUESTION: to trailing autonomy note),
+	// leaving only MILESTONE [merged] in History.
+	lines := noteLines(notes)
+	if got := waitingNotes(lines); got != 9 {
+		t.Fatalf("waitingNotes = %d, want 9 (full structured block)", got)
+	}
+}
+
+func TestWaitingDoneAndHistoryReadability(t *testing.T) {
+	longScratchpad := "Investigated cluster parameters across 52 clusters and 104 instances: " + strings.Repeat("detailed diagnostic evidence that should be capped in history view. ", 12)
+	notes := strings.Join([]string{
+		longScratchpad,
+		"MILESTONE [review_resolved]: Addressed all review threads",
+		"MILESTONE [merged]: PR #99 merged as abc1234",
+		"VERIFIED: unit tests and dry run passed",
+		"QUESTION: Authorize stage-1 canary? Recommendation: 1 — safe single cluster check.",
+		"Details: " + strings.Repeat("Background context paragraph explaining the rollout plan. ", 6),
+		"Evidence: PR https://github.com/example/repo/pull/99",
+		"OPTIONS:",
+		"1. Proceed with stage 1",
+		"2. Hold rollout",
+		"3. Split into follow-up",
+		"4. Close as shipped",
+		"CLASS: 7 — stage-1 canary rollout",
+		"autonomy level - set by TJ",
+	}, "\n")
+
+	b := Bead{
+		ID:        "bk-read",
+		Title:     "Stage-1 canary rollout",
+		Status:    StatusNeedsMe,
+		Priority:  1,
+		UpdatedAt: t0.Add(-15 * time.Minute),
+		Notes:     notes,
+	}
+	r := boardRow{
+		bead:  b,
+		group: GroupNeedsYou,
+		prs:   []PR{{Number: 99, URL: "https://github.com/example/repo/pull/99", State: "MERGED", Title: "Add audit logging"}},
+	}
+	d := &beadDetail{full: &b}
+
+	rendered := strings.Join(texts(detailLines(r, d, 80)), "\n")
+	if !strings.Contains(rendered, "Done\n  ✓ VERIFIED: unit tests") {
+		t.Errorf("detailLines missing Done milestones section:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "★ Recommendation: 1 — safe single cluster check.") {
+		t.Errorf("detailLines missing highlighted recommendation:\n%s", rendered)
+	}
+	// History must NOT contain chopped pieces of the open QUESTION/OPTIONS block!
+	histIdx := strings.Index(rendered, "History (")
+	if histIdx < 0 {
+		t.Fatalf("detailLines missing History section:\n%s", rendered)
+	}
+	histPart := rendered[histIdx:]
+	for _, leaked := range []string{"OPTIONS:", "1. Proceed with stage 1", "QUESTION: Authorize stage-1"} {
+		if strings.Contains(histPart, leaked) {
+			t.Errorf("History leaked open-question line %q:\n%s", leaked, histPart)
+		}
+	}
+	// Verbose scratchpad note in History should be capped cleanly with an ellipsis.
+	if !strings.Contains(histPart, "…") {
+		t.Errorf("expected verbose history note to be capped with ellipsis:\n%s", histPart)
+	}
+}
+
+func TestInstantDigitSelectionSwitchEnterAndSplitClick(t *testing.T) {
+	f := queueFixtureFleet()
+	env := wireExtendedFakeEnv(f, f.env(), &SnoozeState{Version: 1, Beads: map[string]SnoozeEntry{}})
+	m := newBoard(Config{Repo: "/r"}, env, boardData{Beads: f.beads, Agents: f.agents}, func() time.Time { return t0 })
+	m.cfg.Autonomy = defaultConfig().Autonomy
+
+	// 1) In viewQueue, pressing 1 immediately selects option 1 with inline highlight and banner;
+	// pressing 2 switches selection to option 2 instead of cancelling; pressing Enter submits!
+	press(t, m, "Q")
+	// Move to bk-decide (index 2: bk-prompt, bk-crit, bk-decide)
+	for i, it := range m.queue {
+		if it.row.bead.ID == "bk-decide" {
+			m.queueCur = i
+			break
+		}
+	}
+	press(t, m, "1")
+	if m.ask == nil || m.pendingOpt != 1 || m.pendingOptBead != "bk-decide" {
+		t.Fatalf("pressing 1 in viewQueue should immediately select option 1: ask=%+v pending=%d/%s", m.ask, m.pendingOpt, m.pendingOptBead)
+	}
+	wide := strings.Join(screenLines(renderBoard(m, 150, 34)), "\n")
+	if !strings.Contains(wide, "❯ 1. Close PR and bead") || !strings.Contains(wide, "Option 1 selected") {
+		t.Fatalf("wide split preview missing inline highlight or selection banner:\n%s", wide)
+	}
+	// Pressing 2 while confirming switches to option 2 rather than cancelling!
+	press(t, m, "2")
+	if m.ask == nil || m.pendingOpt != 2 {
+		t.Fatalf("pressing 2 during confirm should switch to option 2, got ask=%+v pending=%d", m.ask, m.pendingOpt)
+	}
+	// Pressing Enter confirms and submits option 2!
+	press(t, m, "\r")
+	if len(f.calls) != 1 || !strings.Contains(f.calls[0], "bk-decide choice=2") {
+		t.Fatalf("Enter did not confirm option 2: calls=%v", f.calls)
+	}
+
+	// 2) In viewQueue, pressing t on bk-free opens custom free-text prompt immediately.
+	for i, it := range m.queue {
+		if it.row.bead.ID == "bk-free" {
+			m.queueCur = i
+			break
+		}
+	}
+	press(t, m, "t")
+	if m.ask == nil || !m.ask.text || !strings.Contains(m.ask.prompt, "custom answer for bk-free") {
+		t.Fatalf("pressing t in viewQueue should open free-text answer bar: ask=%+v", m.ask)
+	}
+	press(t, m, "\x1b")
+
+	// 3) In viewList, pressing 1 on a structured needs_me bead answers option 1 (not autonomy),
+	// pressing 5 reports "no option 5" instead of changing autonomy, while pressing 5 on bk-work still sets autonomy!
+	press(t, m, "Q") // back to viewList
+	selectBead(t, m, "bk-crit")
+	press(t, m, "5")
+	if m.ask != nil || !strings.Contains(m.status, "no option 5") {
+		t.Fatalf("out-of-range digit on structured question should not change autonomy: ask=%+v status=%q", m.ask, m.status)
+	}
+	// Clicking option 2 directly in the wide split right pane triggers option 2 confirmation!
+	_ = renderBoard(m, 150, 34)
+	opt2Row := -1
+	for scrRow, optNum := range m.hits.optionRows {
+		if optNum == 2 {
+			opt2Row = scrRow
+			break
+		}
+	}
+	if opt2Row < 0 {
+		t.Fatal("wide split right pane did not record option 2 hit target")
+	}
+	clickCol := m.hits.splitCol + 6
+	press(t, m, fmt.Sprintf("\x1b[<0;%d;%dM", clickCol+1, opt2Row+1))
+	if m.ask == nil || m.pendingOpt != 2 || m.pendingOptBead != "bk-crit" {
+		t.Fatalf("clicking option 2 in wide split right pane did not select option 2: ask=%+v pending=%d/%s", m.ask, m.pendingOpt, m.pendingOptBead)
+	}
+	press(t, m, "\x1b")
+
+	// Normal in_progress bead still uses 0-9 for autonomy level.
+	selectBead(t, m, "bk-work")
+	press(t, m, "5")
+	if m.ask == nil || !strings.Contains(m.ask.prompt, "autonomy level 5") {
+		t.Fatalf("digit 5 on non-question bead should still prompt autonomy level: ask=%+v", m.ask)
+	}
+	press(t, m, "n")
 }

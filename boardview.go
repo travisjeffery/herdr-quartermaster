@@ -272,15 +272,15 @@ func (m *board) hintFor(w int) string {
 		return "j/k move  ↵ jump to bead  i ack inbox  r refresh  E/esc back  ? help"
 	case m.view == viewQueue:
 		if compact {
-			return "↵ open  f ★rec  z snooze  H all  Q board  ?"
+			return "1-9 pick  f ★rec  ↵ full  t text  z snooze  Q"
 		}
-		return "↵/A answer  f ★follow rec  z snooze  H snoozed  o PR  @ coord  L layout  Q board  ? help"
+		return "1-9 pick  f ★rec  t text  ↵/A full  z snooze  H snoozed  o PR  @ coord  L layout  Q board  ? help"
 	case m.view == viewAnswer:
 		if m.ans != nil && m.ans.kind == answerKindPrompt {
 			if compact {
-				return "1-9 pick  ]/[ next  r reload  esc back"
+				return "1-9 pick  y/↵ send  ]/[ next  r reload  esc"
 			}
-			return "1-9 pick option  ]/[ queue  j/k scroll  r reload  esc back  ? help"
+			return "1-9 pick (y/↵ send)  ]/[ queue  j/k scroll  r reload  esc back  ? help"
 		}
 		if m.ans != nil && m.ans.kind == answerKindRun {
 			if compact {
@@ -289,9 +289,9 @@ func (m *board) hintFor(w int) string {
 			return "c copy cmd  d/↵ record RAN & resume  z snooze  ]/[ queue  esc back  ? help"
 		}
 		if compact {
-			return "f ★rec  1-9 pick  t text  z snooze  ]/[  esc"
+			return "1-9 pick  f ★rec  t text  z snooze  ]/[  esc"
 		}
-		return "f/↵ ★rec  1-9 pick (e +note)  t custom  z snooze  ]/[ queue  r reload  esc back  ? help"
+		return "1-9 pick (y/↵ send, e +note)  f/↵ ★rec  t custom  z snooze  ]/[ queue  r reload  esc back  ? help"
 	case m.view == viewDetail:
 		if compact {
 			return "J/K scroll  A answer  f ★rec  z snooze  esc"
@@ -547,11 +547,13 @@ func helpLinesFor(v boardView) []string {
 			"Launch directly with `quartermaster board --queue` (ideal for mobile/Moshi).",
 			"",
 			"  j/k ↑/↓      move                 J/K   scroll right preview (wide desktop)",
+			"  1-9          pick an option directly (or tap an option in the right preview)",
+			"  f            follow the worker's ★ recommendation (y/↵ send, e +note)",
+			"  t            enter a custom free-text answer directly",
 			"  ↵, A, space  open full prompt / question / RUN card (auto-advances after answer)",
-			"  f            follow the worker's ★ recommendation in one confirm (e adds a note)",
 			"  z            snooze (2h, 4h, 1d, 3d, 1w, custom, or clear)",
 			"  H            show/hide snoozed items in queue",
-			"  p / y        copy RUN command / bead id (OSC 52 works over SSH)",
+			"  c / p / y    copy RUN command / bead id (OSC 52 works over SSH)",
 			"  o / l        open PR / Linear (or copy URL over SSH via OSC 52)",
 			"  L            cycle layout: auto, compact (<80), standard, wide (>=130 split)",
 			"  Q, esc       return to full board",
@@ -561,7 +563,7 @@ func helpLinesFor(v boardView) []string {
 			"Answer view: full approval prompt, structured needs_me question, or RUN command.",
 			"",
 			"  f, ↵         follow the stated ★ recommendation (needs_me with recommendation)",
-			"  1-9          pick a numbered option (press y to confirm, or e to attach a note)",
+			"  1-9          pick a numbered option (y/↵ confirm, e +note, 1-9 switch)",
 			"               approval prompts verify --expect <hash> and refuse on mismatch;",
 			"               needs_me records NEEDS_ME ANSWERED, sets in_progress, prompts worker",
 			"  t            enter a custom free-text answer (needs_me questions only)",

@@ -36,9 +36,19 @@ them back into view).
 
 ### Zero-friction triage actions
 
+- **Direct `1`–`9` option picking everywhere:** press `1`–`9` (or tap/click an
+  option in the wide split preview or Answer view) directly from the Decision
+  Queue, main board (on structured `needs_me` beads), or Answer view. The chosen
+  option highlights inline (`❯`) with an inline confirmation banner — press `y`
+  or `↵` to send, `e` to attach a note, another digit `1`–`9` to switch options,
+  or `n`/`esc` to cancel. Press `t` to enter a custom free-text answer.
 - **Accept recommendation in one confirm (`f` in queue/list, or `f` / `↵` inside Answer view):**
-  confirms the worker's stated `★` recommendation (`y/n · e +note`). Press `y` to
-  submit immediately, or `e` to attach a short note alongside the option.
+  confirms the worker's stated `★` recommendation (`y/n · ↵ send · e +note`).
+- **Scannable Open Question, Done, and History panes:** wide split and detail
+  views separate the crisp Question, highlighted `★ Recommendation`, and
+  numbered Options above longer `Details`/`Evidence` prose, surface completed
+  milestones under `Done` (`✓`), and cap verbose `History` notes with hanging
+  indents so progress is scannable at a glance (`b` opens full `bd show`).
 - **Auto-advance through the queue:** opening any item from the Decision Queue
   (`↵` / `A`) displays its queue position (`[1/N]`), lets you step with `]`/`[`,
   and automatically advances to the next waiting item after you answer, complete
