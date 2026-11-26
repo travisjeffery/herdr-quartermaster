@@ -5,11 +5,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 )
 
 func typeKeys(t *testing.T, m *board, s string) {
@@ -657,4 +660,67 @@ func TestInstantDigitSelectionSwitchEnterAndSplitClick(t *testing.T) {
 		t.Fatalf("digit 5 on non-question bead should still prompt autonomy level: ask=%+v", m.ask)
 	}
 	press(t, m, "n")
+}
+
+func TestWakePipeNonBlockingDrainAndPoll(t *testing.T) {
+	wp, err := newWakePipe()
+	if err != nil {
+		t.Fatalf("newWakePipe: %v", err)
+	}
+	defer wp.close()
+
+	for name, fd := range map[string]int{"read": wp.fd(), "write": wp.wFD} {
+		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+		if err != nil {
+			t.Fatalf("fcntl %s fd: %v", name, err)
+		}
+		if flags&unix.O_NONBLOCK == 0 {
+			t.Fatalf("%s fd missing O_NONBLOCK (flags=%#o)", name, flags)
+		}
+	}
+
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer stdinR.Close()
+	defer stdinW.Close()
+	stdinFD := int(stdinR.Fd())
+
+	for round := 0; round < 3; round++ {
+		for i := 0; i <= round; i++ {
+			wp.signal()
+		}
+		ready, woke, err := waitInputOrWake(stdinFD, wp.fd(), 1000)
+		if err != nil {
+			t.Fatalf("round %d waitInputOrWake: %v", round, err)
+		}
+		if ready || !woke {
+			t.Fatalf("round %d waitInputOrWake = (ready=%v, woke=%v), want (false, true)", round, ready, woke)
+		}
+		drained := make(chan struct{})
+		go func() {
+			wp.drain()
+			close(drained)
+		}()
+		select {
+		case <-drained:
+		case <-time.After(time.Second):
+			t.Fatalf("round %d wp.drain() blocked on empty wake pipe", round)
+		}
+
+		ready, woke, err = waitInputOrWake(stdinFD, wp.fd(), 10)
+		if err != nil {
+			t.Fatalf("round %d post-drain waitInputOrWake: %v", round, err)
+		}
+		if ready || woke {
+			t.Fatalf("round %d post-drain waitInputOrWake = (ready=%v, woke=%v), want (false, false)", round, ready, woke)
+		}
+	}
+
+	// Draining an already-empty pipe and signaling after close must not block or panic.
+	wp.drain()
+	wp.close()
+	wp.signal()
+	wp.drain()
 }
