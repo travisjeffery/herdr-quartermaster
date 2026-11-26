@@ -301,7 +301,7 @@ func eventKindColor(kind string) string {
 	}
 }
 
-func (m *board) eventsLines(w, body int) []string {
+func (m *board) eventsLines(w, body, rowOffset int) []string {
 	switch {
 	case m.evErr != "" && len(m.evRows) == 0:
 		return []string{ansiRed + fit("  "+m.evErr, w) + ansiReset}
@@ -363,6 +363,7 @@ func (m *board) eventsLines(w, body int) []string {
 		// Fixed width: marker(2) + age(3) + " " + kind(kindW) + " " + bead(beadW) + " "
 		fixed := 2 + 3 + 1 + kindW + 1 + beadW + 1
 		sumW := max(0, w-fixed)
+		m.hits.recordRow(rowOffset+len(out), i)
 		if i == m.evCur {
 			line := "▌ " + when + " " + fit(r.kind, kindW) + " " + fit(bead, beadW)
 			if sumW > 0 {

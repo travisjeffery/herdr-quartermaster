@@ -11,21 +11,27 @@ type answerKind int
 const (
 	answerKindPrompt answerKind = iota
 	answerKindNeedsMe
+	answerKindRun
 )
 
-// answerState holds the live approval prompt or structured needs_me question
-// shown in viewAnswer so the user can inspect the full text, hash, and options
-// before confirming an answer.
+// answerState holds the live approval prompt, structured needs_me question, or
+// pending RUN: command shown in viewAnswer so the user can inspect the full
+// text, hash, and options before confirming an answer.
 type answerState struct {
-	beadID    string
-	beadTitle string
-	kind      answerKind
-	back      boardView
-	loading   bool
-	loadErr   string
-	prompt    *ApprovalPrompt
-	question  *NeedsMeQuestion
-	scroll    int
+	beadID     string
+	beadTitle  string
+	kind       answerKind
+	back       boardView
+	fromQueue  bool
+	queueIdx   int
+	queueTotal int
+	loading    bool
+	loadErr    string
+	prompt     *ApprovalPrompt
+	question   *NeedsMeQuestion
+	runCmd     string
+	runReason  string
+	scroll     int
 }
 
 type answerLoadMsg struct {
@@ -44,18 +50,29 @@ type answerLoadMsg struct {
 //     confirmed answers through the NEEDS_ME ANSWERED --by TJ via board path.
 //   - Any other idle worker keeps the direct free-text reply prompt.
 func (m *board) openAnswer(r boardRow) []cmd {
+	return m.openAnswerFrom(r, false, 0, 0)
+}
+
+func (m *board) openAnswerFrom(r boardRow, fromQueue bool, qIdx, qTotal int) []cmd {
 	id := r.bead.ID
+	backView := m.view
+	if fromQueue {
+		backView = viewQueue
+	}
 	if r.agent != nil && r.agent.Status == "blocked" {
 		if m.env.readPrompt == nil {
 			m.status = id + ": " + unanswerable(r.agent)
 			return nil
 		}
 		m.ans = &answerState{
-			beadID:    id,
-			beadTitle: r.bead.Title,
-			kind:      answerKindPrompt,
-			back:      m.view,
-			loading:   true,
+			beadID:     id,
+			beadTitle:  r.bead.Title,
+			kind:       answerKindPrompt,
+			back:       backView,
+			fromQueue:  fromQueue,
+			queueIdx:   qIdx,
+			queueTotal: qTotal,
+			loading:    true,
 		}
 		m.view = viewAnswer
 		return []cmd{m.loadPromptCmd(id)}
@@ -65,28 +82,49 @@ func (m *board) openAnswer(r boardRow) []cmd {
 	if d := m.details[id]; d != nil && d.full != nil {
 		notes = d.full.Notes
 	}
-	if r.bead.Status == StatusNeedsMe && pendingCommand(notes) == "" && (r.agent == nil || r.agent.Status != "working") {
+	if r.bead.Status == StatusNeedsMe && (r.agent == nil || r.agent.Status != "working") {
+		if runCmd := pendingCommand(notes); runCmd != "" {
+			m.ans = &answerState{
+				beadID:     id,
+				beadTitle:  r.bead.Title,
+				kind:       answerKindRun,
+				back:       backView,
+				fromQueue:  fromQueue,
+				queueIdx:   qIdx,
+				queueTotal: qTotal,
+				runCmd:     runCmd,
+				runReason:  pendingCommandReason(notes),
+			}
+			m.view = viewAnswer
+			return nil
+		}
 		if q, ok := parseNeedsMeQuestion(notes); ok {
 			qCopy := q
 			m.ans = &answerState{
-				beadID:    id,
-				beadTitle: r.bead.Title,
-				kind:      answerKindNeedsMe,
-				back:      m.view,
-				question:  &qCopy,
+				beadID:     id,
+				beadTitle:  r.bead.Title,
+				kind:       answerKindNeedsMe,
+				back:       backView,
+				fromQueue:  fromQueue,
+				queueIdx:   qIdx,
+				queueTotal: qTotal,
+				question:   &qCopy,
 			}
 			m.view = viewAnswer
 			return m.refreshNeedsMeQuestionCmd(id)
 		}
-		if r.agent == nil {
+		if r.agent == nil || fromQueue {
 			if q, ok := parseFreeTextNeedsMeQuestion(notes); ok {
 				qCopy := q
 				m.ans = &answerState{
-					beadID:    id,
-					beadTitle: r.bead.Title,
-					kind:      answerKindNeedsMe,
-					back:      m.view,
-					question:  &qCopy,
+					beadID:     id,
+					beadTitle:  r.bead.Title,
+					kind:       answerKindNeedsMe,
+					back:       backView,
+					fromQueue:  fromQueue,
+					queueIdx:   qIdx,
+					queueTotal: qTotal,
+					question:   &qCopy,
 				}
 				m.view = viewAnswer
 				return m.refreshNeedsMeQuestionCmd(id)
@@ -186,15 +224,83 @@ func (m *board) answerKey(k string) []cmd {
 		a.scroll = max(0, a.scroll-5)
 		return nil
 	case "r":
+		if a.kind == answerKindRun {
+			return nil
+		}
 		a.loading = true
 		m.status = "reloading…"
 		if a.kind == answerKindPrompt {
 			return []cmd{m.loadPromptCmd(a.beadID)}
 		}
 		return m.refreshNeedsMeQuestionCmd(a.beadID)
+	case "]":
+		if len(m.queue) > 0 {
+			next := (m.queueCur + 1) % len(m.queue)
+			return m.openQueueStep(next)
+		}
+		return nil
+	case "[":
+		if len(m.queue) > 0 {
+			prev := (m.queueCur - 1 + len(m.queue)) % len(m.queue)
+			return m.openQueueStep(prev)
+		}
+		return nil
+	case "z":
+		if a.kind == answerKindNeedsMe || a.kind == answerKindRun {
+			m.snoozeAsk(a.beadID, a.fromQueue)
+			return nil
+		}
 	}
 
 	if a.loading {
+		return nil
+	}
+
+	// RUN: command view keys: c/p copy command; d/Enter record RAN: + resume worker.
+	if a.kind == answerKindRun {
+		switch k {
+		case "c", "p":
+			m.status = m.copied(a.runCmd, "copied RUN command")
+			return nil
+		case "d", "\r":
+			id, runCmd, fromQueue := a.beadID, a.runCmd, a.fromQueue
+			m.ask = &ask{prompt: "RAN result for " + id + " (enter for ok): ", text: true, allowEmpty: true, then: func(res string) []cmd {
+				if strings.TrimSpace(res) == "" {
+					res = "ok"
+				}
+				m.ask = confirm(fmt.Sprintf("record RAN on %s (%s) and resume worker?", id, shortTitle(res, 36)), func() []cmd {
+					m.status = "recording RAN on " + id + "…"
+					return []cmd{func() msg {
+						if m.env.completeRun == nil {
+							return doneMsg{err: fmt.Errorf("RUN completion is unavailable")}
+						}
+						text, err := m.env.completeRun(id, runCmd, res)
+						return doneMsg{
+							text:         text,
+							err:          err,
+							reload:       true,
+							reloadAgents: true,
+							closeAnswer:  err == nil && !fromQueue,
+							advanceQueue: err == nil && fromQueue,
+							answeredID:   id,
+						}
+					}}
+				})
+				return nil
+			}}
+			return nil
+		}
+		return nil
+	}
+
+	// One-key accept stated recommendation: f or Enter inside viewAnswer.
+	if (k == "f" || k == "\r") && a.kind == answerKindNeedsMe && a.question != nil {
+		rec := a.question.recommendation()
+		if rec == nil || *rec < 1 || *rec > len(a.question.Options) {
+			m.status = "no stated recommendation; pick 1-" + strconv.Itoa(len(a.question.Options)) + " or t"
+			return nil
+		}
+		m.confirmNeedsMeOption(a.beadID, *a.question, a.question.Options[*rec-1], true, a.fromQueue)
 		return nil
 	}
 
@@ -213,7 +319,7 @@ func (m *board) answerKey(k string) []cmd {
 			if answerClass(p, o, 0) == 9 {
 				warn = " [class 9]"
 			}
-			id := a.beadID
+			id, fromQueue := a.beadID, a.fromQueue
 			m.ask = confirm(fmt.Sprintf("answer %s prompt [%s]: %d. %s%s?", id, p.Hash, o.Number, shortTitle(o.Label, 45), warn), func() []cmd {
 				m.status = fmt.Sprintf("answering %s [%s]…", id, p.Hash)
 				return []cmd{func() msg {
@@ -221,7 +327,15 @@ func (m *board) answerKey(k string) []cmd {
 						return doneMsg{err: fmt.Errorf("prompt answering is unavailable")}
 					}
 					text, err := m.env.answerPrompt(id, strconv.Itoa(o.Number), p.Hash)
-					return doneMsg{text: text, err: err, reload: true, reloadAgents: true, closeAnswer: err == nil}
+					return doneMsg{
+						text:         text,
+						err:          err,
+						reload:       true,
+						reloadAgents: true,
+						closeAnswer:  err == nil && !fromQueue,
+						advanceQueue: err == nil && fromQueue,
+						answeredID:   id,
+					}
 				}}
 			})
 			return nil
@@ -232,17 +346,9 @@ func (m *board) answerKey(k string) []cmd {
 			}
 			q := *a.question
 			o := q.Options[n-1]
-			id := a.beadID
-			m.ask = confirm(fmt.Sprintf("answer %s: %d. %s (NEEDS_ME ANSWERED → in_progress)?", id, o.Number, shortTitle(o.Label, 45)), func() []cmd {
-				m.status = fmt.Sprintf("recording answer on %s…", id)
-				return []cmd{func() msg {
-					if m.env.answerNeedsMe == nil {
-						return doneMsg{err: fmt.Errorf("needs_me answering is unavailable")}
-					}
-					text, err := m.env.answerNeedsMe(id, strconv.Itoa(o.Number), "", q.Hash)
-					return doneMsg{text: text, err: err, reload: true, reloadAgents: true, closeAnswer: err == nil}
-				}}
-			})
+			rec := q.recommendation()
+			isRec := rec != nil && *rec == o.Number
+			m.confirmNeedsMeOption(a.beadID, q, o, isRec, a.fromQueue)
 			return nil
 		}
 	}
@@ -250,7 +356,7 @@ func (m *board) answerKey(k string) []cmd {
 	// Custom free-text answer (needs_me questions only; never approval prompts).
 	if k == "t" && a.kind == answerKindNeedsMe && a.question != nil {
 		q := *a.question
-		id := a.beadID
+		id, fromQueue := a.beadID, a.fromQueue
 		m.ask = &ask{prompt: "custom answer for " + id + ": ", text: true, then: func(text string) []cmd {
 			m.ask = confirm(fmt.Sprintf("answer %s with custom text: %q?", id, shortTitle(text, 45)), func() []cmd {
 				m.status = fmt.Sprintf("recording custom answer on %s…", id)
@@ -259,7 +365,15 @@ func (m *board) answerKey(k string) []cmd {
 						return doneMsg{err: fmt.Errorf("needs_me answering is unavailable")}
 					}
 					res, err := m.env.answerNeedsMe(id, tapChoiceFreeText, text, q.Hash)
-					return doneMsg{text: res, err: err, reload: true, reloadAgents: true, closeAnswer: err == nil}
+					return doneMsg{
+						text:         res,
+						err:          err,
+						reload:       true,
+						reloadAgents: true,
+						closeAnswer:  err == nil && !fromQueue,
+						advanceQueue: err == nil && fromQueue,
+						answeredID:   id,
+					}
 				}}
 			})
 			return nil
@@ -270,7 +384,44 @@ func (m *board) answerKey(k string) []cmd {
 	return nil
 }
 
-func (m *board) answerLines(w, body int) []string {
+// confirmNeedsMeOption confirms a numbered needs_me choice with y/n and an
+// optional e (+note) shortcut so extra context can ride along with the option.
+func (m *board) confirmNeedsMeOption(id string, q NeedsMeQuestion, o PromptOption, isRec, fromQueue bool) {
+	tag := ""
+	if isRec {
+		tag = "★ "
+	}
+	send := func(extra string) []cmd {
+		m.status = fmt.Sprintf("recording answer on %s…", id)
+		return []cmd{func() msg {
+			if m.env.answerNeedsMe == nil {
+				return doneMsg{err: fmt.Errorf("needs_me answering is unavailable")}
+			}
+			text, err := m.env.answerNeedsMe(id, strconv.Itoa(o.Number), extra, q.Hash)
+			return doneMsg{
+				text:         text,
+				err:          err,
+				reload:       true,
+				reloadAgents: true,
+				closeAnswer:  err == nil && !fromQueue,
+				advanceQueue: err == nil && fromQueue,
+				answeredID:   id,
+			}
+		}}
+	}
+	prompt := fmt.Sprintf("answer %s: %s%d. %s (NEEDS_ME ANSWERED → in_progress)?  y/n · e +note", id, tag, o.Number, shortTitle(o.Label, 42))
+	m.ask = &ask{prompt: prompt, keys: "ye", then: func(k string) []cmd {
+		if k == "e" {
+			m.ask = &ask{prompt: fmt.Sprintf("note with option %d for %s: ", o.Number, id), text: true, then: func(extra string) []cmd {
+				return send(extra)
+			}}
+			return nil
+		}
+		return send("")
+	}}
+}
+
+func (m *board) answerLines(w, body, rowOffset int) []string {
 	a := m.ans
 	if a == nil {
 		return nil
@@ -279,15 +430,45 @@ func (m *board) answerLines(w, body int) []string {
 		return []string{ansiDim + fit("  reading live prompt…", w) + ansiReset}
 	}
 
-	var raw []styledLine
-	add := func(style, text string) { raw = append(raw, styledLine{text, style}) }
+	type answerLine struct {
+		text   string
+		style  string
+		optNum int // 1-9 when tapping this line selects that option
+	}
+	var raw []answerLine
+	add := func(style, text string) { raw = append(raw, answerLine{text: text, style: style}) }
 	para := func(style, indent, text string) {
 		for _, l := range wrap(text, max(1, w-len([]rune(indent)))) {
 			add(style, indent+l)
 		}
 	}
+	paraOpt := func(optNum int, style, indent, text string) {
+		for _, l := range wrap(text, max(1, w-len([]rune(indent)))) {
+			raw = append(raw, answerLine{text: indent + l, style: style, optNum: optNum})
+		}
+	}
 
 	switch a.kind {
+	case answerKindRun:
+		meta := fmt.Sprintf("%s · RUN command · manual step", a.beadID)
+		para(ansiCyan+ansiBold, "", meta)
+		if a.beadTitle != "" {
+			para(ansiBold, "", a.beadTitle)
+		}
+		add("", "")
+		add(ansiBold, "Command to run (press c to copy via clipboard/OSC 52)")
+		para(ansiYellow+ansiBold, "  $ ", a.runCmd)
+		if a.runReason != "" {
+			add("", "")
+			add(ansiBold, "Why")
+			para("", "  ", a.runReason)
+		}
+		add("", "")
+		add(ansiGreen+ansiBold, "Actions")
+		para("", "  ", "c / p   copy command to clipboard (works over SSH via OSC 52)")
+		para("", "  ", "d / ↵   record RAN: <cmd> → <result>, set in_progress, and prompt worker")
+		para("", "  ", "z       snooze this bead for later")
+
 	case answerKindPrompt:
 		if a.prompt == nil {
 			add(ansiDim, "  (no approval prompt loaded)")
@@ -311,7 +492,7 @@ func (m *board) answerLines(w, body int) []string {
 			para("", "  ", l)
 		}
 		add("", "")
-		add(ansiBold, "Options (press 1-"+strconv.Itoa(len(p.Options))+")")
+		add(ansiBold, "Options (press or tap 1-"+strconv.Itoa(len(p.Options))+")")
 		for _, o := range p.Options {
 			cur := "  "
 			style := ""
@@ -324,7 +505,7 @@ func (m *board) answerLines(w, body int) []string {
 				tag = " [class 9]"
 				style = ansiYellow + ansiBold
 			}
-			para(style, "  ", fmt.Sprintf("%s%d. %s%s", cur, o.Number, o.Label, tag))
+			paraOpt(o.Number, style, "  ", fmt.Sprintf("%s%d. %s%s", cur, o.Number, o.Label, tag))
 		}
 
 	case answerKindNeedsMe:
@@ -353,7 +534,12 @@ func (m *board) answerLines(w, body int) []string {
 		add("", "")
 		rec := q.recommendation()
 		if len(q.Options) > 0 {
-			add(ansiBold, "Options (press 1-"+strconv.Itoa(len(q.Options))+", or t for custom text)")
+			hdr := "Options (press or tap 1-" + strconv.Itoa(len(q.Options)) + ", t custom"
+			if rec != nil {
+				hdr += ", f/↵ follow ★" + strconv.Itoa(*rec)
+			}
+			hdr += ")"
+			add(ansiBold, hdr)
 			for _, o := range q.Options {
 				style := ""
 				suffix := ""
@@ -361,7 +547,7 @@ func (m *board) answerLines(w, body int) []string {
 					style = ansiGreen + ansiBold
 					suffix = "  ★ recommended"
 				}
-				para(style, "  ", fmt.Sprintf("%d. %s%s", o.Number, o.Label, suffix))
+				paraOpt(o.Number, style, "  ", fmt.Sprintf("%d. %s%s", o.Number, o.Label, suffix))
 			}
 		} else {
 			add(ansiBold, "Free-text question (press t to enter your answer)")
@@ -374,10 +560,13 @@ func (m *board) answerLines(w, body int) []string {
 	a.scroll = min(a.scroll, max(0, len(raw)-1))
 	visible := raw[a.scroll:]
 	if len(visible) > body && body > 1 {
-		visible = append(visible[:body-1:body-1], styledLine{"… more below (j/k or J/K scrolls)", ansiDim})
+		visible = append(visible[:body-1:body-1], answerLine{text: "… more below (j/k or J/K scrolls)", style: ansiDim})
 	}
 	out := make([]string, 0, min(len(visible), body))
 	for i := 0; i < len(visible) && i < body; i++ {
+		if visible[i].optNum > 0 {
+			m.hits.recordOption(rowOffset+i, visible[i].optNum)
+		}
 		out = append(out, visible[i].style+rpcViewFit(visible[i].text, w)+ansiReset)
 	}
 	return out
