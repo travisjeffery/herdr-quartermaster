@@ -548,6 +548,9 @@ func detailLinesWithOpts(r boardRow, d *beadDetail, w int, opts detailOpts) []st
 		}
 		if state.Kind == ThreadWaiting {
 			section("Waiting on you")
+			if r.pending != nil {
+				para(ansiGreen+ansiBold, "  ", r.pending.bannerLine())
+			}
 			if q, ok := parseNeedsMeQuestion(b.Notes); ok && r.run == "" {
 				parts := splitQuestionParts(q)
 				if parts.critical != "" {
@@ -561,11 +564,16 @@ func detailLinesWithOpts(r boardRow, d *beadDetail, w int, opts detailOpts) []st
 				}
 				rec := q.recommendation()
 				for _, o := range q.Options {
-					st, suf := "", ""
+					prefix, st, suf := "", "", ""
 					if rec != nil && *rec == o.Number {
 						st, suf = ansiGreen+ansiBold, " ★"
 					}
-					para(st, "  ", fmt.Sprintf("%d. %s%s", o.Number, o.Label, suf))
+					if r.pending != nil && r.pending.option == o.Number {
+						prefix = "✓ "
+						st = ansiGreen + ansiBold
+						suf += " (" + r.pending.optionTag() + ")"
+					}
+					para(st, "  ", fmt.Sprintf("%s%d. %s%s", prefix, o.Number, o.Label, suf))
 				}
 				for _, det := range parts.details {
 					appendWrappedCapped(&out, ansiDim, ansiDim, "  Details: ", "    ", det, w, 3)
@@ -607,6 +615,10 @@ func detailLinesWithOpts(r boardRow, d *beadDetail, w int, opts detailOpts) []st
 				para(ansiDim, "  ", "A answers "+r.agent.Name)
 			}
 			return
+		}
+		if r.pending != nil {
+			add("", "")
+			para(ansiGreen+ansiBold, "  ", r.pending.bannerLine())
 		}
 		section("Latest note")
 		if len(notes) == 0 {

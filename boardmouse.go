@@ -344,29 +344,10 @@ func (m *board) compactListLines(w, body, rowOffset int) []string {
 		return nil
 	}
 
-	rowHeight := func(i int) int {
-		if rows[i].header != "" {
-			return 1
-		}
-		return 2
-	}
-	start := 0
-	for start < m.cur {
-		used := 0
-		for i := start; i <= m.cur && i < len(rows); i++ {
-			used += rowHeight(i)
-		}
-		if used <= body {
-			break
-		}
-		start++
-	}
-	if start > 0 && start == m.cur && rows[start-1].header != "" {
-		used := 1 + rowHeight(m.cur)
-		if used <= body {
-			start--
-		}
-	}
+	m.listHeight = body
+	m.listCompact = true
+	m.listScroll = clampCompactScroll(rows, m.cur, m.listScroll, body)
+	start := m.listScroll
 
 	now := m.now()
 	var out []string
@@ -422,6 +403,9 @@ func (m *board) compactListLines(w, body, rowOffset int) []string {
 }
 
 func compactRowBadge(r boardRow) string {
+	if r.pending != nil {
+		return r.pending.compactBadge()
+	}
 	if r.agent != nil && r.agent.Status == "blocked" {
 		return " [PROMPT]"
 	}
@@ -552,7 +536,15 @@ func (m *board) decisionPreviewLines(r boardRow, w int) []previewLine {
 		}
 	}
 
+	pa := r.pending
+	if pa == nil {
+		pa = m.pendingAnswerFor(r.bead.ID)
+	}
+
 	if r.agent != nil && r.agent.Status == "blocked" {
+		if pa != nil {
+			para(ansiGreen+ansiBold, "", pa.bannerLine())
+		}
 		add(ansiRed+ansiBold, "Waiting: approval prompt (press A to inspect & answer)")
 		add("", "")
 		return out
@@ -565,6 +557,9 @@ func (m *board) decisionPreviewLines(r boardRow, w int) []previewLine {
 		notes = d.full.Notes
 	}
 	if cmd := pendingCommand(notes); cmd != "" {
+		if pa != nil {
+			para(ansiGreen+ansiBold, "", pa.bannerLine())
+		}
 		add(ansiCyan+ansiBold, "Waiting: RUN command (c/p copy · A record RAN · z snooze)")
 		para(ansiYellow+ansiBold, "  $ ", cmd)
 		if why := pendingCommandReason(notes); why != "" {
@@ -587,6 +582,9 @@ func (m *board) decisionPreviewLines(r boardRow, w int) []previewLine {
 		meta = append(meta, "t text", "A full")
 		hdr += " (" + strings.Join(meta, " · ") + ")"
 		add(ansiYellow+ansiBold, hdr)
+		if pa != nil {
+			para(ansiGreen+ansiBold, "  ", pa.bannerLine())
+		}
 
 		parts := splitQuestionParts(q)
 		if parts.critical != "" {
@@ -600,7 +598,7 @@ func (m *board) decisionPreviewLines(r boardRow, w int) []previewLine {
 		}
 		add("", "")
 		pending := 0
-		if m.pendingOptBead == r.bead.ID && m.pendingOpt > 0 {
+		if pa == nil && m.pendingOptBead == r.bead.ID && m.pendingOpt > 0 {
 			pending = m.pendingOpt
 		}
 		for _, o := range q.Options {
@@ -611,11 +609,19 @@ func (m *board) decisionPreviewLines(r boardRow, w int) []previewLine {
 				st = ansiGreen + ansiBold
 				suf = " ★"
 			}
-			if pending == o.Number {
+			if pa != nil && pa.option == o.Number {
+				prefix = "✓ "
+				st = ansiGreen + ansiBold
+				suf += " (" + pa.optionTag() + ")"
+			} else if pending == o.Number {
 				prefix = "❯ "
 				st = ansiInvert + ansiBold
 			}
-			paraOpt(o.Number, st, "  ", fmt.Sprintf("%s%d. %s%s", prefix, o.Number, o.Label, suf))
+			optTarget := o.Number
+			if pa != nil {
+				optTarget = 0
+			}
+			paraOpt(optTarget, st, "  ", fmt.Sprintf("%s%d. %s%s", prefix, o.Number, o.Label, suf))
 		}
 		if pending > 0 {
 			add("", "")
@@ -641,6 +647,9 @@ func (m *board) decisionPreviewLines(r boardRow, w int) []previewLine {
 			hdr = fmt.Sprintf("Open Question (C%d · free text · t answer · A full)", q.ClassN)
 		}
 		add(ansiYellow+ansiBold, hdr)
+		if pa != nil {
+			para(ansiGreen+ansiBold, "  ", pa.bannerLine())
+		}
 		parts := splitQuestionParts(q)
 		if parts.critical != "" {
 			para(ansiRed+ansiBold, "  ", parts.critical)

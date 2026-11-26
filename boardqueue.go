@@ -166,15 +166,21 @@ func classifyQueueRow(r boardRow) queueItem {
 }
 
 func (m *board) rebuildQueue() {
+	prevCur := m.queueCur
 	var prevID string
 	if it := m.queueSel(); it != nil {
 		prevID = it.row.bead.ID
+	}
+	prevScroll := m.queueScroll
+	var prevTopID string
+	if prevScroll > 0 && prevScroll < len(m.queue) {
+		prevTopID = m.queue[prevScroll].row.bead.ID
 	}
 	items, hidden := buildQueueItems(m.all, m.data.Snooze, m.now(), m.queueShowSnoozed)
 	if len(m.queueDone) > 0 {
 		filtered := items[:0]
 		for _, it := range items {
-			if !m.queueDone[it.row.bead.ID] {
+			if _, done := m.queueDone[it.row.bead.ID]; !done {
 				filtered = append(filtered, it)
 			}
 		}
@@ -182,19 +188,44 @@ func (m *board) rebuildQueue() {
 	}
 	m.queue = items
 	m.queueSnoozed = hidden
-	m.queueCur = 0
+	if len(m.queue) == 0 {
+		m.queueCur = 0
+		m.queueScroll = 0
+		return
+	}
+	found := -1
 	if prevID != "" {
 		for i, it := range m.queue {
 			if it.row.bead.ID == prevID {
-				m.queueCur = i
+				found = i
 				break
 			}
 		}
 	}
-	if len(m.queue) == 0 {
-		m.queueCur = 0
-	} else if m.queueCur >= len(m.queue) {
-		m.queueCur = len(m.queue) - 1
+	if found >= 0 {
+		m.queueCur = found
+	} else {
+		m.queueCur = max(0, min(prevCur, len(m.queue)-1))
+	}
+	scroll := prevScroll
+	if prevTopID != "" {
+		topFound := -1
+		for i, it := range m.queue {
+			if it.row.bead.ID == prevTopID {
+				topFound = i
+				break
+			}
+		}
+		if topFound >= 0 {
+			scroll = topFound
+		} else {
+			scroll = min(prevScroll, len(m.queue)-1)
+		}
+	}
+	if m.queueCardsFit > 0 {
+		m.queueScroll = clampIndexScroll(len(m.queue), m.queueCur, scroll, m.queueCardsFit)
+	} else {
+		m.queueScroll = max(0, min(scroll, m.queueCur))
 	}
 }
 
@@ -215,6 +246,9 @@ func (m *board) openQueue() []cmd {
 // option on a structured needs_me question in one keystroke (f), optionally
 // attaching an extra note (e) before sending.
 func (m *board) followRecommendation(r boardRow, fromQueue bool) []cmd {
+	if m.guardAnswerInFlight(r.bead.ID) {
+		return nil
+	}
 	notes := r.bead.Notes
 	if d := m.details[r.bead.ID]; d != nil && d.full != nil {
 		notes = d.full.Notes
@@ -374,6 +408,9 @@ func (m *board) queueKey(k string) []cmd {
 	}
 	r := it.row
 	if len(k) == 1 && k[0] >= '1' && k[0] <= '9' {
+		if m.guardAnswerInFlight(r.bead.ID) {
+			return nil
+		}
 		n := int(k[0] - '0')
 		switch it.kind {
 		case queueKindPrompt:
@@ -400,6 +437,9 @@ func (m *board) queueKey(k string) []cmd {
 	case "f":
 		return m.followRecommendation(r, true)
 	case "t":
+		if m.guardAnswerInFlight(r.bead.ID) {
+			return nil
+		}
 		switch it.kind {
 		case queueKindPrompt:
 			m.status = "approval prompts require picking a numbered option (press ↵)"
@@ -470,18 +510,23 @@ func (m *board) queueLines(w, body, rowOffset int) []string {
 	now := m.now()
 	linesPerCard := 2
 	cardsFit := max(1, body/linesPerCard)
-	start := 0
-	if m.queueCur >= cardsFit {
-		start = m.queueCur - cardsFit + 1
-	}
+	m.queueCardsFit = cardsFit
+	m.queueScroll = clampIndexScroll(len(m.queue), m.queueCur, m.queueScroll, cardsFit)
+	start := m.queueScroll
 
 	var out []string
 	for i := start; i < len(m.queue) && len(out) < body; i++ {
 		it := m.queue[i]
 		r := it.row
 		when := age(r.bead.UpdatedAt, now)
+		badge := it.kind.badge()
+		badgeColor := it.kind.color()
+		if r.pending != nil {
+			badge = r.pending.queueBadge()
+			badgeColor = r.pending.rowColor()
+		}
 		var tags []string
-		tags = append(tags, it.kind.badge())
+		tags = append(tags, badge)
 		if it.classN >= 0 {
 			tags = append(tags, fmt.Sprintf("C%d", it.classN))
 		}
@@ -496,7 +541,9 @@ func (m *board) queueLines(w, body, rowOffset int) []string {
 		if sub == "" {
 			sub = r.bead.Title
 		}
-		if it.recLabel != "" && w >= 55 {
+		if r.pending != nil {
+			sub = r.pending.rowLine()
+		} else if it.recLabel != "" && w >= 55 {
 			sub = fmt.Sprintf("%s → ★%d %s", shortTitle(sub, max(16, w/2)), *it.rec, it.recLabel)
 		}
 
@@ -505,17 +552,19 @@ func (m *board) queueLines(w, body, rowOffset int) []string {
 		if i == m.queueCur {
 			out = append(out, ansiInvert+rpcViewFit("▌ "+meta, w)+ansiReset)
 		} else {
-			out = append(out, "  "+it.kind.color()+fit(it.kind.badge(), 8)+ansiReset+" "+ansiBold+r.bead.ID+ansiReset+" "+ansiDim+fmt.Sprintf("P%d %s", r.bead.Priority, when)+ansiReset+queueTagSuffix(it, w))
+			out = append(out, "  "+badgeColor+fit(badge, 8)+ansiReset+" "+ansiBold+r.bead.ID+ansiReset+" "+ansiDim+fmt.Sprintf("P%d %s", r.bead.Priority, when)+ansiReset+queueTagSuffix(it, w))
 			out[len(out)-1] = clampStyledLine(out[len(out)-1], "  "+meta, w)
 		}
 		if len(out) < body {
 			scrRow2 := rowOffset + len(out)
 			m.hits.recordRow(scrRow2, i)
-			if i == m.queueCur {
-				out = append(out, ansiDim+ansiBold+rpcViewFit("   "+sub, w)+ansiReset)
-			} else {
-				out = append(out, ansiDim+rpcViewFit("   "+sub, w)+ansiReset)
+			subStyle := ansiDim
+			if r.pending != nil {
+				subStyle = ansiGreen + ansiBold
+			} else if i == m.queueCur {
+				subStyle = ansiDim + ansiBold
 			}
+			out = append(out, subStyle+rpcViewFit("   "+sub, w)+ansiReset)
 		}
 	}
 	return out

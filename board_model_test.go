@@ -548,6 +548,12 @@ func TestBeadEdits(t *testing.T) {
 		t.Fatalf("n left bk-old in %s", sectionName(r.group))
 	}
 	press(t, m, "S", "b")
+	// Moving bk-old out of next into blocked keeps the cursor in next rather
+	// than following bk-old into another section.
+	if r := m.sel(); r == nil || r.group != sectionNext || r.bead.ID != "bk-nx2" {
+		t.Fatalf("after S b moved bk-old out of next, selected %+v, want bk-nx2 in next", r)
+	}
+	selectBead(t, m, "bk-old")
 	press(t, m, "S", "b") // already blocked: nothing to do
 	press(t, m, "S", "z") // not a status: cancelled
 	press(t, m, "P", "0")

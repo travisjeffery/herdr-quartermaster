@@ -37,11 +37,12 @@ type boardRow struct {
 	// prs, linear, moves and runs are for the detail pane: the bead's PRs as
 	// the ticker last saw them, its Linear key, where that issue should be,
 	// and its workflow runs.
-	prs    []PR
-	linear string
-	moves  []string
-	runs   []Run
-	native *rpcVisibility
+	prs     []PR
+	linear  string
+	moves   []string
+	runs    []Run
+	native  *rpcVisibility
+	pending *pendingAnswer
 }
 
 func searchText(parts ...string) string {
@@ -317,6 +318,7 @@ type (
 		beads []Bead
 		at    time.Time
 		err   error
+		seq   int
 	}
 	agentsMsg struct {
 		agents []Agent
@@ -384,12 +386,15 @@ type board struct {
 	data boardData
 	// all is every row; rows is what's shown and what selection indexes: all,
 	// narrowed by the '/' filter.
-	all    []boardRow
-	rows   []boardRow
-	cur    int
-	sort   sortMode
-	filter boardFilter
-	view   boardView
+	all         []boardRow
+	rows        []boardRow
+	cur         int
+	listScroll  int
+	listHeight  int
+	listCompact bool
+	sort        sortMode
+	filter      boardFilter
+	view        boardView
 	// back is the view help returns to.
 	back   boardView
 	status string
@@ -401,6 +406,7 @@ type board struct {
 	// reloadAgain asks for another bead load once the running one returns,
 	// because an action wrote after it started.
 	reloadAgain       bool
+	beadsSeq          int
 	beadsErr          string
 	agentsAt, localAt time.Time
 	beadsTried        time.Time
@@ -421,6 +427,9 @@ type board struct {
 	// confirmation so viewAnswer and wide split previews highlight it inline.
 	pendingOpt     int
 	pendingOptBead string
+	// pendingAnswers tracks optimistic in-flight and recently-submitted answers
+	// keyed by bead ID so row and detail/answer views reflect submission at once.
+	pendingAnswers map[string]*pendingAnswer
 
 	// Responsive layout mode and hit targets for SGR mouse/touch interaction.
 	layout layoutMode
@@ -430,9 +439,11 @@ type board struct {
 	queueHome        bool
 	queue            []queueItem
 	queueCur         int
+	queueScroll      int
+	queueCardsFit    int
 	queueSnoozed     int
 	queueShowSnoozed bool
-	queueDone        map[string]bool
+	queueDone        map[string]int
 
 	// Live Events / Inbox view (E) state.
 	feed      []NotifyFeedEvent
@@ -460,28 +471,276 @@ type board struct {
 
 func newBoard(cfg Config, env boardEnv, data boardData, now func() time.Time) *board {
 	m := &board{
-		cfg:       cfg,
-		env:       env,
-		now:       now,
-		data:      data,
-		details:   map[string]*beadDetail{},
-		marked:    map[string]bool{},
-		gcMarked:  map[string]bool{},
-		queueDone: map[string]bool{},
+		cfg:            cfg,
+		env:            env,
+		now:            now,
+		data:           data,
+		details:        map[string]*beadDetail{},
+		marked:         map[string]bool{},
+		gcMarked:       map[string]bool{},
+		pendingAnswers: map[string]*pendingAnswer{},
+		queueDone:      map[string]int{},
 	}
 	m.rebuild()
 	m.rebuildEvents()
 	return m
 }
 
-// rebuild lays the rows out again from data, keeping the selection on the
-// same bead when it is still shown.
-func (m *board) rebuild() {
-	var id string
-	if r := m.sel(); r != nil {
-		id = r.bead.ID
+// rowAnchor captures the user's position before rebuild() so cursor selection
+// stays in place within the same section when a bead moves sections or leaves
+// the current view, while tracking the same bead ID when it stays in section.
+type rowAnchor struct {
+	valid      bool
+	cur        int
+	id         string
+	group      Group
+	sectionPos int
+	nextInSec  string
+	prevInSec  string
+}
+
+func captureRowAnchor(rows []boardRow, cur int) rowAnchor {
+	if cur < 0 || cur >= len(rows) || rows[cur].header != "" {
+		return rowAnchor{}
 	}
+	a := rowAnchor{
+		valid: true,
+		cur:   cur,
+		id:    rows[cur].bead.ID,
+		group: rows[cur].group,
+	}
+	for i := cur - 1; i >= 0 && rows[i].header == ""; i-- {
+		if a.prevInSec == "" {
+			a.prevInSec = rows[i].bead.ID
+		}
+		a.sectionPos++
+	}
+	if cur+1 < len(rows) && rows[cur+1].header == "" {
+		a.nextInSec = rows[cur+1].bead.ID
+	}
+	return a
+}
+
+func restoreCursor(rows []boardRow, a rowAnchor) int {
+	if len(rows) == 0 {
+		return -1
+	}
+	if !a.valid {
+		return nextSelectable(rows, 0, 1)
+	}
+	var secIndices []int
+	nextIdx := -1
+	prevIdx := -1
+	for i, r := range rows {
+		if r.header != "" || r.group != a.group {
+			continue
+		}
+		if r.bead.ID == a.id {
+			return i
+		}
+		secIndices = append(secIndices, i)
+		if a.nextInSec != "" && r.bead.ID == a.nextInSec {
+			nextIdx = i
+		}
+		if a.prevInSec != "" && r.bead.ID == a.prevInSec {
+			prevIdx = i
+		}
+	}
+	if len(secIndices) > 0 {
+		if nextIdx >= 0 {
+			return nextIdx
+		}
+		if a.sectionPos >= 0 && a.sectionPos < len(secIndices) {
+			return secIndices[a.sectionPos]
+		}
+		if prevIdx >= 0 {
+			return prevIdx
+		}
+		return secIndices[len(secIndices)-1]
+	}
+	idx := min(max(0, a.cur), len(rows)-1)
+	if i := nextSelectable(rows, idx, 1); i >= 0 {
+		return i
+	}
+	return nextSelectable(rows, idx, -1)
+}
+
+// scrollAnchor remembers the row at the top of the list viewport across
+// rebuilds so row insertions/removals above the viewport do not jump the screen.
+type scrollAnchor struct {
+	valid  bool
+	scroll int
+	isHdr  bool
+	id     string
+	group  Group
+}
+
+func captureScrollAnchor(rows []boardRow, scroll int) scrollAnchor {
+	if scroll <= 0 || scroll >= len(rows) {
+		return scrollAnchor{scroll: max(0, scroll)}
+	}
+	r := rows[scroll]
+	if r.header != "" {
+		return scrollAnchor{valid: true, scroll: scroll, isHdr: true, group: r.group}
+	}
+	return scrollAnchor{valid: true, scroll: scroll, id: r.bead.ID, group: r.group}
+}
+
+func restoreListScroll(rows []boardRow, cur int, sa scrollAnchor, listH int, compact bool) int {
+	if len(rows) == 0 {
+		return 0
+	}
+	scroll := sa.scroll
+	if sa.valid {
+		found := -1
+		for i, r := range rows {
+			if sa.isHdr {
+				if r.header != "" && r.group == sa.group {
+					found = i
+					break
+				}
+			} else if r.header == "" && r.bead.ID == sa.id && r.group == sa.group {
+				found = i
+				break
+			}
+		}
+		if found >= 0 {
+			scroll = found
+		} else {
+			scroll = min(sa.scroll, len(rows)-1)
+		}
+	}
+	if listH > 0 {
+		if compact {
+			return clampCompactScroll(rows, cur, scroll, listH)
+		}
+		return clampListScroll(rows, cur, scroll, listH)
+	}
+	scroll = max(0, min(scroll, len(rows)-1))
+	if cur >= 0 && cur < scroll {
+		scroll = cur
+		if scroll > 0 && rows[scroll-1].header != "" {
+			scroll--
+		}
+	}
+	return scroll
+}
+
+// clampListScroll keeps scroll within bounds and ensures cur (plus its
+// immediate section header when cur is the first row under it) stays visible
+// inside a viewport of listH lines without snapping unnecessarily.
+func clampListScroll(rows []boardRow, cur, scroll, listH int) int {
+	if len(rows) == 0 || listH <= 0 {
+		return 0
+	}
+	maxScroll := max(0, len(rows)-listH)
+	scroll = max(0, min(scroll, maxScroll))
+	if cur < 0 || cur >= len(rows) {
+		return scroll
+	}
+	wantTop := cur
+	if cur > 0 && rows[cur-1].header != "" {
+		wantTop = cur - 1
+	}
+	if wantTop < scroll {
+		scroll = wantTop
+	}
+	if cur >= scroll+listH {
+		scroll = cur - listH + 1
+	}
+	if scroll > 0 && scroll == cur && rows[scroll-1].header != "" && cur-scroll+1 < listH {
+		scroll--
+	}
+	return max(0, min(scroll, maxScroll))
+}
+
+// clampCompactScroll is clampListScroll for 2-line compact cards (headers = 1 line,
+// bead rows = 2 lines).
+func clampCompactScroll(rows []boardRow, cur, scroll, body int) int {
+	if len(rows) == 0 || body <= 0 {
+		return 0
+	}
+	rowHeight := func(i int) int {
+		if rows[i].header != "" {
+			return 1
+		}
+		return 2
+	}
+	scroll = max(0, min(scroll, len(rows)-1))
+	if cur < 0 || cur >= len(rows) {
+		return scroll
+	}
+	wantTop := cur
+	if cur > 0 && rows[cur-1].header != "" && 1+rowHeight(cur) <= body {
+		wantTop = cur - 1
+	}
+	if wantTop < scroll {
+		scroll = wantTop
+	}
+	for scroll < cur {
+		used := 0
+		for i := scroll; i <= cur && i < len(rows); i++ {
+			used += rowHeight(i)
+		}
+		if used <= body {
+			break
+		}
+		scroll++
+	}
+	if scroll > 0 && scroll == cur && rows[scroll-1].header != "" && 1+rowHeight(cur) <= body {
+		scroll--
+	}
+	for scroll > 0 {
+		used := 0
+		for i := scroll - 1; i < len(rows); i++ {
+			used += rowHeight(i)
+		}
+		if used <= body {
+			scroll--
+		} else {
+			break
+		}
+	}
+	return scroll
+}
+
+// clampIndexScroll keeps a uniform-height list's scroll offset stable while
+// ensuring cur stays visible within fitCount items.
+func clampIndexScroll(total, cur, scroll, fitCount int) int {
+	if total <= 0 || fitCount <= 0 {
+		return 0
+	}
+	maxScroll := max(0, total-fitCount)
+	scroll = max(0, min(scroll, maxScroll))
+	if cur < scroll {
+		scroll = cur
+	}
+	if cur >= scroll+fitCount {
+		scroll = cur - fitCount + 1
+	}
+	return max(0, min(scroll, maxScroll))
+}
+
+// rebuild lays the rows out again from data, keeping the selection on the
+// same bead when it stays in its section, or at the user's place in that
+// section (or nearest row) if it moved sections or left the view.
+func (m *board) rebuild() {
+	anchor := captureRowAnchor(m.rows, m.cur)
+	sa := captureScrollAnchor(m.rows, m.listScroll)
 	m.all = buildRows(m.cfg, m.data, m.sort)
+	if len(m.pendingAnswers) > 0 {
+		for i := range m.all {
+			if m.all[i].header != "" {
+				continue
+			}
+			if pa := m.pendingAnswers[m.all[i].bead.ID]; pa != nil {
+				cp := *pa
+				m.all[i].pending = &cp
+				m.all[i].line = cp.rowLine()
+				m.all[i].color = cp.rowColor()
+			}
+		}
+	}
 	present := make(map[string]bool, len(m.all))
 	for _, r := range m.all {
 		if r.header == "" {
@@ -494,15 +753,8 @@ func (m *board) rebuild() {
 		}
 	}
 	m.rows = filterRows(m.all, m.filter.query)
-	m.cur = -1
-	for i, r := range m.rows {
-		if r.header == "" && id != "" && r.bead.ID == id {
-			m.cur = i
-		}
-	}
-	if m.cur < 0 {
-		m.cur = nextSelectable(m.rows, 0, 1)
-	}
+	m.cur = restoreCursor(m.rows, anchor)
+	m.listScroll = restoreListScroll(m.rows, m.cur, sa, m.listHeight, m.listCompact)
 	m.rebuildQueue()
 }
 
@@ -566,9 +818,11 @@ func (m *board) loadBeads() cmd {
 	}
 	m.beadsLoading = true
 	m.beadsTried = m.now()
+	m.beadsSeq++
+	seq := m.beadsSeq
 	return func() msg {
 		b, err := m.env.beads()
-		return beadsMsg{b, time.Now(), err}
+		return beadsMsg{beads: b, at: time.Now(), err: err, seq: seq}
 	}
 }
 
@@ -655,7 +909,16 @@ func (m *board) apply(x msg) []cmd {
 		}
 		m.beadsErr = ""
 		m.data.Beads, m.data.BeadsAt = x.beads, x.at
-		m.queueDone = map[string]bool{}
+		for id, clearAfter := range m.queueDone {
+			if x.seq == 0 || x.seq > clearAfter {
+				delete(m.queueDone, id)
+			}
+		}
+		for id, pa := range m.pendingAnswers {
+			if pa.phase == pendingAnswerSent && (x.seq == 0 || x.seq > pa.clearAfterSeq) {
+				delete(m.pendingAnswers, id)
+			}
+		}
 		// Notes and status may have moved: look the details up again.
 		m.details = map[string]*beadDetail{}
 		m.rebuild()
@@ -665,6 +928,21 @@ func (m *board) apply(x msg) []cmd {
 		m.agentsAt = m.now()
 		if x.err == nil {
 			m.data.Agents = x.agents
+			if len(m.pendingAnswers) > 0 {
+				byName := make(map[string]Agent, len(x.agents))
+				for _, a := range x.agents {
+					if a.Name != "" {
+						byName[a.Name] = a
+					}
+				}
+				for id, pa := range m.pendingAnswers {
+					if pa.kind == answerKindPrompt && pa.phase == pendingAnswerSent {
+						if a, ok := byName[id]; !ok || a.Status != "blocked" {
+							delete(m.pendingAnswers, id)
+						}
+					}
+				}
+			}
 			m.rebuild()
 		}
 	case localMsg:
@@ -715,19 +993,42 @@ func (m *board) apply(x msg) []cmd {
 		default:
 			m.status = x.text
 		}
-		if x.closeAnswer && x.err == nil && m.view == viewAnswer && m.ans != nil {
+		needRebuild := false
+		if x.answeredID != "" {
+			if pa := m.pendingAnswers[x.answeredID]; pa != nil {
+				if x.err != nil || !x.reload {
+					delete(m.pendingAnswers, x.answeredID)
+				} else {
+					pa.phase = pendingAnswerSent
+					pa.clearAfterSeq = m.beadsSeq
+				}
+				needRebuild = true
+			}
+		}
+		if x.closeAnswer && x.err == nil && m.view == viewAnswer && m.ans != nil && (x.answeredID == "" || m.ans.beadID == x.answeredID) {
 			m.view = m.ans.back
 			m.ans = nil
 		}
 		var cmds []cmd
 		if x.advanceQueue && x.err == nil {
 			if x.answeredID != "" {
-				m.queueDone[x.answeredID] = true
+				if m.queueDone == nil {
+					m.queueDone = map[string]int{}
+				}
+				m.queueDone[x.answeredID] = m.beadsSeq
 			}
-			m.rebuildQueue()
-			if m.view == viewAnswer && m.ans != nil && m.ans.fromQueue {
+			if needRebuild {
+				m.rebuild()
+				needRebuild = false
+			} else {
+				m.rebuildQueue()
+			}
+			if m.view == viewAnswer && m.ans != nil && m.ans.fromQueue && (x.answeredID == "" || m.ans.beadID == x.answeredID) {
 				cmds = append(cmds, m.openQueueStep(min(m.queueCur, max(0, len(m.queue)-1)))...)
 			}
+		}
+		if needRebuild {
+			m.rebuild()
 		}
 		if x.quit && x.err == nil {
 			m.quit = true
@@ -826,6 +1127,7 @@ func (m *board) key(k string) []cmd {
 		if m.filter.key(k) {
 			m.rows = filterRows(m.all, m.filter.query)
 			m.cur = nextSelectable(m.rows, 0, 1)
+			m.listScroll = 0
 		}
 		return nil
 	}
@@ -1185,6 +1487,9 @@ func (m *board) beadKey(k string, r boardRow) []cmd {
 		// changing its autonomy level (U and 0 still manage autonomy).
 		if len(k) == 1 && k[0] >= '1' && k[0] <= '9' {
 			if q, ok := m.activeStructuredQuestion(r); ok {
+				if m.guardAnswerInFlight(id) {
+					return nil
+				}
 				n := int(k[0] - '0')
 				if n > len(q.Options) {
 					m.status = fmt.Sprintf("no option %d (1-%d; press U for autonomy)", n, len(q.Options))
@@ -1769,6 +2074,9 @@ func (m *board) askCoordinatorBar() {
 // option path instead of raw pane text.
 func (m *board) answer(r boardRow) {
 	id := r.bead.ID
+	if m.guardAnswerInFlight(id) {
+		return
+	}
 	if why := unanswerable(r.agent); why != "" {
 		m.status = id + ": " + why
 		return
@@ -1776,11 +2084,19 @@ func (m *board) answer(r boardRow) {
 	name := r.agent.Name
 	m.ask = &ask{prompt: "answer " + name + ": ", text: true, then: func(text string) []cmd {
 		m.ask = confirm(fmt.Sprintf("send to %s: %q?", name, shortTitle(text, 50)), func() []cmd {
+			if m.guardAnswerInFlight(id) {
+				return nil
+			}
+			m.startPendingAnswer(id, pendingAnswer{
+				kind:  answerKindDirect,
+				label: "reply: " + shortTitle(text, 34),
+			})
+			m.status = "sending reply to " + name + "…"
 			return []cmd{func() msg {
 				// The agent may have moved on while the answer was typed.
 				agents, err := m.env.agents()
 				if err != nil {
-					return doneMsg{err: err}
+					return doneMsg{err: err, answeredID: id}
 				}
 				var now *Agent
 				for i := range agents {
@@ -1789,9 +2105,9 @@ func (m *board) answer(r boardRow) {
 					}
 				}
 				if why := unanswerable(now); why != "" {
-					return doneMsg{err: fmt.Errorf("not sent: %s", why)}
+					return doneMsg{err: fmt.Errorf("not sent: %s", why), answeredID: id}
 				}
-				return doneMsg{text: "sent to " + name, err: m.env.prompt(name, text)}
+				return doneMsg{text: "sent to " + name, err: m.env.prompt(name, text), answeredID: id}
 			}}
 		})
 		return nil
