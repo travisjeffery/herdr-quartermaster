@@ -115,7 +115,18 @@ func readJournal(since time.Time) ([]journalRecord, error) {
 }
 
 // autoTag is the head of an AUTO: note: "AUTO: [<actor> L<n> C<c>] ".
-var autoTag = regexp.MustCompile(`^AUTO:\s*\[(\w+)\s+L(\d)\s+C(\d)\]\s*`)
+// Actor names may include hyphens (e.g. "inbox-runner").
+var autoTag = regexp.MustCompile(`^AUTO:\s*\[([A-Za-z0-9_-]+)\s+L(\d)\s+C(\d)\]\s*`)
+
+// autoActor is the actor named in an AUTO: note's tag ("worker", "coordinator",
+// "inbox-runner"), or "" when the note carries no tag.
+func autoActor(note string) string {
+	m := autoTag.FindStringSubmatch(note)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
 
 // autoClass is an AUTO: note's class, -1 when it carries no tag (notes from
 // before the dial).
@@ -225,11 +236,14 @@ func budgetSpent(b BudgetConfig, recs []journalRecord, id string, class int, act
 }
 
 // The circuit breaker caps a bead at breakerCap when it loops: breakerRun
-// failed checks in a row within budgetWindow, or the same AUTO: step
-// breakerRun times running. It only lowers; `autonomy level` by TJ lifts it.
+// consecutive failed checks of the same (action, class) step (or
+// breakerTotalRun consecutive failed checks across any actions) within
+// budgetWindow, or the same non-inbox-runner AUTO: step breakerRun times
+// running. It only lowers; `autonomy level` by TJ lifts it.
 const (
-	breakerCap = 2
-	breakerRun = 3
+	breakerCap      = 2
+	breakerRun      = 3
+	breakerTotalRun = 6
 )
 
 type autonomyBreaker struct {
@@ -237,9 +251,17 @@ type autonomyBreaker struct {
 	Reason string    `json:"reason"`
 }
 
-// failedRun says whether bead id's last breakerRun checks in recs all failed.
+// failedRun says whether bead id's recent failed checks look like a loop:
+// breakerRun (3) consecutive failures of the same (action, class) step, or
+// breakerTotalRun (6) consecutive failed checks overall regardless of action.
+// Checking 2-3 distinct candidate actions while classifying a step does not
+// false-trip the breaker.
 func failedRun(recs []journalRecord, id string) bool {
-	n := 0
+	total := 0
+	same := 0
+	var lastAction string
+	lastClass := -1
+	sameBroken := false
 	for _, r := range slices.Backward(recs) {
 		if r.Kind != journalCheck || r.Bead != id {
 			continue
@@ -247,19 +269,38 @@ func failedRun(recs []journalRecord, id string) bool {
 		if r.Pass {
 			return false
 		}
-		if n++; n == breakerRun {
+		total++
+		if total == 1 {
+			lastAction, lastClass = r.Action, r.Class
+			same = 1
+		} else if !sameBroken && r.Action == lastAction && r.Class == lastClass {
+			same++
+		} else {
+			sameBroken = true
+		}
+		if same >= breakerRun || total >= breakerTotalRun {
 			return true
 		}
 	}
 	return false
 }
 
-// repeatedRun says whether the last breakerRun AUTO: notes did the same thing.
+// repeatedRun says whether the last breakerRun non-inbox-runner AUTO: notes
+// did the same thing. Headless inbox-runner triage notes are bounded separately
+// by [inbox_runner] max_attempts and must not trip a worker's circuit breaker
+// when distinct CI failures trigger routine triage on the same bead.
 func repeatedRun(notes []string) bool {
-	if len(notes) < breakerRun {
+	var filtered []string
+	for _, n := range notes {
+		if autoActor(n) == "inbox-runner" {
+			continue
+		}
+		filtered = append(filtered, n)
+	}
+	if len(filtered) < breakerRun {
 		return false
 	}
-	last := notes[len(notes)-breakerRun:]
+	last := filtered[len(filtered)-breakerRun:]
 	for _, n := range last[1:] {
 		if autoWhat(n) != autoWhat(last[0]) {
 			return false

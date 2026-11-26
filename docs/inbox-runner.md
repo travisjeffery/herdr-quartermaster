@@ -39,7 +39,23 @@ kinds = [                      # allowlisted non-human-gated event kinds (defaul
 # command = ["pi", "--no-approve", "--print", "--no-session", "--model", "quartermaster/coordinator-auto"]
 notify = true                  # emit privacy-safe desktop summary via notify-send on handled items or failure
 suppress_interactive_nudges = false  # opt-in: stop routine ticker nudges to the interactive coordinator for allowlisted kinds while enabled
+auto_answer_needs_me = false   # opt-in: allow dial-gated auto-answering of structured, non-critical needs_me questions with a Recommendation
+auto_answer_max_class = 5      # max impact class for auto_answer_needs_me (0-7; default 5; classes 8 and 9 are always human-only)
 ```
+
+When `auto_answer_needs_me = true`, the headless inbox runner may also evaluate
+structured `needs_me` questions (`QUESTION:` / `OPTIONS:` / `CLASS:`) whose
+`Clears.Kind` is `needs_me` and that pass all deterministic preflight checks:
+the bead is actively `needs_me`, has no pending `RUN:` command, has no
+`CRITICAL:` line, states an explicit valid `Recommendation: <n>` and `CLASS: <c>`,
+and satisfies `c <= min(bead_level, auto_answer_max_class)` (where
+`auto_answer_max_class` is capped at `0..7`). The runner must still verify live
+evidence independently and answer through `quartermaster answer <bead> <choice>
+--question --expect <hash> --class <c> --by inbox-runner --reason "..."`, which
+re-enforces the hash, autonomy dial, and `CRITICAL:`/`RUN:` blocks at execution
+time. Approval prompts (`prompt`), `agent_blocked`, `breaker_tripped`,
+`lease_expired`, `unsafe_auto_merge`, `RUN:` commands, `CRITICAL:` questions,
+and unstructured/free-text questions remain unconditionally human-gated.
 
 When `enabled = true` and `suppress_interactive_nudges = true`, the ticker stops
 nudging the interactive coordinator pane (and skips enqueueing `quartermaster.inbox`

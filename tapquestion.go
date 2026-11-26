@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"regexp"
@@ -319,6 +320,39 @@ func (q NeedsMeQuestion) recommendation() *int {
 	return nil
 }
 
+// isCritical reports whether q carries a CRITICAL: line, meaning only the user
+// may answer it regardless of the autonomy dial.
+func (q NeedsMeQuestion) isCritical() bool {
+	for _, l := range q.Lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "CRITICAL:") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPendingRun reports whether notes contain an unanswered RUN: command,
+// either as a trailing RUN: note (pendingCommand) or anywhere after the last
+// answer boundary (e.g. a RUN: line paired with a QUESTION:/OPTIONS: block).
+func hasPendingRun(notes string) bool {
+	if pendingCommand(notes) != "" {
+		return true
+	}
+	lines := noteLines(notes)
+	base := 0
+	for i, l := range lines {
+		if isAnswerBoundaryLine(l) {
+			base = i + 1
+		}
+	}
+	for _, l := range lines[base:] {
+		if strings.HasPrefix(l, "RUN:") {
+			return true
+		}
+	}
+	return false
+}
+
 // Summary is the question in one line: its first line, critical or not.
 func (q NeedsMeQuestion) Summary() string {
 	if len(q.Lines) == 0 {
@@ -497,6 +531,107 @@ func answerNeedsMeTextVia(env promptEnv, id, choice, text, expect, via string) (
 	if err := appendJournal(journalRecord{At: time.Now(), Kind: journalNeedsMe, Bead: id, Class: -1, Text: note}); err != nil {
 		return "", fmt.Errorf("answered, but journaling it failed: %w", err)
 	}
+	switch {
+	case a == nil:
+		return msg + notPrompted(env, id, "no worker is running"), nil
+	case !agentReady(a):
+		return msg + notPrompted(env, id, fmt.Sprintf("its worker is %s", a.Status)), nil
+	case env.tell == nil:
+		return msg + notPrompted(env, id, "this process cannot prompt it"), nil
+	}
+	if err := env.tell(host, a, prompt); err != nil {
+		return msg + notPrompted(env, id, "prompting it failed: "+err.Error()), nil
+	}
+	return msg + "; its worker has been prompted with the answer", nil
+}
+
+// answerNeedsMeBy records an answer to a bead's structured needs_me question.
+// When by is "" or "TJ", it preserves the human tap/board/CLI path verbatim.
+// When by is another actor (such as "coordinator" or "inbox-runner"), it fails
+// closed on non-structured questions, free-text-only answers, RUN: commands,
+// CRITICAL: lines, missing CLASS or --class, classes above maxStanding (7), or
+// classes above the bead's effective autonomy level (never lowering below the
+// worker's stated CLASS), records both NEEDS_ME ANSWERED and AUTO notes,
+// returns the bead to in_progress, journals the decision, and prompts the idle
+// worker.
+func answerNeedsMeBy(env promptEnv, id, choice, text, expect, by, via, reason string, class int) (string, error) {
+	if by == "" || by == "TJ" {
+		return answerNeedsMeTextVia(env, id, choice, text, expect, cmp.Or(via, "cli"))
+	}
+	if expect == "" {
+		return "", fmt.Errorf("--expect <hash> is required: inspect the live question on %s first", id)
+	}
+	if choice == "" || choice == tapChoiceFreeText {
+		return "", errors.New("autonomous answers require an enumerated option number, not free text")
+	}
+	if class < 0 || class > 9 {
+		return "", errors.New("--class 0-9 is required when answering a needs_me question autonomously")
+	}
+	b, err := env.show(id)
+	if err != nil {
+		return "", err
+	}
+	if b.Status != StatusNeedsMe {
+		return "", fmt.Errorf("the question is gone: %s is %s, not needs_me", id, b.Status)
+	}
+	if hasPendingRun(b.Notes) {
+		return "", fmt.Errorf("refusing to auto-answer %s: pending RUN: command requires the user", id)
+	}
+	q, ok := parseNeedsMeQuestion(b.Notes)
+	if !ok {
+		return "", fmt.Errorf("refusing to auto-answer %s: no structured QUESTION/OPTIONS block", id)
+	}
+	if q.Hash != expect {
+		return "", fmt.Errorf("the question changed: %s now asks [%s] %s (%s), not [%s]", id, q.Hash, q.Summary(), q.Choices(), expect)
+	}
+	if q.isCritical() {
+		return "", fmt.Errorf("refusing to auto-answer %s: CRITICAL question requires the user", id)
+	}
+	if q.ClassN < 0 {
+		return "", fmt.Errorf("refusing to auto-answer %s: question carries no CLASS line", id)
+	}
+	o, err := q.choose(choice)
+	if err != nil {
+		return "", err
+	}
+	effectiveClass := max(class, q.ClassN)
+	if effectiveClass > maxStanding {
+		return "", fmt.Errorf("%w: answering %s (class %d) exceeds standing autonomy max %d; only the user may answer it", errNotAutonomous, id, effectiveClass, maxStanding)
+	}
+	if env.level == nil {
+		return "", errors.New("cannot check autonomy level for needs_me answer")
+	}
+	lvl, why := env.level(id)
+	prefix, err := allow(id, by, fmt.Sprintf("answering %d %s", o.Number, shortTitle(o.Label, 40)), effectiveClass, lvl, why)
+	if err != nil {
+		return "", err
+	}
+	host, a := questionWorker(env, b)
+	if a != nil && a.Status == "working" {
+		return "", errWorkerWorking
+	}
+	via = cmp.Or(via, "cli")
+	reasonText := strings.TrimSpace(reason)
+	if reasonText == "" {
+		reasonText = "verified against live evidence"
+	}
+	noteLine1 := fmt.Sprintf("NEEDS_ME ANSWERED: %d %s to %s [%s] by %s via %s", o.Number, shortTitle(o.Label, 60), shortTitle(q.Summary(), 80), q.Hash, by, via)
+	noteLine2 := fmt.Sprintf("%s answered %q: %d. %s — %s", prefix, shortTitle(q.Summary(), 80), o.Number, shortTitle(o.Label, 60), reasonText)
+	note := noteLine1 + "\n" + noteLine2
+	if err := env.note(id, note); err != nil {
+		return "", fmt.Errorf("noting the answer on %s failed: %w", id, err)
+	}
+	if env.setStatus == nil {
+		return "", errors.New("the answer is noted but this process cannot set bead status")
+	}
+	if err := env.setStatus(id, StatusInProgress); err != nil {
+		return "", fmt.Errorf("the answer is noted on %s but returning it to in_progress failed: %w", id, err)
+	}
+	if err := appendJournal(journalRecord{At: time.Now(), Kind: journalNeedsMe, Bead: id, Class: effectiveClass, Text: noteLine1}); err != nil {
+		return "", fmt.Errorf("answered, but journaling it failed: %w", err)
+	}
+	msg := fmt.Sprintf("answered %s autonomously (%s L%d C%d): %d %s; the bead is in_progress", id, by, lvl, effectiveClass, o.Number, o.Label)
+	prompt := fmt.Sprintf("%s answered your needs_me question within autonomy level %d (class %d, via %s): %d. %s\nReason: %s\nThe question was: %s\nThe bead is back to in_progress and the answer is noted on it as NEEDS_ME ANSWERED / AUTO. Carry on with that choice.", by, lvl, effectiveClass, via, o.Number, o.Label, reasonText, q.Summary())
 	switch {
 	case a == nil:
 		return msg + notPrompted(env, id, "no worker is running"), nil

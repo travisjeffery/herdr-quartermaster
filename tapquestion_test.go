@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -839,6 +840,140 @@ func TestTapFreeTextStaleGuardsAndRunExclusion(t *testing.T) {
 			}
 			if f.bead.Status != StatusInProgress || len(f.told) != 0 || len(f.notes) != 2 || !strings.HasSuffix(f.notes[0], ": keep it as-is") {
 				t.Fatalf("status=%s told=%q notes=%q", f.bead.Status, f.told, f.notes)
+			}
+		})
+	}
+}
+
+func TestAnswerNeedsMeByAutonomyDial(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+
+	makeEnv := func(b *Bead, agentStatus string, lvl int, why string) (promptEnv, *[]string, *[]string) {
+		var notes []string
+		var told []string
+		env := promptEnv{
+			show: func(id string) (Bead, error) {
+				if id != b.ID {
+					return Bead{}, errors.New("not found")
+				}
+				return *b, nil
+			},
+			agent: func(host, name string) (*Agent, error) {
+				if agentStatus == "" {
+					return nil, nil
+				}
+				return &Agent{Name: name, Status: agentStatus}, nil
+			},
+			note: func(id, text string) error {
+				notes = append(notes, text)
+				b.Notes += "\n" + text
+				return nil
+			},
+			setStatus: func(id, status string) error {
+				b.Status = status
+				return nil
+			},
+			tell: func(host string, a *Agent, text string) error {
+				told = append(told, text)
+				return nil
+			},
+			level: func(id string) (int, string) {
+				return lvl, why
+			},
+		}
+		return env, &notes, &told
+	}
+
+	// Happy path: structured C3 question answered autonomously at L5 by inbox-runner.
+	b := Bead{
+		ID:     "task-auto-1",
+		Status: StatusNeedsMe,
+		Notes:  "QUESTION: Close superseded 0-diff PR? Recommendation: 1 — already landed.\nOPTIONS:\n1. Close superseded PR and bead\n2. Keep PR open\nCLASS: 3 — close superseded PR",
+	}
+	q, ok := parseNeedsMeQuestion(b.Notes)
+	if !ok {
+		t.Fatal("question did not parse")
+	}
+	env, notes, told := makeEnv(&b, "idle", 5, "")
+	msg, err := answerNeedsMeBy(env, b.ID, "1", "", q.Hash, "inbox-runner", "cli", "verified 0 unique diff against main", 3)
+	if err != nil {
+		t.Fatalf("autonomous answer failed: %v", err)
+	}
+	if !strings.Contains(msg, "inbox-runner L5 C3") || b.Status != StatusInProgress {
+		t.Fatalf("unexpected result: msg=%q status=%s", msg, b.Status)
+	}
+	if len(*notes) != 1 || !strings.Contains((*notes)[0], "NEEDS_ME ANSWERED: 1 Close superseded PR and bead") ||
+		!strings.Contains((*notes)[0], "AUTO: [inbox-runner L5 C3] answered") ||
+		!strings.Contains((*notes)[0], "verified 0 unique diff against main") {
+		t.Fatalf("unexpected notes: %q", *notes)
+	}
+	if len(*told) != 1 || !strings.Contains((*told)[0], "inbox-runner answered your needs_me question") {
+		t.Fatalf("unexpected worker prompt: %q", *told)
+	}
+	if _, stillLive := parseNeedsMeQuestion(b.Notes); stillLive {
+		t.Fatal("answered question should no longer parse as live")
+	}
+
+	// Fail-closed refusals.
+	refusals := []struct {
+		name   string
+		notes  string
+		choice string
+		lvl    int
+		class  int
+		want   string
+	}{
+		{
+			name:   "critical question",
+			notes:  "CRITICAL: Irreversible action\nQUESTION: Delete bucket? Recommendation: 2 — keep.\nOPTIONS:\n1. Delete\n2. Keep\nCLASS: 3 — low class but CRITICAL",
+			choice: "2", lvl: 7, class: 3, want: "CRITICAL",
+		},
+		{
+			name:   "run command",
+			notes:  "RUN: aws sso login\nQUESTION: Done? Recommendation: 1 — yes.\nOPTIONS:\n1. Yes\n2. No\nCLASS: 3 — check",
+			choice: "1", lvl: 7, class: 3, want: "RUN:",
+		},
+		{
+			name:   "free text rejected",
+			notes:  "QUESTION: Pick one? Recommendation: 1 — first.\nOPTIONS:\n1. First\n2. Second\nCLASS: 3 — routine",
+			choice: tapChoiceFreeText, lvl: 5, class: 3, want: "enumerated option",
+		},
+		{
+			name:   "missing class line",
+			notes:  "QUESTION: Pick one? Recommendation: 1 — first.\nOPTIONS:\n1. First\n2. Second",
+			choice: "1", lvl: 5, class: 3, want: "no CLASS line",
+		},
+		{
+			name:   "never lower below worker class",
+			notes:  "QUESTION: Apply sandbox? Recommendation: 1 — clean.\nOPTIONS:\n1. Apply\n2. Hold\nCLASS: 6 — sandbox apply",
+			choice: "1", lvl: 5, class: 3, want: "class 6",
+		},
+		{
+			name:   "class 8 human only",
+			notes:  "QUESTION: Delete prod resource? Recommendation: 1 — ok.\nOPTIONS:\n1. Delete\n2. Keep\nCLASS: 8 — prod delete",
+			choice: "1", lvl: 9, class: 8, want: "standing autonomy max 7",
+		},
+		{
+			name:   "missing --class flag",
+			notes:  "QUESTION: Pick one? Recommendation: 1 — first.\nOPTIONS:\n1. First\n2. Second\nCLASS: 3 — routine",
+			choice: "1", lvl: 5, class: -1, want: "--class 0-9",
+		},
+	}
+	for _, tc := range refusals {
+		t.Run(tc.name, func(t *testing.T) {
+			rb := Bead{ID: "task-refuse", Status: StatusNeedsMe, Notes: tc.notes}
+			rq, ok := parseNeedsMeQuestion(rb.Notes)
+			hash := "deadbeef"
+			if ok {
+				hash = rq.Hash
+			}
+			renv, rnotes, rtold := makeEnv(&rb, "idle", tc.lvl, "")
+			_, err := answerNeedsMeBy(renv, rb.ID, tc.choice, "", hash, "coordinator", "cli", "reason", tc.class)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want substring %q", err, tc.want)
+			}
+			if rb.Status != StatusNeedsMe || len(*rnotes) != 0 || len(*rtold) != 0 {
+				t.Fatalf("refused answer mutated bead: status=%s notes=%q told=%q", rb.Status, *rnotes, *rtold)
 			}
 		})
 	}
