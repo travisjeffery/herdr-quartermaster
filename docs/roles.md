@@ -148,4 +148,7 @@ Two built-in workflow helpers build directly on `reviewer` and `rollout` roles:
   non-prod, Class 7 for prod or unmatched targets).
 
 See [docs/workflow-delivery-loop.md](workflow-delivery-loop.md) for the full
-end-to-end guide.
+end-to-end guide, and [docs/shift-handoff.md](shift-handoff.md) for
+clean-context shift handoffs (`quartermaster shift`, preserving both git
+worktrees and `worktree = false` role directories) and shared-resource mutex
+labels (`lock:<name>`).

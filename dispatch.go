@@ -133,6 +133,14 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 		backend = cfg.WorkerBackend
 	}
 	if backend == rpcBackend {
+		if (o.Kind == "" || o.Kind == "pi") && !o.Focus && rpcIDRE.MatchString(id) {
+			bd := Beads{actor: "pi"}
+			if b, err := bd.Show(id); err == nil {
+				if err := checkDispatchResourceLocks(bd, b, o.Force); err != nil {
+					return "", err
+				}
+			}
+		}
 		return dispatchRPC(cfg, h, id, o)
 	}
 	if backend != "" && backend != "herdr" {
@@ -203,6 +211,9 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 		if role.Name != roleImplementer {
 			return "", fmt.Errorf("--rollout-target applies only to implementer dispatches, not role %q", role.Name)
 		}
+	}
+	if err := checkDispatchResourceLocks(bd, b, o.Force); err != nil {
+		return "", err
 	}
 	auto, err := cfg.enforceDispatch(b, role, o.By)
 	if err != nil {

@@ -22,10 +22,14 @@ Usage:
   quartermaster coordinator [--agent K]                open (or focus) the coordinator agent
   quartermaster dispatch <bead> [--agent K] [--role R] [--focus]  start a worker on a bead (worktree or role dir)
                 [--host H] [--force] [--by WHO]        on host H (default: the bead's host: label, else
-                                                       local); --force ignores the bead's needs: labels;
+                                                       local); --force ignores needs: and held lock: labels;
                                                        --role selects a built-in or [roles.<name>] role
                 [--rollout-target T]                   attach (or reuse) a dependent role:rollout bead for target T
                 [--backend herdr|pi-rpc]               opt in to native pi RPC; no default or live sessions change
+  quartermaster shift <bead> [--reason R] [--next S]   clean-context shift handoff: record <state>/handoffs/<bead>.json
+                [--agent K] [--force] [--focus]        and HANDOFF: note, stop at-rest worker pane (preserving git
+                [--by WHO] [--json]                    state), and spawn a fresh-context worker on the same dir
+  quartermaster shift show <bead> [--json]             inspect the latest handoff artifact recorded for a bead
   quartermaster roles [--json]                         list built-in and configured [roles.<name>] presets
   quartermaster review request|verdict|status ...      bounded implementer-reviewer ping-pong loop (head-SHA dedup, round cap)
   quartermaster rollout chain|status ...               attach or inspect dependent role:rollout beads for target environments
@@ -287,6 +291,8 @@ func run(args []string) error {
 		return reviewCmd(cfg, liveReviewLoopEnv(cfg, h), rest, os.Stdin, os.Stdout)
 	case "rollout":
 		return rolloutCmd(cfg, liveRolloutChainEnv(cfg), rest, os.Stdout)
+	case "shift":
+		return shiftCmd(cfg, liveShiftEnv(cfg, h), rest, os.Stdout)
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	kind := fs.String("agent", "", "agent kind: claude, codex, muse, pi, agy or auto")
@@ -295,7 +301,7 @@ func run(args []string) error {
 	backend := fs.String("backend", "", "dispatch: herdr (default) or pi-rpc (local, headless)")
 	focus := fs.Bool("focus", false, "focus the new workspace")
 	repoFlag := fs.String("repo", "", "configure: the repository quartermaster works in, written to config.toml if it has none")
-	force := fs.Bool("force", false, "resolve even if the bead is open, its agent is working or its worktree is dirty; dispatch to a host lacking a needed label")
+	force := fs.Bool("force", false, "resolve even if the bead is open, its agent is working or its worktree is dirty; dispatch despite missing needs: or held lock: labels")
 	hostFlag := fs.String("host", "", "dispatch: the worker host to run on")
 	sinceFlag := fs.String("since", "24h", "report window: Nh, Nd or YYYY-MM-DD")
 	yes := fs.Bool("yes", false, "sweep/rpc maintenance: apply safe cleanup; verify: act on the verdicts")
