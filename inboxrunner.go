@@ -423,6 +423,7 @@ type eligibleReview struct {
 	NextRound    int
 	MaxRounds    int
 	ReviewerBead string
+	AutoTrigger  bool
 }
 
 // inboxRunnerPlan is the evaluated preflight decision for one runner check.
@@ -490,6 +491,8 @@ type inboxRunnerEnv struct {
 	headlessOwned func(id string) bool
 	tickerState   func() TickerState
 	coordDir      func() string
+	requestReview func(id string, opts ReviewRequestOpts) (ReviewRequestResult, error)
+	ackInbox      func(files []string) (int, error)
 	execCmd       func(ctx context.Context, cfg Config, dir string, argv []string, prompt string) inboxRunnerExecResult
 	notify        func(title, body string) desktopResult
 	notifyEnv     *notifyEnv
@@ -526,9 +529,13 @@ func liveInboxRunnerEnv(cfg Config, h Herdr, logf func(string, ...any)) inboxRun
 		headlessOwned: headlessOwned,
 		tickerState:   loadState,
 		coordDir:      coordinatorHome,
-		execCmd:       execInboxRunnerCommand,
-		notify:        submitDesktopMessage,
-		logf:          logf,
+		requestReview: func(id string, opts ReviewRequestOpts) (ReviewRequestResult, error) {
+			return requestReview(cfg, liveReviewLoopEnv(cfg, h), id, opts)
+		},
+		ackInbox: inboxDoneFiles,
+		execCmd:  execInboxRunnerCommand,
+		notify:   submitDesktopMessage,
+		logf:     logf,
 	}
 }
 
@@ -574,6 +581,13 @@ func (e inboxRunnerEnv) log(format string, args ...any) {
 	if e.logf != nil {
 		e.logf(format, args...)
 	}
+}
+
+func (e inboxRunnerEnv) ack(files []string) (int, error) {
+	if e.ackInbox != nil {
+		return e.ackInbox(files)
+	}
+	return inboxDoneFiles(files)
 }
 
 func findCoordinatorAgent(cfg Config, agents map[string]Agent) (Agent, bool) {
@@ -995,8 +1009,10 @@ func evaluateRolloutUnblockedEligibility(cfg Config, env inboxRunnerEnv, it Inbo
 
 // evaluateReviewItemEligibility deduplicates review_needed / review_feedback
 // inbox items against durable ReviewLoopState so already-handled or escalated
-// heads never trigger duplicate review rounds.
-func evaluateReviewItemEligibility(it InboxItem) (*eligibleReview, string) {
+// heads never trigger duplicate review rounds. For review:required implementer
+// beads with review_needed, it also checks autonomy Class 3 eligibility and
+// marks the item for deterministic `review request --spawn` auto-triggering.
+func evaluateReviewItemEligibility(cfg Config, env inboxRunnerEnv, it InboxItem) (*eligibleReview, string) {
 	if it.Bead == "" || (it.Kind != EventReviewNeeded && it.Kind != EventReviewFeedback) {
 		return nil, ""
 	}
@@ -1026,6 +1042,25 @@ func evaluateReviewItemEligibility(it InboxItem) (*eligibleReview, string) {
 			}
 		}
 	}
+
+	autoTrigger := false
+	if it.Kind == EventReviewNeeded {
+		if b, berr := env.bead(it.Bead); berr == nil {
+			if b.Status == StatusClosed || b.Status == StatusNeedsMe {
+				return nil, "review_bead_not_active"
+			}
+			if cfg.Review.autoTriggerEnabled() && b.HasLabel(reviewRequiredLabel) {
+				if role, rerr := cfg.resolveRoleForBead(b, ""); rerr == nil && role.Name == roleImplementer {
+					lvl, _ := cfg.beadLevel(b, autonomyStopped())
+					if lvl < classHousekeeping {
+						return nil, fmt.Sprintf("review_above_level (C%d > L%d)", classHousekeeping, lvl)
+					}
+					autoTrigger = true
+				}
+			}
+		}
+	}
+
 	maxR := defaultReviewMaxRounds
 	nextR := 1
 	revBead := ""
@@ -1043,7 +1078,21 @@ func evaluateReviewItemEligibility(it InboxItem) (*eligibleReview, string) {
 		NextRound:    nextR,
 		MaxRounds:    maxR,
 		ReviewerBead: revBead,
+		AutoTrigger:  autoTrigger,
 	}, ""
+}
+
+func allEligibleAutoReview(plan inboxRunnerPlan, env inboxRunnerEnv) bool {
+	if len(plan.Eligible) == 0 || env.requestReview == nil {
+		return false
+	}
+	for _, it := range plan.Eligible {
+		rv, ok := plan.Reviews[it.File]
+		if !ok || !rv.AutoTrigger || it.Kind != EventReviewNeeded {
+			return false
+		}
+	}
+	return true
 }
 
 func evaluateInboxRunner(cfg Config, env inboxRunnerEnv, st InboxRunnerState, opts inboxRunnerOpts, now time.Time) (inboxRunnerPlan, error) {
@@ -1100,7 +1149,7 @@ func evaluateInboxRunner(cfg Config, env inboxRunnerEnv, st InboxRunnerState, op
 			ro, roReason = evaluateRolloutUnblockedEligibility(cfg, env, it, opts.PreloadedAgents)
 		}
 		if it.Kind == EventReviewNeeded || it.Kind == EventReviewFeedback {
-			rev, revReason = evaluateReviewItemEligibility(it)
+			rev, revReason = evaluateReviewItemEligibility(cfg, env, it)
 		}
 		switch {
 		case nm == nil && isForbiddenInboxItem(it):
@@ -1155,7 +1204,7 @@ func evaluateInboxRunner(cfg Config, env inboxRunnerEnv, st InboxRunnerState, op
 		plan.SkipReason = coordCheck.State + ": " + coordCheck.Detail
 	case len(plan.Eligible) == 0:
 		plan.SkipReason = "no_eligible_items"
-	case cmdErr != nil:
+	case cmdErr != nil && !allEligibleAutoReview(plan, env):
 		plan.SkipReason = "command_error: " + cmdErr.Error()
 	default:
 		plan.ShouldRun = true
@@ -1715,17 +1764,32 @@ func executeInboxRunnerLocked(ctx context.Context, cfg Config, env inboxRunnerEn
 		batch = batch[:inboxRunnerMaxItemsPerRun]
 	}
 
-	argv, err := inboxRunnerCommand(cfg, true, startedAt)
-	if err != nil {
-		st.LastCheckAt = startedAt
-		st.LastSkipReason = "command_error: " + err.Error()
-		_ = saveInboxRunnerState(st)
-		return inboxRunnerResult{}, err
+	var autoReviews []InboxItem
+	var llmBatch []InboxItem
+	for _, it := range batch {
+		if rv, ok := plan.Reviews[it.File]; ok && rv.AutoTrigger && it.Kind == EventReviewNeeded && env.requestReview != nil {
+			autoReviews = append(autoReviews, it)
+			continue
+		}
+		llmBatch = append(llmBatch, it)
 	}
 
-	dir := env.dir()
-	if err := ensureCoordinatorDir(cfg, dir); err != nil {
-		return inboxRunnerResult{}, fmt.Errorf("prepare coordinator dir %s: %w", dir, err)
+	var argv []string
+	var dir string
+	if len(llmBatch) > 0 {
+		var err error
+		argv, err = inboxRunnerCommand(cfg, true, startedAt)
+		if err != nil {
+			st.LastCheckAt = startedAt
+			st.LastSkipReason = "command_error: " + err.Error()
+			_ = saveInboxRunnerState(st)
+			return inboxRunnerResult{}, err
+		}
+
+		dir = env.dir()
+		if err := ensureCoordinatorDir(cfg, dir); err != nil {
+			return inboxRunnerResult{}, fmt.Errorf("prepare coordinator dir %s: %w", dir, err)
+		}
 	}
 
 	files := make([]string, 0, len(batch))
@@ -1749,12 +1813,42 @@ func executeInboxRunnerLocked(ctx context.Context, cfg Config, env inboxRunnerEn
 		return inboxRunnerResult{}, fmt.Errorf("persist inbox-runner pre-run state: %w", err)
 	}
 
-	prompt := buildInboxRunnerPrompt(batch, plan.NeedsMe, plan.Rollouts, plan.Reviews, startedAt)
-	execFn := env.execCmd
-	if execFn == nil {
-		execFn = execInboxRunnerCommand
+	var autoOutputs []string
+	autoItemErrs := map[string]string{}
+	var autoErrList []string
+	for _, it := range autoReviews {
+		rv := plan.Reviews[it.File]
+		reqRes, rerr := env.requestReview(it.Bead, ReviewRequestOpts{
+			HeadSHA:       rv.HeadSHA,
+			SpawnReviewer: true,
+			By:            "inbox-runner",
+		})
+		if rerr != nil {
+			msg := sanitizeInboxRunnerText(rerr.Error(), inboxRunnerErrorMaxRunes)
+			autoItemErrs[it.File] = msg
+			autoErrList = append(autoErrList, fmt.Sprintf("%s: %s", it.Bead, msg))
+			autoOutputs = append(autoOutputs, fmt.Sprintf("%s: auto-review skipped/failed: %s", it.Bead, msg))
+			env.log("inbox-runner auto-review %s (%s): %v", it.Bead, it.File, rerr)
+			continue
+		}
+		autoOutputs = append(autoOutputs, fmt.Sprintf("%s: %s", it.Bead, reqRes.Message))
+		if _, aerr := env.ack([]string{it.File}); aerr != nil {
+			msg := sanitizeInboxRunnerText(aerr.Error(), inboxRunnerErrorMaxRunes)
+			autoItemErrs[it.File] = "ack failed: " + msg
+			autoErrList = append(autoErrList, fmt.Sprintf("%s ack: %s", it.File, msg))
+			env.log("inbox-runner auto-review ack %s: %v", it.File, aerr)
+		}
 	}
-	execRes := execFn(ctx, cfg, dir, argv, prompt)
+
+	var execRes inboxRunnerExecResult
+	if len(llmBatch) > 0 {
+		prompt := buildInboxRunnerPrompt(llmBatch, plan.NeedsMe, plan.Rollouts, plan.Reviews, startedAt)
+		execFn := env.execCmd
+		if execFn == nil {
+			execFn = execInboxRunnerCommand
+		}
+		execRes = execFn(ctx, cfg, dir, argv, prompt)
+	}
 
 	finishedAt := env.clock()
 	if finishedAt.Before(startedAt) {
@@ -1777,38 +1871,69 @@ func executeInboxRunnerLocked(ctx context.Context, cfg Config, env inboxRunnerEn
 		pruneInboxRunnerAttempts(st.Attempts, remainingItems)
 	}
 
+	combinedOutput := strings.Join(autoOutputs, "\n")
+	if execRes.Output != "" {
+		if combinedOutput != "" {
+			combinedOutput += "\n" + execRes.Output
+		} else {
+			combinedOutput = execRes.Output
+		}
+	}
+	combinedOutput = sanitizeInboxRunnerText(combinedOutput, inboxRunnerOutputMaxRunes)
+
 	exitStatus := "ok"
 	errSummary := ""
+	code := execRes.ExitCode
+	var runErr error
 	switch {
 	case execRes.TimedOut:
 		exitStatus = "timeout"
 		errSummary = sanitizeInboxRunnerText(execRes.Err.Error(), inboxRunnerErrorMaxRunes)
+		runErr = execRes.Err
 	case execRes.Err != nil:
 		exitStatus = "error"
 		rawErr := execRes.Err.Error()
 		if execRes.Output != "" {
 			rawErr += ": " + execRes.Output
 		}
+		if len(autoErrList) > 0 {
+			rawErr += "; auto-review: " + strings.Join(autoErrList, "; ")
+		}
 		errSummary = sanitizeInboxRunnerText(rawErr, inboxRunnerErrorMaxRunes)
+		runErr = execRes.Err
+	case len(autoErrList) > 0:
+		exitStatus = "error"
+		code = 1
+		errSummary = sanitizeInboxRunnerText("auto-review: "+strings.Join(autoErrList, "; "), inboxRunnerErrorMaxRunes)
+		runErr = errors.New(errSummary)
 	}
 
 	if errSummary != "" {
-		for _, f := range files {
-			if att, ok := st.Attempts[f]; ok {
-				att.LastError = errSummary
-				st.Attempts[f] = att
+		for _, it := range autoReviews {
+			if msg := autoItemErrs[it.File]; msg != "" {
+				if att, ok := st.Attempts[it.File]; ok {
+					att.LastError = msg
+					st.Attempts[it.File] = att
+				}
+			}
+		}
+		if execRes.Err != nil {
+			for _, it := range llmBatch {
+				if att, ok := st.Attempts[it.File]; ok {
+					att.LastError = errSummary
+					st.Attempts[it.File] = att
+				}
 			}
 		}
 	}
 
-	code := execRes.ExitCode
 	st.LastFinishedAt = finishedAt
 	st.LastExitStatus = exitStatus
 	st.LastExitCode = &code
 	st.LastDurationMs = dur.Milliseconds()
 	st.LastAcked = acked
 	st.LastError = errSummary
-	st.LastOutput = execRes.Output
+	st.LastOutput = combinedOutput
 	if err := saveInboxRunnerState(st); err != nil {
 		env.log("inbox-runner state save: %v", err)
 	}
@@ -1820,13 +1945,13 @@ func executeInboxRunnerLocked(ctx context.Context, cfg Config, env inboxRunnerEn
 		Duration:   dur,
 		Eligible:   files,
 		Acked:      acked,
-		Output:     execRes.Output,
+		Output:     combinedOutput,
 		ErrSummary: errSummary,
 		Plan:       plan,
 	}
 	notifyInboxRunnerResult(ctx, cfg, env, res, kinds, finishedAt)
 
-	if execRes.Err != nil {
+	if runErr != nil {
 		return res, fmt.Errorf("headless inbox runner %s: %s", exitStatus, errSummary)
 	}
 	return res, nil
@@ -2099,6 +2224,9 @@ func writeInboxRunnerDryRun(w io.Writer, res inboxRunnerResult) error {
 		if v.Eligible {
 			mark = "run "
 			detail = "eligible"
+			if rv, ok := res.Plan.Reviews[v.File]; ok && rv.AutoTrigger {
+				detail = "eligible (auto-review)"
+			}
 		}
 		fmt.Fprintf(w, "  [%s] %s (kind=%s bead=%s age=%ds attempts=%d: %s)\n",
 			mark, v.File, v.Kind, orDash(v.Bead), v.AgeSecs, v.Attempts, detail)

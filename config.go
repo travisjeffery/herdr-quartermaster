@@ -152,6 +152,11 @@ type Config struct {
 	// when a tracked PR fails solely on transient infrastructure flakes
 	// (cirerun.go).
 	CIRerun CIRerunConfig `toml:"ci_rerun"`
+
+	// Review configures bounded implementer <-> reviewer ping-pong behavior,
+	// including automatic pre-PR / new-head triggering and path-based
+	// security-review role routing (reviewloop.go, docs/workflow-delivery-loop.md).
+	Review ReviewConfig `toml:"review"`
 }
 
 // DesktopConfig is [desktop]: controls event-driven desktop notifications
@@ -233,6 +238,129 @@ func (c Config) validateIgnoreChecks() error {
 		}
 		if _, err := path.Match(strings.ToLower(raw), ""); err != nil {
 			return fmt.Errorf("ignore_checks pattern %q: %w", raw, err)
+		}
+	}
+	return nil
+}
+
+const defaultReviewSecurityRole = "security-review"
+
+// ReviewConfig is [review] in config.toml: optional settings for bounded
+// implementer <-> reviewer ping-pong loops and path-based security-review
+// role routing.
+type ReviewConfig struct {
+	// SecurityPaths lists repository-relative glob patterns (supporting **
+	// across directories and path.Match segment wildcards, e.g. "**/auth/**",
+	// "**/iam/**", "**/.github/workflows/**", "**/migrations/**"). When any
+	// changed file in a review diff matches one of these patterns, `review
+	// request --spawn` selects SecurityRole if configured, else reviewer.
+	SecurityPaths []string `toml:"security_paths"`
+	// SecurityRole names the role selected when a diff matches SecurityPaths
+	// and that role is configured (default "security-review"). Falls back to
+	// "reviewer" when the role is not configured.
+	SecurityRole string `toml:"security_role"`
+	// AutoTrigger controls whether review:required implementer beads
+	// automatically invoke `review request --spawn` on a new clean head commit
+	// (default true when unset).
+	AutoTrigger *bool `toml:"auto_trigger"`
+}
+
+func (c ReviewConfig) effectiveSecurityRole() string {
+	if c.SecurityRole != "" {
+		return c.SecurityRole
+	}
+	return defaultReviewSecurityRole
+}
+
+func (c ReviewConfig) autoTriggerEnabled() bool {
+	return desktopBool(c.AutoTrigger, true)
+}
+
+func splitGlobSegments(raw string) []string {
+	s := filepath.ToSlash(raw)
+	for strings.HasPrefix(s, "./") {
+		s = strings.TrimPrefix(s, "./")
+	}
+	s = strings.TrimLeft(s, "/")
+	var segs []string
+	for _, part := range strings.Split(s, "/") {
+		if part == "" {
+			continue
+		}
+		if part == "**" && len(segs) > 0 && segs[len(segs)-1] == "**" {
+			continue
+		}
+		segs = append(segs, part)
+	}
+	return segs
+}
+
+func validateReviewPathGlob(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return errors.New("[review] security_paths contains an empty pattern")
+	}
+	if strings.TrimSpace(raw) != raw {
+		return fmt.Errorf("[review] security_paths pattern %q must not have surrounding whitespace", raw)
+	}
+	segs := splitGlobSegments(raw)
+	if len(segs) == 0 {
+		return fmt.Errorf("[review] security_paths pattern %q contains no path segments", raw)
+	}
+	for _, seg := range segs {
+		if seg == "**" {
+			continue
+		}
+		if _, err := path.Match(seg, ""); err != nil {
+			return fmt.Errorf("[review] security_paths pattern %q: %w", raw, err)
+		}
+	}
+	return nil
+}
+
+// matchPathGlob matches a repository-relative file path against a glob pattern
+// supporting "**" (zero or more path segments) and path.Match segment wildcards.
+func matchPathGlob(pattern, filePath string) bool {
+	if validateReviewPathGlob(pattern) != nil {
+		return false
+	}
+	patSegs := splitGlobSegments(pattern)
+	pathSegs := splitGlobSegments(strings.TrimSpace(filePath))
+	if len(patSegs) == 0 || len(pathSegs) == 0 {
+		return false
+	}
+	m, n := len(patSegs), len(pathSegs)
+	next := make([]bool, n+1)
+	curr := make([]bool, n+1)
+	next[n] = true
+	for i := m - 1; i >= 0; i-- {
+		clear(curr)
+		if patSegs[i] == "**" {
+			curr[n] = next[n]
+			for j := n - 1; j >= 0; j-- {
+				curr[j] = next[j] || curr[j+1]
+			}
+		} else {
+			for j := n - 1; j >= 0; j-- {
+				if ok, err := path.Match(patSegs[i], pathSegs[j]); err == nil && ok {
+					curr[j] = next[j+1]
+				}
+			}
+		}
+		next, curr = curr, next
+	}
+	return next[0]
+}
+
+func (c Config) validateReview() error {
+	r := c.Review
+	if r.SecurityRole != "" {
+		if strings.TrimSpace(r.SecurityRole) != r.SecurityRole || !roleNameRE.MatchString(r.SecurityRole) {
+			return fmt.Errorf("[review] invalid security_role %q (must match ^[a-z0-9][a-z0-9_-]*$)", r.SecurityRole)
+		}
+	}
+	for _, raw := range r.SecurityPaths {
+		if err := validateReviewPathGlob(raw); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -904,6 +1032,9 @@ func loadConfig() (Config, error) {
 		return cfg, err
 	}
 	if err := cfg.validateCIRerun(); err != nil {
+		return cfg, err
+	}
+	if err := cfg.validateReview(); err != nil {
 		return cfg, err
 	}
 	if cfg.Verifier.MCPConfig != "" {

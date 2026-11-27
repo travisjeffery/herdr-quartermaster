@@ -235,3 +235,146 @@ ignore_checks = [
 		})
 	}
 }
+
+func TestLoadConfigReviewValidation(t *testing.T) {
+	writeCfg := func(t *testing.T, body string) {
+		t.Helper()
+		dir := t.TempDir()
+		t.Setenv("QUARTERMASTER_CONFIG_DIR", dir)
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("defaults load cleanly", func(t *testing.T) {
+		writeCfg(t, "repo = \"/tmp/repo\"\n")
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig failed: %v", err)
+		}
+		if len(cfg.Review.SecurityPaths) != 0 {
+			t.Fatalf("SecurityPaths = %v, want empty", cfg.Review.SecurityPaths)
+		}
+		if got := cfg.Review.effectiveSecurityRole(); got != defaultReviewSecurityRole {
+			t.Fatalf("effectiveSecurityRole() = %q, want %q", got, defaultReviewSecurityRole)
+		}
+		if !cfg.Review.autoTriggerEnabled() {
+			t.Fatal("autoTriggerEnabled() = false, want true by default")
+		}
+	})
+
+	t.Run("valid security_paths, custom security_role, and auto_trigger=false load cleanly", func(t *testing.T) {
+		writeCfg(t, `
+repo = "/tmp/repo"
+
+[review]
+security_paths = [
+  "**/auth/**",
+  "**/iam/**",
+  "**/.github/workflows/**",
+  "**/migrations/**",
+  "infra/*.tf",
+]
+security_role = "sec-reviewer"
+auto_trigger = false
+`)
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig failed: %v", err)
+		}
+		wantPaths := []string{
+			"**/auth/**",
+			"**/iam/**",
+			"**/.github/workflows/**",
+			"**/migrations/**",
+			"infra/*.tf",
+		}
+		if !slices.Equal(cfg.Review.SecurityPaths, wantPaths) {
+			t.Fatalf("SecurityPaths = %v, want %v", cfg.Review.SecurityPaths, wantPaths)
+		}
+		if got := cfg.Review.effectiveSecurityRole(); got != "sec-reviewer" {
+			t.Fatalf("effectiveSecurityRole() = %q, want sec-reviewer", got)
+		}
+		if cfg.Review.autoTriggerEnabled() {
+			t.Fatal("autoTriggerEnabled() = true, want false")
+		}
+	})
+
+	invalid := map[string]struct {
+		toml string
+		want string
+	}{
+		"empty security_paths entry": {
+			toml: "repo = \"/tmp/repo\"\n[review]\nsecurity_paths = [\"\"]\n",
+			want: "security_paths",
+		},
+		"whitespace security_paths entry": {
+			toml: "repo = \"/tmp/repo\"\n[review]\nsecurity_paths = [\"   \"]\n",
+			want: "security_paths",
+		},
+		"surrounding whitespace security_paths entry": {
+			toml: "repo = \"/tmp/repo\"\n[review]\nsecurity_paths = [\" **/auth/** \"]\n",
+			want: "surrounding whitespace",
+		},
+		"slashes-only security_paths entry": {
+			toml: "repo = \"/tmp/repo\"\n[review]\nsecurity_paths = [\"///\"]\n",
+			want: "no path segments",
+		},
+		"malformed glob bracket": {
+			toml: "repo = \"/tmp/repo\"\n[review]\nsecurity_paths = [\"**/auth/[unclosed\"]\n",
+			want: "security_paths",
+		},
+		"invalid security_role uppercase": {
+			toml: "repo = \"/tmp/repo\"\n[review]\nsecurity_role = \"SecurityReview\"\n",
+			want: "invalid security_role",
+		},
+		"invalid security_role spaces": {
+			toml: "repo = \"/tmp/repo\"\n[review]\nsecurity_role = \"security review\"\n",
+			want: "invalid security_role",
+		},
+	}
+	for name, tc := range invalid {
+		t.Run("reject/"+name, func(t *testing.T) {
+			writeCfg(t, tc.toml)
+			if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("loadConfig() err = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestMatchPathGlob(t *testing.T) {
+	cases := []struct {
+		pattern string
+		path    string
+		want    bool
+	}{
+		{"**/auth/**", "auth/login.go", true},
+		{"**/auth/**", "pkg/auth/login.go", true},
+		{"**/auth/**", "services/api/auth/v2/jwt.go", true},
+		{"**/auth/**", "pkg/authz/login.go", false},
+		{"**/auth/**", "myauth/login.go", false},
+		{"**/iam/**", "infra/iam/policy.tf", true},
+		{"**/iam/**", "iam/role.json", true},
+		{"**/.github/workflows/**", ".github/workflows/ci.yml", true},
+		{"**/.github/workflows/**", "sub/.github/workflows/deploy/prod.yml", true},
+		{"**/.github/workflows/**", ".github/CODEOWNERS", false},
+		{"**/migrations/**", "migrations/001_init.sql", true},
+		{"**/migrations/**", "db/migrations/2026/up.sql", true},
+		{"**/migrations/*.sql", "db/migrations/001.sql", true},
+		{"**/migrations/*.sql", "db/migrations/sub/001.sql", false},
+		{"**/*.tf", "main.tf", true},
+		{"**/*.tf", "infra/network/main.tf", true},
+		{"*.tf", "main.tf", true},
+		{"*.tf", "infra/main.tf", false},
+		{"infra/iam/**", "infra/iam/role.tf", true},
+		{"infra/iam/**", "other/infra/iam/role.tf", false},
+		{"**/auth/**", "./pkg/auth/token.go", true},
+		{"**/auth/**", "", false},
+	}
+	for _, tc := range cases {
+		if got := matchPathGlob(tc.pattern, tc.path); got != tc.want {
+			t.Errorf("matchPathGlob(%q, %q) = %v, want %v", tc.pattern, tc.path, got, tc.want)
+		}
+	}
+}

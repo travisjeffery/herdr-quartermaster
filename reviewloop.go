@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -81,37 +82,43 @@ func (f ReviewFinding) String() string {
 
 // ReviewRound records one bounded review pass against a single head commit SHA.
 type ReviewRound struct {
-	Round       int             `json:"round"`
-	HeadSHA     string          `json:"head_sha"`
-	PRURL       string          `json:"pr_url,omitempty"`
-	Reviewer    string          `json:"reviewer_bead,omitempty"`
-	RequestedAt time.Time       `json:"requested_at"`
-	RequestedBy string          `json:"requested_by,omitempty"`
-	Verdict     string          `json:"verdict,omitempty"`
-	Summary     string          `json:"summary,omitempty"`
-	Findings    []ReviewFinding `json:"findings,omitempty"`
-	Later       []string        `json:"later,omitempty"`
-	VerdictAt   time.Time       `json:"verdict_at,omitzero"`
-	VerdictBy   string          `json:"verdict_by,omitempty"`
-	RoutedAt    time.Time       `json:"routed_at,omitzero"`
-	RouteResult string          `json:"route_result,omitempty"`
+	Round                int             `json:"round"`
+	HeadSHA              string          `json:"head_sha"`
+	PRURL                string          `json:"pr_url,omitempty"`
+	Reviewer             string          `json:"reviewer_bead,omitempty"`
+	ReviewerRole         string          `json:"reviewer_role,omitempty"`
+	MatchedSecurityPaths []string        `json:"matched_security_paths,omitempty"`
+	RequestedAt          time.Time       `json:"requested_at"`
+	RequestedBy          string          `json:"requested_by,omitempty"`
+	Verdict              string          `json:"verdict,omitempty"`
+	Summary              string          `json:"summary,omitempty"`
+	Findings             []ReviewFinding `json:"findings,omitempty"`
+	Later                []string        `json:"later,omitempty"`
+	VerdictAt            time.Time       `json:"verdict_at,omitzero"`
+	VerdictBy            string          `json:"verdict_by,omitempty"`
+	RoutedAt             time.Time       `json:"routed_at,omitzero"`
+	RouteResult          string          `json:"route_result,omitempty"`
 }
 
 // ReviewLoopState is the durable ping-pong state for one implementer bead.
 type ReviewLoopState struct {
-	Version         int           `json:"version"`
-	Bead            string        `json:"bead"`
-	ReviewerBead    string        `json:"reviewer_bead,omitempty"`
-	MaxRounds       int           `json:"max_rounds"`
-	State           string        `json:"state"`
-	CurrentRound    int           `json:"current_round"`
-	LastHeadSHA     string        `json:"last_head_sha,omitempty"`
-	PassedHeadSHA   string        `json:"passed_head_sha,omitempty"`
-	NotifiedHeadSHA string        `json:"notified_head_sha,omitempty"`
-	EscalatedAt     time.Time     `json:"escalated_at,omitzero"`
-	EscalatedWhy    string        `json:"escalated_why,omitempty"`
-	UpdatedAt       time.Time     `json:"updated_at"`
-	Rounds          []ReviewRound `json:"rounds,omitempty"`
+	Version             int           `json:"version"`
+	Bead                string        `json:"bead"`
+	ReviewerBead        string        `json:"reviewer_bead,omitempty"`
+	ReviewerRole        string        `json:"reviewer_role,omitempty"`
+	ReviewerSpawned     bool          `json:"reviewer_spawned,omitempty"`
+	SpawnedReviewers    []string      `json:"spawned_reviewers,omitempty"`
+	PendingResolveBeads []string      `json:"pending_resolve_beads,omitempty"`
+	MaxRounds           int           `json:"max_rounds"`
+	State               string        `json:"state"`
+	CurrentRound        int           `json:"current_round"`
+	LastHeadSHA         string        `json:"last_head_sha,omitempty"`
+	PassedHeadSHA       string        `json:"passed_head_sha,omitempty"`
+	NotifiedHeadSHA     string        `json:"notified_head_sha,omitempty"`
+	EscalatedAt         time.Time     `json:"escalated_at,omitzero"`
+	EscalatedWhy        string        `json:"escalated_why,omitempty"`
+	UpdatedAt           time.Time     `json:"updated_at"`
+	Rounds              []ReviewRound `json:"rounds,omitempty"`
 }
 
 func reviewLoopsDir() string { return filepath.Join(stateDir(), "review-loops") }
@@ -227,7 +234,11 @@ func reviewLoopContextLine(id string) string {
 		s += " @" + head
 	}
 	if st.ReviewerBead != "" {
-		s += " (reviewer " + st.ReviewerBead + ")"
+		if st.ReviewerRole != "" && st.ReviewerRole != roleReviewer {
+			s += " (reviewer " + st.ReviewerBead + ", role:" + st.ReviewerRole + ")"
+		} else {
+			s += " (reviewer " + st.ReviewerBead + ")"
+		}
 	}
 	return s
 }
@@ -308,9 +319,12 @@ type reviewLoopEnv struct {
 	note             func(id, text string) error
 	setStatus        func(id, status string) error
 	createBead       func(opts BeadCreateOpts) (Bead, error)
+	closeBead        func(id, reason string) error
+	resolveReviewer  func(id string) (string, error)
 	resolveHead      func(b Bead) (reviewHeadInfo, error)
+	changedFiles     func(b Bead, info reviewHeadInfo) ([]string, error)
 	tell             func(id, text string) (string, error)
-	dispatchReviewer func(id, agent, by string) (string, error)
+	dispatchReviewer func(id, role, agent, by string) (string, error)
 	enforce          func(b Bead, action, by string) (string, error)
 	event            func(Event) error
 	journal          func(journalRecord) error
@@ -325,14 +339,27 @@ func liveReviewLoopEnv(cfg Config, h Herdr) reviewLoopEnv {
 		note:       bd.Note,
 		setStatus:  bd.SetStatus,
 		createBead: bd.Create,
+		closeBead: func(id, reason string) error {
+			_, err := bd.run("close", id, "--reason", reason)
+			return err
+		},
+		resolveReviewer: func(id string) (string, error) {
+			return resolve(cfg, hh, id, false)
+		},
 		resolveHead: func(b Bead) (reviewHeadInfo, error) {
 			return liveResolveReviewHead(cfg, hh, b)
+		},
+		changedFiles: func(b Bead, info reviewHeadInfo) ([]string, error) {
+			return liveChangedFiles(cfg, b, info)
 		},
 		tell: func(id, text string) (string, error) {
 			return tellCmd(cfg, hh, bd.Show, id, text)
 		},
-		dispatchReviewer: func(id, agent, by string) (string, error) {
-			return dispatch(cfg, hh, id, DispatchOpts{Kind: agent, Role: roleReviewer, By: by})
+		dispatchReviewer: func(id, role, agent, by string) (string, error) {
+			if role == "" {
+				role = roleReviewer
+			}
+			return dispatch(cfg, hh, id, DispatchOpts{Kind: agent, Role: role, By: by})
 		},
 		enforce: func(b Bead, action, by string) (string, error) {
 			return cfg.enforce(b, action, by)
@@ -353,7 +380,7 @@ func (e reviewLoopEnv) clock() time.Time {
 func liveResolveReviewHead(cfg Config, h Herdr, b Bead) (reviewHeadInfo, error) {
 	var info reviewHeadInfo
 	st := loadState()
-	if pr, ok := st.PRs[b.ID]; ok {
+	if pr, ok := st.PRs[b.ID]; ok && (pr.State == "" || pr.State == "OPEN") {
 		info.PRURL = pr.URL
 		info.Branch = pr.Head
 		if fullSHA.MatchString(strings.ToLower(pr.HeadSHA)) {
@@ -390,6 +417,163 @@ func gitWorktreeClean(dir string) bool {
 	return err == nil && len(bytes.TrimSpace(out)) == 0
 }
 
+func gitRefExists(dir, ref string) bool {
+	return exec.Command("git", "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}").Run() == nil
+}
+
+// resolveGitBaseRef selects the best available base commit reference for dir,
+// preferring local baseBranch when it is at or ahead of origin/<baseBranch>,
+// otherwise origin/<baseBranch>, and falling back to origin/HEAD.
+func resolveGitBaseRef(dir, baseBranch string) string {
+	base := strings.TrimSpace(baseBranch)
+	if base == "" {
+		base = "main"
+	}
+	remoteRef := "origin/" + base
+	hasRemote := gitRefExists(dir, remoteRef)
+	hasLocal := gitRefExists(dir, base)
+	switch {
+	case hasRemote && hasLocal:
+		if exec.Command("git", "-C", dir, "merge-base", "--is-ancestor", remoteRef, base).Run() == nil {
+			return base
+		}
+		return remoteRef
+	case hasRemote:
+		return remoteRef
+	case hasLocal:
+		return base
+	case gitRefExists(dir, "origin/HEAD"):
+		return "origin/HEAD"
+	default:
+		return ""
+	}
+}
+
+// gitWorktreeHasCommitsAhead reports whether headSHA has at least one commit
+// ahead of the repository's base branch, preventing pre-PR auto-review from
+// firing on a freshly created worktree that has no commits yet.
+func gitWorktreeHasCommitsAhead(dir, baseBranch, headSHA string) bool {
+	baseRef := resolveGitBaseRef(dir, baseBranch)
+	if baseRef == "" {
+		return true
+	}
+	if out, err := exec.Command("git", "-C", dir, "rev-parse", baseRef+"^{commit}").Output(); err == nil {
+		if strings.EqualFold(strings.TrimSpace(string(out)), strings.TrimSpace(headSHA)) {
+			return false
+		}
+	}
+	out, err := exec.Command("git", "-C", dir, "rev-list", "--count", baseRef+".."+headSHA).Output()
+	if err != nil {
+		return true
+	}
+	cnt, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return true
+	}
+	return cnt > 0
+}
+
+func parseGitNullPaths(out []byte) []string {
+	if len(out) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var files []string
+	for _, raw := range bytes.Split(out, []byte{0}) {
+		p := filepath.ToSlash(strings.TrimSpace(string(raw)))
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		files = append(files, p)
+	}
+	sort.Strings(files)
+	return files
+}
+
+// gitChangedFiles returns the repository-relative paths changed between
+// baseBranch and headSHA (`git diff --name-only <base>...<head>`), falling back
+// to the commit's own changed files when no common base ref is present.
+func gitChangedFiles(dir, baseBranch, headSHA string) ([]string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return nil, errors.New("git directory is empty")
+	}
+	baseRef := resolveGitBaseRef(dir, baseBranch)
+	if baseRef != "" {
+		out, err := exec.Command("git", "-C", dir, "diff", "--no-renames", "--name-only", "-z", baseRef+"..."+headSHA).Output()
+		if err == nil {
+			return parseGitNullPaths(out), nil
+		}
+	}
+	out, err := exec.Command("git", "-C", dir, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", "-z", headSHA).Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseGitNullPaths(out), nil
+}
+
+func liveChangedFiles(cfg Config, b Bead, info reviewHeadInfo) ([]string, error) {
+	var dirs []string
+	if d := strings.TrimSpace(info.Workdir); d != "" {
+		dirs = append(dirs, d)
+	}
+	if repo := strings.TrimSpace(expandHome(cfg.repoFor(b))); repo != "" && !slices.Contains(dirs, repo) {
+		dirs = append(dirs, repo)
+	}
+	var lastErr error
+	for _, dir := range dirs {
+		files, err := gitChangedFiles(dir, cfg.BaseBranch, info.HeadSHA)
+		if err == nil {
+			return files, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("no repository directory available to inspect changed files")
+}
+
+func matchedSecurityPaths(patterns, files []string) []string {
+	if len(patterns) == 0 || len(files) == 0 {
+		return nil
+	}
+	var matched []string
+	for _, f := range files {
+		for _, p := range patterns {
+			if matchPathGlob(p, f) {
+				matched = append(matched, f)
+				break
+			}
+		}
+	}
+	sort.Strings(matched)
+	return slices.Compact(matched)
+}
+
+// selectReviewRole inspects changed files against [review] security_paths and
+// returns [review] security_role (default "security-review") when at least one
+// file matches and that role exists in config; otherwise it falls back to
+// "reviewer".
+func selectReviewRole(cfg Config, env reviewLoopEnv, b Bead, info reviewHeadInfo) (string, []string) {
+	if len(cfg.Review.SecurityPaths) == 0 || env.changedFiles == nil {
+		return roleReviewer, nil
+	}
+	files, err := env.changedFiles(b, info)
+	if err != nil || len(files) == 0 {
+		return roleReviewer, nil
+	}
+	matched := matchedSecurityPaths(cfg.Review.SecurityPaths, files)
+	if len(matched) == 0 {
+		return roleReviewer, nil
+	}
+	secRole := cfg.Review.effectiveSecurityRole()
+	if _, err := cfg.resolveRole(secRole); err == nil {
+		return secRole, matched
+	}
+	return roleReviewer, matched
+}
+
 // ReviewRequestOpts configures `quartermaster review request <bead>`.
 type ReviewRequestOpts struct {
 	HeadSHA       string
@@ -404,12 +588,14 @@ type ReviewRequestOpts struct {
 
 // ReviewRequestResult describes the outcome of requesting a bounded review round.
 type ReviewRequestResult struct {
-	State          ReviewLoopState `json:"state"`
-	Deduplicated   bool            `json:"deduplicated,omitempty"`
-	SpawnedBead    string          `json:"spawned_bead,omitempty"`
-	ReviewerAction string          `json:"reviewer_action,omitempty"`
-	Prompt         string          `json:"prompt,omitempty"`
-	Message        string          `json:"message"`
+	State                ReviewLoopState `json:"state"`
+	Deduplicated         bool            `json:"deduplicated,omitempty"`
+	SpawnedBead          string          `json:"spawned_bead,omitempty"`
+	ReviewerRole         string          `json:"reviewer_role,omitempty"`
+	MatchedSecurityPaths []string        `json:"matched_security_paths,omitempty"`
+	ReviewerAction       string          `json:"reviewer_action,omitempty"`
+	Prompt               string          `json:"prompt,omitempty"`
+	Message              string          `json:"message"`
 }
 
 // requestReview starts (or idempotently deduplicates) one bounded skeptical
@@ -519,43 +705,73 @@ func requestReview(cfg Config, env reviewLoopEnv, id string, opts ReviewRequestO
 	}
 
 	nextRound := st.CurrentRound + 1
-	prompt := buildReviewPassPrompt(b, st, nextRound, info)
 
-	revBead := strings.TrimSpace(opts.ReviewerBead)
+	selectedRole := roleReviewer
+	var matchedSec []string
+	if opts.SpawnReviewer {
+		selectedRole, matchedSec = selectReviewRole(cfg, env, b, info)
+	}
+
+	explicitReviewer := strings.TrimSpace(opts.ReviewerBead)
+	revBead := explicitReviewer
 	if revBead == "" {
 		revBead = st.ReviewerBead
 	}
 	// If the previously linked reviewer bead was closed, allow spawning a fresh one.
-	if revBead != "" && opts.SpawnReviewer && env.show != nil {
-		if rb, rerr := env.show(revBead); rerr == nil && rb.Status == StatusClosed {
-			revBead = ""
+	// Also upgrade to a fresh security-role reviewer when risk-path matching
+	// escalates past a plain reviewer bead.
+	if revBead != "" && env.show != nil {
+		if rb, rerr := env.show(revBead); rerr == nil {
+			switch {
+			case opts.SpawnReviewer && rb.Status == StatusClosed:
+				revBead = ""
+			case opts.SpawnReviewer && explicitReviewer == "" && selectedRole != roleReviewer && !rb.HasLabel(roleLabel+selectedRole):
+				revBead = ""
+			default:
+				if lr, lerr := beadRole(rb); lerr == nil && lr != "" {
+					selectedRole = lr
+				}
+			}
 		}
 	}
 
-	var spawnedBead string
-	var reviewerAction string
+	prompt := buildReviewPassPrompt(b, st, nextRound, info, selectedRole, matchedSec)
+
+	var (
+		spawnedBead      string
+		reviewerAction   string
+		autoPrefix       string
+		dispatchEnforced bool
+	)
 	if revBead == "" && opts.SpawnReviewer {
 		if env.createBead == nil {
 			return ReviewRequestResult{}, fmt.Errorf("%w: cannot spawn reviewer bead (bead creation unavailable)", errReviewLoop)
 		}
 		if env.enforce != nil && by != "TJ" {
-			if _, err := env.enforce(b, "dispatch", by); err != nil {
+			prefix, err := env.enforce(b, "dispatch", by)
+			if err != nil {
 				return ReviewRequestResult{}, err
 			}
+			autoPrefix = prefix
+			dispatchEnforced = true
 		}
-		labels := []string{roleLabel + roleReviewer}
+		labels := []string{roleLabel + selectedRole}
 		if repoName, ok := cfg.repoName(b); ok && repoName != "" {
 			labels = append(labels, repoLabel+repoName)
+		}
+		title := fmt.Sprintf("Review %s (%s)", shortTitle(b.Title, 48), b.ID)
+		if selectedRole != roleReviewer {
+			title = fmt.Sprintf("Review (%s) %s (%s)", selectedRole, shortTitle(b.Title, 38), b.ID)
 		}
 		// Never parent the reviewer under the implementer bead: open children
 		// prevent the implementer from transitioning to merged on PR merge.
 		created, err := env.createBead(BeadCreateOpts{
-			Title:       fmt.Sprintf("Review %s (%s)", shortTitle(b.Title, 48), b.ID),
+			Title:       title,
 			Type:        "task",
 			Priority:    b.Priority,
 			Parent:      b.Parent,
 			Labels:      labels,
-			Description: buildReviewerBeadDescription(b, info, nextRound, st.MaxRounds),
+			Description: buildReviewerBeadDescription(b, info, nextRound, st.MaxRounds, selectedRole, matchedSec),
 		})
 		if err != nil {
 			return ReviewRequestResult{}, fmt.Errorf("create reviewer bead for %s: %w", id, err)
@@ -565,39 +781,69 @@ func requestReview(cfg Config, env reviewLoopEnv, id string, opts ReviewRequestO
 	}
 
 	if revBead != "" {
-		if env.note != nil {
-			_ = env.note(revBead, prompt)
+		if spawnedBead == "" && env.enforce != nil && by != "TJ" {
+			prefix, err := env.enforce(b, "wake", by)
+			if err != nil {
+				return ReviewRequestResult{}, err
+			}
+			autoPrefix = prefix
 		}
 		told := false
 		if env.tell != nil {
 			if msg, terr := env.tell(revBead, prompt); terr == nil {
+				if env.note != nil {
+					_ = env.note(revBead, prompt)
+				}
 				reviewerAction = "told reviewer " + revBead + ": " + msg
 				told = true
 			}
 		}
 		if !told && env.dispatchReviewer != nil {
+			if !dispatchEnforced && env.enforce != nil && by != "TJ" {
+				prefix, err := env.enforce(b, "dispatch", by)
+				if err != nil {
+					return ReviewRequestResult{}, err
+				}
+				autoPrefix = prefix
+				dispatchEnforced = true
+			}
+			if env.note != nil {
+				_ = env.note(revBead, prompt)
+			}
 			dispatchBy := by
-			if spawnedBead != "" && by != "TJ" {
-				// Already enforced and journaled the dispatch check before
-				// creating the reviewer bead above.
+			if dispatchEnforced && by != "TJ" {
+				// Already enforced and journaled the dispatch check above.
 				dispatchBy = "TJ"
 			}
-			msg, derr := env.dispatchReviewer(revBead, opts.Agent, dispatchBy)
+			msg, derr := env.dispatchReviewer(revBead, selectedRole, opts.Agent, dispatchBy)
 			if derr != nil {
 				return ReviewRequestResult{}, fmt.Errorf("dispatch reviewer %s: %w", revBead, derr)
 			}
 			reviewerAction = "dispatched reviewer " + revBead + ": " + msg
+		} else if !told && env.note != nil {
+			_ = env.note(revBead, prompt)
 		}
 		st.ReviewerBead = revBead
+		st.ReviewerRole = selectedRole
+		if spawnedBead != "" {
+			st.ReviewerSpawned = true
+			if !slices.Contains(st.SpawnedReviewers, spawnedBead) {
+				st.SpawnedReviewers = append(st.SpawnedReviewers, spawnedBead)
+			}
+		} else if explicitReviewer != "" {
+			st.ReviewerSpawned = slices.Contains(st.SpawnedReviewers, explicitReviewer)
+		}
 	}
 
 	round := ReviewRound{
-		Round:       nextRound,
-		HeadSHA:     info.HeadSHA,
-		PRURL:       info.PRURL,
-		Reviewer:    revBead,
-		RequestedAt: now,
-		RequestedBy: by,
+		Round:                nextRound,
+		HeadSHA:              info.HeadSHA,
+		PRURL:                info.PRURL,
+		Reviewer:             revBead,
+		ReviewerRole:         selectedRole,
+		MatchedSecurityPaths: matchedSec,
+		RequestedAt:          now,
+		RequestedBy:          by,
 	}
 	st.CurrentRound = nextRound
 	st.State = reviewStatePending
@@ -613,11 +859,24 @@ func requestReview(cfg Config, env reviewLoopEnv, id string, opts ReviewRequestO
 	if revBead != "" {
 		noteText += " reviewer=" + revBead
 	}
+	if selectedRole != "" && selectedRole != roleReviewer {
+		noteText += " role=" + selectedRole
+	}
+	if len(matchedSec) > 0 && selectedRole != roleReviewer {
+		noteText += " security_paths=" + strings.Join(matchedSec, ",")
+	}
 	if info.PRURL != "" {
 		noteText += " pr=" + info.PRURL
 	}
 	if env.note != nil {
 		_ = env.note(id, noteText)
+		if autoPrefix != "" && (by == "ticker" || by == "inbox-runner") {
+			autoLine := fmt.Sprintf("%s requested skeptical review round %d/%d at %s (role %s)", autoPrefix, nextRound, st.MaxRounds, short(info.HeadSHA), selectedRole)
+			if revBead != "" {
+				autoLine = fmt.Sprintf("%s requested skeptical review round %d/%d at %s (role %s, reviewer %s)", autoPrefix, nextRound, st.MaxRounds, short(info.HeadSHA), selectedRole, revBead)
+			}
+			_ = env.note(id, autoLine)
+		}
 	}
 	if env.journal != nil {
 		_ = env.journal(journalRecord{
@@ -629,18 +888,34 @@ func requestReview(cfg Config, env reviewLoopEnv, id string, opts ReviewRequestO
 			Pass:   true,
 			Text:   noteText,
 		})
+		if autoPrefix != "" {
+			_ = env.journal(journalRecord{
+				At:     now,
+				Kind:   journalAuto,
+				Bead:   id,
+				Class:  classHousekeeping,
+				Action: "review_request",
+				Pass:   true,
+				Text:   noteText,
+			})
+		}
 	}
 
 	msg := fmt.Sprintf("started review round %d/%d for %s at %s", nextRound, st.MaxRounds, id, short(info.HeadSHA))
+	if selectedRole != "" && selectedRole != roleReviewer {
+		msg += " (role " + selectedRole + ")"
+	}
 	if reviewerAction != "" {
 		msg += " (" + reviewerAction + ")"
 	}
 	return ReviewRequestResult{
-		State:          st,
-		SpawnedBead:    spawnedBead,
-		ReviewerAction: reviewerAction,
-		Prompt:         prompt,
-		Message:        msg,
+		State:                st,
+		SpawnedBead:          spawnedBead,
+		ReviewerRole:         selectedRole,
+		MatchedSecurityPaths: matchedSec,
+		ReviewerAction:       reviewerAction,
+		Prompt:               prompt,
+		Message:              msg,
 	}, nil
 }
 
@@ -657,12 +932,15 @@ type ReviewVerdictInput struct {
 
 // ReviewVerdictResult describes the persisted and routed outcome of a verdict.
 type ReviewVerdictResult struct {
-	State       ReviewLoopState `json:"state"`
-	Verdict     string          `json:"verdict"`
-	Routed      bool            `json:"routed,omitempty"`
-	Escalated   bool            `json:"escalated,omitempty"`
-	RouteResult string          `json:"route_result,omitempty"`
-	Message     string          `json:"message"`
+	State            ReviewLoopState `json:"state"`
+	Verdict          string          `json:"verdict"`
+	Routed           bool            `json:"routed,omitempty"`
+	Escalated        bool            `json:"escalated,omitempty"`
+	RouteResult      string          `json:"route_result,omitempty"`
+	ReviewerClosed   []string        `json:"reviewer_closed,omitempty"`
+	ReviewerResolved []string        `json:"reviewer_resolved,omitempty"`
+	ReviewerCleanup  string          `json:"reviewer_cleanup,omitempty"`
+	Message          string          `json:"message"`
 }
 
 // recordReviewVerdict validates and persists a skeptical review verdict, routes
@@ -836,8 +1114,12 @@ func recordReviewVerdict(env reviewLoopEnv, id string, in ReviewVerdictInput) (R
 				Clears:  &InboxCondition{Kind: "bead_closed", Bead: id, Key: headSHA},
 			})
 		}
+		cleanupSpawnedReviewers(env, b, &st, *r, by, now, &res)
 		res.State = st
 		res.Message = fmt.Sprintf("recorded can_merge for %s round %d/%d at %s", id, r.Round, st.MaxRounds, short(headSHA))
+		if res.ReviewerCleanup != "" {
+			res.Message += "; " + res.ReviewerCleanup
+		}
 		return res, nil
 	}
 
@@ -936,11 +1218,150 @@ func escalateReviewLoop(env reviewLoopEnv, b Bead, st *ReviewLoopState, headSHA,
 	return nil
 }
 
-func buildReviewerBeadDescription(impl Bead, info reviewHeadInfo, round, maxRounds int) string {
+// cleanupSpawnedReviewers automatically closes spawned sibling reviewer beads
+// with the passing verdict summary and resolves their role directories or
+// worktrees. It strictly guards against ever closing or resolving the
+// implementer bead (or any non-reviewer implementer bead), and never fails the
+// already-recorded verdict if cleanup is skipped, deferred, or errors.
+func cleanupSpawnedReviewers(env reviewLoopEnv, impl Bead, st *ReviewLoopState, r ReviewRound, by string, now time.Time, res *ReviewVerdictResult) {
+	var targets []string
+	for _, rid := range st.SpawnedReviewers {
+		if rid != "" && rid != impl.ID && !slices.Contains(targets, rid) {
+			targets = append(targets, rid)
+		}
+	}
+	if st.ReviewerSpawned && st.ReviewerBead != "" && st.ReviewerBead != impl.ID && !slices.Contains(targets, st.ReviewerBead) {
+		targets = append(targets, st.ReviewerBead)
+	}
+	if len(targets) == 0 {
+		return
+	}
+
+	closeReason := fmt.Sprintf("Review passed (can_merge) for %s round %d/%d at %s: %s",
+		impl.ID, r.Round, st.MaxRounds, short(r.HeadSHA), r.Summary)
+
+	var msgs []string
+	pendingChanged := false
+	for _, revID := range targets {
+		if revID == "" || revID == impl.ID {
+			continue
+		}
+		if env.show == nil {
+			continue
+		}
+		revBead, err := env.show(revID)
+		if err != nil {
+			msgs = append(msgs, fmt.Sprintf("cleanup lookup %s failed: %v", revID, err))
+			continue
+		}
+		if revBead.ID != revID || revBead.ID == impl.ID {
+			continue
+		}
+		roleName, rerr := beadRole(revBead)
+		if rerr != nil || roleName == "" || roleName == roleImplementer {
+			msgs = append(msgs, fmt.Sprintf("cleanup refused for %s (not a reviewer role)", revID))
+			continue
+		}
+
+		closed := revBead.Status == StatusClosed
+		cleanupEnforced := false
+		if !closed {
+			if env.closeBead == nil {
+				continue
+			}
+			var prefix string
+			if env.enforce != nil && by != "TJ" {
+				p, eerr := env.enforce(revBead, "close", by)
+				if eerr != nil {
+					msgs = append(msgs, fmt.Sprintf("cleanup skipped for %s: %v", revID, eerr))
+					continue
+				}
+				prefix = p
+				cleanupEnforced = true
+			}
+			if err := env.closeBead(revID, closeReason); err != nil {
+				msgs = append(msgs, fmt.Sprintf("close reviewer %s failed: %v", revID, err))
+				continue
+			}
+			closed = true
+			res.ReviewerClosed = append(res.ReviewerClosed, revID)
+			msgs = append(msgs, "closed reviewer "+revID)
+			if prefix != "" && env.note != nil {
+				_ = env.note(revID, prefix+" close — "+closeReason)
+			}
+			if env.journal != nil {
+				_ = env.journal(journalRecord{
+					At:     now,
+					Kind:   journalReview,
+					Bead:   revID,
+					Class:  classHousekeeping,
+					Action: "cleanup_close",
+					Pass:   true,
+					Text:   closeReason,
+				})
+				if prefix != "" {
+					_ = env.journal(journalRecord{
+						At:     now,
+						Kind:   journalAuto,
+						Bead:   revID,
+						Class:  classHousekeeping,
+						Action: "close",
+						Pass:   true,
+						Text:   closeReason,
+					})
+				}
+			}
+		}
+
+		if closed && env.resolveReviewer != nil {
+			if !cleanupEnforced && env.enforce != nil && by != "TJ" {
+				if _, eerr := env.enforce(revBead, "resolve", by); eerr != nil {
+					msgs = append(msgs, fmt.Sprintf("resolve skipped for %s: %v", revID, eerr))
+					continue
+				}
+			}
+			rmsg, rerr := env.resolveReviewer(revID)
+			if rerr == nil {
+				res.ReviewerResolved = append(res.ReviewerResolved, revID)
+				if rmsg != "" {
+					msgs = append(msgs, fmt.Sprintf("resolved %s (%s)", revID, rmsg))
+				} else {
+					msgs = append(msgs, "resolved "+revID)
+				}
+				if idx := slices.Index(st.PendingResolveBeads, revID); idx >= 0 {
+					st.PendingResolveBeads = slices.Delete(st.PendingResolveBeads, idx, idx+1)
+					pendingChanged = true
+				}
+			} else if strings.Contains(rerr.Error(), "still working") {
+				if !slices.Contains(st.PendingResolveBeads, revID) {
+					st.PendingResolveBeads = append(st.PendingResolveBeads, revID)
+					pendingChanged = true
+				}
+				msgs = append(msgs, fmt.Sprintf("resolve deferred for %s (%v)", revID, rerr))
+			} else {
+				msgs = append(msgs, fmt.Sprintf("resolve %s failed: %v", revID, rerr))
+			}
+		}
+	}
+
+	if pendingChanged {
+		st.UpdatedAt = now
+		_ = saveReviewLoop(*st)
+	}
+	res.ReviewerCleanup = strings.Join(msgs, "; ")
+}
+
+func buildReviewerBeadDescription(impl Bead, info reviewHeadInfo, round, maxRounds int, selectedRole string, matchedSec []string) string {
 	var s strings.Builder
 	fmt.Fprintf(&s, "Skeptical review pass (round %d/%d) for implementer bead %s: %s\n\n", round, maxRounds, impl.ID, impl.Title)
 	fmt.Fprintf(&s, "- Target bead: `%s`\n", impl.ID)
 	fmt.Fprintf(&s, "- Target head SHA: `%s`\n", info.HeadSHA)
+	if selectedRole != "" && selectedRole != roleReviewer {
+		fmt.Fprintf(&s, "- Review role: `%s`\n", selectedRole)
+	}
+	if len(matchedSec) > 0 && selectedRole != roleReviewer {
+		fmt.Fprintf(&s, "- Security-sensitive paths matched: %s\n", strings.Join(matchedSec, ", "))
+	}
 	if info.Branch != "" {
 		fmt.Fprintf(&s, "- Branch: `%s`\n", info.Branch)
 	}
@@ -959,10 +1380,16 @@ func buildReviewerBeadDescription(impl Bead, info reviewHeadInfo, round, maxRoun
 	return s.String()
 }
 
-func buildReviewPassPrompt(impl Bead, st ReviewLoopState, round int, info reviewHeadInfo) string {
+func buildReviewPassPrompt(impl Bead, st ReviewLoopState, round int, info reviewHeadInfo, selectedRole string, matchedSec []string) string {
 	var s strings.Builder
 	fmt.Fprintf(&s, "%s Skeptical review round %d/%d for implementer bead %s: %s\n\n", reviewHeaderPrefix, round, st.MaxRounds, impl.ID, impl.Title)
 	fmt.Fprintf(&s, "- Head SHA: `%s`\n", info.HeadSHA)
+	if selectedRole != "" && selectedRole != roleReviewer {
+		fmt.Fprintf(&s, "- Review role: `%s`\n", selectedRole)
+	}
+	if len(matchedSec) > 0 && selectedRole != roleReviewer {
+		fmt.Fprintf(&s, "- Security-sensitive paths matched: %s\n", strings.Join(matchedSec, ", "))
+	}
 	if info.Branch != "" {
 		fmt.Fprintf(&s, "- Branch: `%s`\n", info.Branch)
 	}
@@ -1017,19 +1444,106 @@ func buildReviewPassedPrompt(impl Bead, r ReviewRound, maxRounds int) string {
 	return s.String()
 }
 
-// reviewLoopTriggerEnv injects git/event lookup for deterministic ticker tests.
+// reviewLoopTriggerEnv injects git/event/request lookup for deterministic ticker tests.
 type reviewLoopTriggerEnv struct {
-	resolveHead func(th Thread) (string, bool) // headSHA, readyForReview
-	event       func(Event) error
-	logf        func(format string, args ...any)
+	resolveHead     func(th Thread) (string, bool) // headSHA, readyForReview
+	autoRequest     func(b Bead, headSHA, prURL string) (ReviewRequestResult, error)
+	resolveReviewer func(id string) (string, error)
+	show            func(id string) (Bead, error)
+	held            func(id string) bool
+	headless        func(id string) bool
+	event           func(Event) error
+	logf            func(format string, args ...any)
+}
+
+// drainPendingReviewerResolves completes deferred role-dir / worktree cleanup
+// for closed sibling reviewer beads whose agent was still finishing its turn
+// when `can_merge` was recorded.
+func drainPendingReviewerResolves(env reviewLoopTriggerEnv, now time.Time) []string {
+	if env.resolveReviewer == nil {
+		return nil
+	}
+	loops, err := listReviewLoops()
+	if err != nil {
+		return nil
+	}
+	var lines []string
+	for _, item := range loops {
+		if len(item.PendingResolveBeads) == 0 {
+			continue
+		}
+		unlock, err := lockReviewLoop(item.Bead)
+		if err != nil {
+			continue
+		}
+		st, ok, lerr := loadReviewLoop(item.Bead)
+		if lerr != nil || !ok || len(st.PendingResolveBeads) == 0 {
+			unlock()
+			continue
+		}
+		var remaining []string
+		changed := false
+		for _, revID := range st.PendingResolveBeads {
+			if revID == "" || revID == st.Bead {
+				changed = true
+				continue
+			}
+			if env.show != nil {
+				rb, serr := env.show(revID)
+				if serr != nil {
+					if errors.Is(serr, errBeadNotFound) {
+						changed = true
+						continue
+					}
+					remaining = append(remaining, revID)
+					continue
+				}
+				if rb.Status != StatusClosed {
+					remaining = append(remaining, revID)
+					continue
+				}
+				if roleName, rerr := beadRole(rb); rerr != nil || roleName == "" || roleName == roleImplementer {
+					changed = true
+					continue
+				}
+			}
+			rmsg, rerr := env.resolveReviewer(revID)
+			if rerr == nil {
+				changed = true
+				lines = append(lines, fmt.Sprintf("resolved finished reviewer %s for %s: %s", revID, st.Bead, rmsg))
+				continue
+			}
+			if strings.Contains(rerr.Error(), "still working") {
+				remaining = append(remaining, revID)
+				continue
+			}
+			// Do not loop forever on permanent resolve errors; log and clear.
+			changed = true
+			if env.logf != nil {
+				env.logf("review loop %s deferred resolve %s: %v", st.Bead, revID, rerr)
+			}
+		}
+		if changed {
+			st.PendingResolveBeads = remaining
+			st.UpdatedAt = now
+			if serr := saveReviewLoop(st); serr != nil && env.logf != nil {
+				env.logf("review loop %s save pending resolves: %v", st.Bead, serr)
+			}
+		}
+		unlock()
+	}
+	return lines
 }
 
 // checkReviewLoopsPass inspects active implementer threads with either an
 // existing changes_requested review loop or the opt-in review:required label.
-// Whenever a new head SHA appears (and current_round < max_rounds), it emits
-// one deduplicated review_needed inbox event per head SHA.
+// Whenever a new clean head SHA appears (and current_round < max_rounds), it
+// automatically triggers `review request --spawn` for review:required beads
+// (gated by autonomy class 3 + budget + head-SHA dedup), falling back to one
+// deduplicated review_needed inbox event when auto-trigger is skipped,
+// disabled, or fails.
 func checkReviewLoopsPass(cfg Config, env reviewLoopTriggerEnv, threads []Thread, now time.Time) []string {
-	var lines []string
+	lines := drainPendingReviewerResolves(env, now)
 	for _, th := range threads {
 		b := th.Bead
 		if b.Status == StatusClosed || b.Status == StatusNeedsMe {
@@ -1109,12 +1623,39 @@ func checkReviewLoopsPass(cfg Config, env reviewLoopTriggerEnv, threads []Thread
 		}
 		unlock()
 
+		var autoSkip string
+		if cfg.Review.autoTriggerEnabled() && b.HasLabel(reviewRequiredLabel) && env.autoRequest != nil {
+			switch {
+			case env.held != nil && env.held(b.ID):
+				autoSkip = "bead is on hold"
+			case env.headless != nil && env.headless(b.ID):
+				autoSkip = "headless-owned bead"
+			default:
+				prURL := ""
+				if th.PR != nil && th.PR.State == "OPEN" {
+					prURL = th.PR.URL
+				}
+				reqRes, reqErr := env.autoRequest(b, headSHA, prURL)
+				if reqErr == nil {
+					lines = append(lines, "auto-triggered: "+reqRes.Message)
+					continue
+				}
+				autoSkip = reqErr.Error()
+				if env.logf != nil {
+					env.logf("review loop %s auto-trigger skipped: %v", b.ID, reqErr)
+				}
+			}
+		}
+
 		nextRound := cur.CurrentRound + 1
 		summary := fmt.Sprintf("%s has new head %s ready for skeptical review round %d/%d; run `quartermaster review request %s --head %s --spawn`",
 			b.ID, short(headSHA), nextRound, cur.MaxRounds, b.ID, headSHA)
 		if cur.ReviewerBead != "" {
 			summary = fmt.Sprintf("%s has new head %s ready for skeptical review round %d/%d (reviewer %s); run `quartermaster review request %s --head %s`",
 				b.ID, short(headSHA), nextRound, cur.MaxRounds, cur.ReviewerBead, b.ID, headSHA)
+		}
+		if autoSkip != "" {
+			summary += fmt.Sprintf(" (auto-trigger skipped: %s)", shortTitle(autoSkip, 120))
 		}
 		if env.event != nil {
 			if err := env.event(Event{
@@ -1142,7 +1683,8 @@ func (t Ticker) checkReviewLoops(threads []Thread, now time.Time) {
 				return strings.ToLower(th.PR.HeadSHA), true
 			}
 			// Pre-PR worktree head triggers only when the worker is at rest
-			// with a clean working tree so we never review half-edited files.
+			// with a clean working tree and at least one commit ahead of base
+			// so we never review half-edited files or freshly cut empty branches.
 			if th.Agent == nil || !agentReady(th.Agent) {
 				return "", false
 			}
@@ -1154,10 +1696,30 @@ func (t Ticker) checkReviewLoops(threads []Thread, now time.Time) {
 			if err != nil {
 				return "", false
 			}
+			if !gitWorktreeHasCommitsAhead(wt.Path, t.cfg.BaseBranch, sha) {
+				return "", false
+			}
 			return sha, true
 		},
-		event: writeEvent,
-		logf:  t.log.Printf,
+		autoRequest: func(b Bead, headSHA, prURL string) (ReviewRequestResult, error) {
+			return requestReview(t.cfg, liveReviewLoopEnv(t.cfg, t.herdr), b.ID, ReviewRequestOpts{
+				HeadSHA:       headSHA,
+				PRURL:         prURL,
+				SpawnReviewer: true,
+				By:            "ticker",
+			})
+		},
+		resolveReviewer: func(id string) (string, error) {
+			return resolve(t.cfg, t.herdr, id, false)
+		},
+		show: t.beads.Show,
+		held: func(id string) bool {
+			_, ok := isJobHeld(id)
+			return ok
+		},
+		headless: headlessOwned,
+		event:    writeEvent,
+		logf:     t.log.Printf,
 	}
 	for _, line := range checkReviewLoopsPass(t.cfg, env, threads, now) {
 		t.log.Printf("review loop: %s", line)
@@ -1359,7 +1921,14 @@ func writeReviewLoopStatusText(w io.Writer, st ReviewLoopState) {
 		fmt.Fprintf(w, "passed:   %s\n", st.PassedHeadSHA)
 	}
 	if st.ReviewerBead != "" {
-		fmt.Fprintf(w, "reviewer: %s\n", st.ReviewerBead)
+		if st.ReviewerRole != "" && st.ReviewerRole != roleReviewer {
+			fmt.Fprintf(w, "reviewer: %s (role:%s)\n", st.ReviewerBead, st.ReviewerRole)
+		} else {
+			fmt.Fprintf(w, "reviewer: %s\n", st.ReviewerBead)
+		}
+	}
+	if len(st.PendingResolveBeads) > 0 {
+		fmt.Fprintf(w, "cleanup:  pending resolve (%s)\n", strings.Join(st.PendingResolveBeads, ", "))
 	}
 	if st.EscalatedWhy != "" {
 		fmt.Fprintf(w, "escalated: %s\n", st.EscalatedWhy)
@@ -1370,10 +1939,16 @@ func writeReviewLoopStatusText(w io.Writer, st ReviewLoopState) {
 			v = "pending"
 		}
 		fmt.Fprintf(w, "  round %d/%d @%s [%s]", r.Round, st.MaxRounds, short(r.HeadSHA), v)
+		if r.ReviewerRole != "" && r.ReviewerRole != roleReviewer {
+			fmt.Fprintf(w, " [role:%s]", r.ReviewerRole)
+		}
 		if r.Summary != "" {
 			fmt.Fprintf(w, " — %s", r.Summary)
 		}
 		fmt.Fprintln(w)
+		if len(r.MatchedSecurityPaths) > 0 && r.ReviewerRole != roleReviewer {
+			fmt.Fprintf(w, "    security paths: %s\n", strings.Join(r.MatchedSecurityPaths, ", "))
+		}
 		for i, f := range r.Findings {
 			fmt.Fprintf(w, "    %d. %s\n", i+1, f.String())
 		}

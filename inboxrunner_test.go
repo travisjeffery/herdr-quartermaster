@@ -1436,3 +1436,259 @@ func TestInboxRunnerChainedRolloutAndReviewLoopPreflight(t *testing.T) {
 		}
 	}
 }
+
+func TestInboxRunnerAutoTriggersReviewNeededForReviewRequiredBeads(t *testing.T) {
+	t.Run("auto-triggers review request --spawn with security routing without invoking LLM", func(t *testing.T) {
+		cfg, _ := setupInboxRunnerTestEnv(t)
+		cfg.InboxRunner.Command = []string{"true"}
+		cfg.Autonomy.Level = 5
+		cfg.Autonomy.Max = 7
+		noWorktree := false
+		cfg.Review.SecurityPaths = []string{"**/auth/**", "**/.github/workflows/**"}
+		cfg.Roles = map[string]RoleConfig{
+			"security-review": {Worktree: &noWorktree, Brief: roleReviewer},
+		}
+
+		now := time.Date(2026, 11, 27, 16, 0, 0, 0, time.UTC)
+		old := now.Add(-10 * time.Minute)
+
+		impl := Bead{
+			ID:          "impl-sec",
+			Title:       "Harden session auth",
+			Status:      StatusInProgress,
+			Priority:    2,
+			Labels:      []string{reviewRequiredLabel},
+			Description: "Design: enforce JWT audience.\n\n## Acceptance\n- Rejects wrong audience",
+		}
+		revFake := newFakeReviewEnv(impl)
+		revFake.changedFiles[testHeadSHA1] = []string{"pkg/auth/session.go"}
+		revFake.tellErr["rev-1"] = errors.New("not running")
+		revFake.enforceFn = func(b Bead, action, by string) (string, error) {
+			return cfg.enforce(b, action, by)
+		}
+
+		evFile := writeTestInboxEvent(t, Event{
+			Bead:    "impl-sec",
+			Kind:    EventReviewNeeded,
+			Summary: "impl-sec has new head 1111111 ready for review round 1/2",
+			At:      old,
+			Clears:  &InboxCondition{Kind: "review_needed", Bead: "impl-sec", Key: testHeadSHA1},
+		})
+
+		llmCalled := false
+		env := inboxRunnerEnv{
+			now:           func() time.Time { return now },
+			listAgents:    func() (map[string]Agent, bool, error) { return nil, false, nil },
+			readInbox:     readInbox,
+			showBead:      revFake.env().show,
+			headlessOwned: func(string) bool { return false },
+			coordDir:      coordinatorHome,
+			requestReview: func(id string, opts ReviewRequestOpts) (ReviewRequestResult, error) {
+				return requestReview(cfg, revFake.env(), id, opts)
+			},
+			ackInbox: inboxDoneFiles,
+			execCmd: func(_ context.Context, _ Config, _ string, _ []string, _ string) inboxRunnerExecResult {
+				llmCalled = true
+				return inboxRunnerExecResult{ExitCode: 0}
+			},
+			notify: func(_, _ string) desktopResult { return desktopResult{"submitted", "ok"} },
+		}
+
+		// Dry-run reports eligible (auto-review) and mutates nothing.
+		var dryBuf bytes.Buffer
+		if err := inboxRunnerCmd(cfg, env, []string{"run", "--dry-run"}, &dryBuf); err != nil {
+			t.Fatalf("dry-run failed: %v", err)
+		}
+		if !strings.Contains(dryBuf.String(), "eligible (auto-review)") {
+			t.Fatalf("dry-run output missing eligible (auto-review):\n%s", dryBuf.String())
+		}
+		if len(revFake.created) != 0 {
+			t.Fatal("dry-run must not spawn reviewer bead")
+		}
+
+		// Live run deterministically triggers review request --spawn and skips LLM execCmd.
+		res, err := runInboxRunner(context.Background(), cfg, env, inboxRunnerOpts{Manual: false})
+		if err != nil {
+			t.Fatalf("runInboxRunner: %v", err)
+		}
+		if !res.Ran || res.Acked != 1 || !slices.Equal(res.Eligible, []string{evFile}) {
+			t.Fatalf("unexpected auto-review run result: %+v", res)
+		}
+		if llmCalled {
+			t.Fatal("expected deterministic auto-review to handle batch without launching LLM subprocess")
+		}
+		if len(revFake.created) != 1 || !slices.Contains(revFake.created[0].Labels, "role:security-review") {
+			t.Fatalf("expected spawned role:security-review bead, got %+v", revFake.created)
+		}
+		if len(revFake.dispatches) != 1 || revFake.dispatches[0].Role != "security-review" {
+			t.Fatalf("expected dispatch with role=security-review, got %+v", revFake.dispatches)
+		}
+		st, ok, err := loadReviewLoop("impl-sec")
+		if err != nil || !ok || st.State != reviewStatePending || st.LastHeadSHA != testHeadSHA1 || st.ReviewerRole != "security-review" {
+			t.Fatalf("unexpected review loop state: ok=%v err=%v st=%+v", ok, err, st)
+		}
+		// Inbox file must be archived cleanly.
+		rem, err := readInbox()
+		if err != nil || len(rem) != 0 {
+			t.Fatalf("expected inbox empty after auto-review ack, got err=%v items=%+v", err, rem)
+		}
+	})
+
+	t.Run("mixed batch auto-triggers review_needed and only sends remaining items to LLM", func(t *testing.T) {
+		cfg, _ := setupInboxRunnerTestEnv(t)
+		cfg.InboxRunner.Command = []string{"true"}
+		cfg.Autonomy.Level = 5
+		cfg.Autonomy.Max = 7
+
+		now := time.Date(2026, 11, 27, 16, 5, 0, 0, time.UTC)
+		old := now.Add(-10 * time.Minute)
+
+		impl := Bead{ID: "impl-mix", Title: "Add endpoint", Status: StatusInProgress, Labels: []string{reviewRequiredLabel}}
+		other := Bead{ID: "task-pr", Title: "Ready PR", Status: StatusInProgress}
+		revFake := newFakeReviewEnv(impl, other)
+		revFake.tellErr["rev-1"] = errors.New("not running")
+		revFake.enforceFn = func(b Bead, action, by string) (string, error) {
+			return cfg.enforce(b, action, by)
+		}
+
+		revFile := writeTestInboxEvent(t, Event{
+			Bead:    "impl-mix",
+			Kind:    EventReviewNeeded,
+			Summary: "impl-mix ready for review",
+			At:      old,
+			Clears:  &InboxCondition{Kind: "review_needed", Bead: "impl-mix", Key: testHeadSHA1},
+		})
+		prFile := writeTestInboxEvent(t, Event{
+			Bead:    "task-pr",
+			Kind:    EventReadyForReview,
+			Summary: "PR #99 green and awaiting review",
+			At:      old.Add(time.Second),
+		})
+
+		var gotPrompt string
+		env := inboxRunnerEnv{
+			now:           func() time.Time { return now },
+			listAgents:    func() (map[string]Agent, bool, error) { return nil, false, nil },
+			readInbox:     readInbox,
+			showBead:      revFake.env().show,
+			headlessOwned: func(string) bool { return false },
+			coordDir:      coordinatorHome,
+			requestReview: func(id string, opts ReviewRequestOpts) (ReviewRequestResult, error) {
+				return requestReview(cfg, revFake.env(), id, opts)
+			},
+			ackInbox: inboxDoneFiles,
+			execCmd: func(_ context.Context, _ Config, _ string, _ []string, prompt string) inboxRunnerExecResult {
+				gotPrompt = prompt
+				_, _ = inboxDoneFiles([]string{prFile})
+				return inboxRunnerExecResult{ExitCode: 0, Output: "handled ready_for_review"}
+			},
+			notify: func(_, _ string) desktopResult { return desktopResult{"submitted", "ok"} },
+		}
+
+		res, err := runInboxRunner(context.Background(), cfg, env, inboxRunnerOpts{Manual: false})
+		if err != nil {
+			t.Fatalf("runInboxRunner mixed batch: %v", err)
+		}
+		if !res.Ran || res.Acked != 2 || !slices.Equal(res.Eligible, []string{revFile, prFile}) {
+			t.Fatalf("unexpected mixed result: %+v", res)
+		}
+		if len(revFake.created) != 1 {
+			t.Fatalf("expected 1 spawned reviewer bead, got %d", len(revFake.created))
+		}
+		if !strings.Contains(gotPrompt, "task-pr") || strings.Contains(gotPrompt, "impl-mix") {
+			t.Fatalf("LLM prompt should contain only task-pr and exclude auto-handled impl-mix:\n%s", gotPrompt)
+		}
+	})
+
+	t.Run("enforces autonomy class 3 preflight and dispatch budget fail-closed", func(t *testing.T) {
+		cfg, _ := setupInboxRunnerTestEnv(t)
+		cfg.InboxRunner.Command = []string{"true"}
+		cfg.Autonomy.Level = 5
+		cfg.Autonomy.Max = 7
+		cfg.Autonomy.Budget.Dispatches = 1
+
+		now := time.Date(2026, 11, 27, 16, 10, 0, 0, time.UTC)
+		old := now.Add(-10 * time.Minute)
+
+		lowBead := Bead{ID: "impl-low", Title: "Supervised bead", Status: StatusInProgress, Labels: []string{reviewRequiredLabel, "autonomy:2"}}
+		budgetBead := Bead{ID: "impl-budget", Title: "Over-budget bead", Status: StatusInProgress, Labels: []string{reviewRequiredLabel}}
+		revFake := newFakeReviewEnv(lowBead, budgetBead)
+		revFake.enforceFn = func(b Bead, action, by string) (string, error) {
+			return cfg.enforce(b, action, by)
+		}
+
+		// Spend the single dispatch allowed in this rolling hour.
+		if err := appendJournal(journalRecord{At: time.Now(), Kind: journalCheck, Bead: "other", Class: 3, Action: "dispatch", Pass: true}); err != nil {
+			t.Fatal(err)
+		}
+
+		writeTestInboxEvent(t, Event{
+			Bead:    "impl-low",
+			Kind:    EventReviewNeeded,
+			Summary: "impl-low ready",
+			At:      old,
+			Clears:  &InboxCondition{Kind: "review_needed", Bead: "impl-low", Key: testHeadSHA1},
+		})
+		budgetFile := writeTestInboxEvent(t, Event{
+			Bead:    "impl-budget",
+			Kind:    EventReviewNeeded,
+			Summary: "impl-budget ready",
+			At:      old.Add(time.Second),
+			Clears:  &InboxCondition{Kind: "review_needed", Bead: "impl-budget", Key: testHeadSHA2},
+		})
+
+		llmCalled := false
+		env := inboxRunnerEnv{
+			now:           func() time.Time { return now },
+			listAgents:    func() (map[string]Agent, bool, error) { return nil, false, nil },
+			readInbox:     readInbox,
+			showBead:      revFake.env().show,
+			headlessOwned: func(string) bool { return false },
+			coordDir:      coordinatorHome,
+			requestReview: func(id string, opts ReviewRequestOpts) (ReviewRequestResult, error) {
+				return requestReview(cfg, revFake.env(), id, opts)
+			},
+			ackInbox: inboxDoneFiles,
+			execCmd: func(_ context.Context, _ Config, _ string, _ []string, _ string) inboxRunnerExecResult {
+				llmCalled = true
+				return inboxRunnerExecResult{ExitCode: 0}
+			},
+			notify: func(_, _ string) desktopResult { return desktopResult{"submitted", "ok"} },
+		}
+
+		// Preflight excludes impl-low at L2 without burning attempts.
+		rep, err := buildInboxRunnerStatus(cfg, env)
+		if err != nil {
+			t.Fatalf("buildInboxRunnerStatus: %v", err)
+		}
+		if rep.Inbox.Excluded != 1 || rep.Inbox.EligibleNow != 1 {
+			t.Fatalf("unexpected preflight counts: %+v", rep.Inbox)
+		}
+		reasons := map[string]string{}
+		for _, iv := range rep.Inbox.Items {
+			reasons[iv.Bead] = iv.Reason
+		}
+		if !strings.Contains(reasons["impl-low"], "review_above_level (C3 > L2)") {
+			t.Fatalf("impl-low reason = %q, want review_above_level (C3 > L2)", reasons["impl-low"])
+		}
+
+		// Running fails closed on exhausted budget for impl-budget: no reviewer spawned,
+		// no inbox ack, and no LLM fallback bypass.
+		res, err := runInboxRunner(context.Background(), cfg, env, inboxRunnerOpts{Manual: false})
+		if err == nil || !strings.Contains(err.Error(), "budget:") {
+			t.Fatalf("expected budget failure error, got res=%+v err=%v", res, err)
+		}
+		if llmCalled || len(revFake.created) != 0 || res.Acked != 0 {
+			t.Fatalf("budget failure must fail closed without spawning, acking, or calling LLM: llm=%v created=%d acked=%d",
+				llmCalled, len(revFake.created), res.Acked)
+		}
+		rem, err := readInbox()
+		if err != nil || len(rem) != 2 {
+			t.Fatalf("both inbox files should remain un-acked, got err=%v len=%d", err, len(rem))
+		}
+		st := loadInboxRunnerState()
+		if st.Attempts[budgetFile].Count != 1 || !strings.Contains(st.Attempts[budgetFile].LastError, "budget:") {
+			t.Fatalf("unexpected attempt tracking for %s: %+v", budgetFile, st.Attempts[budgetFile])
+		}
+	})
+}
