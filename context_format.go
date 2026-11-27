@@ -175,25 +175,27 @@ type contextPR struct {
 }
 
 type contextThread struct {
-	Bead         string     `json:"bead,omitempty"`
-	Group        string     `json:"group"`
-	Status       string     `json:"status,omitempty"`
-	Parked       bool       `json:"parked,omitempty"`
-	ParkedReason string     `json:"parked_reason,omitempty"`
-	SnoozedUntil *time.Time `json:"snoozed_until,omitempty"`
-	PR           *contextPR `json:"pr"`
-	Repo         string     `json:"repo,omitempty"`
-	Role         string     `json:"role,omitempty"`
-	State        string     `json:"state,omitempty"`
-	Agent        string     `json:"agent,omitempty"`
-	Title        string     `json:"title,omitempty"`
-	Linear       string     `json:"linear,omitempty"`
-	Level        string     `json:"level,omitempty"`
-	Run          string     `json:"run,omitempty"`
-	Question     string     `json:"question,omitempty"`
-	Options      string     `json:"options,omitempty"`
-	Watches      string     `json:"watches,omitempty"`
-	NoAgentKind  string     `json:"no_agent_kind,omitempty"`
+	Bead          string     `json:"bead,omitempty"`
+	Group         string     `json:"group"`
+	Status        string     `json:"status,omitempty"`
+	Parked        bool       `json:"parked,omitempty"`
+	ParkedReason  string     `json:"parked_reason,omitempty"`
+	SnoozedUntil  *time.Time `json:"snoozed_until,omitempty"`
+	PR            *contextPR `json:"pr"`
+	Repo          string     `json:"repo,omitempty"`
+	Role          string     `json:"role,omitempty"`
+	RolloutTarget string     `json:"rollout_target,omitempty"`
+	ReviewLoop    string     `json:"review_loop,omitempty"`
+	State         string     `json:"state,omitempty"`
+	Agent         string     `json:"agent,omitempty"`
+	Title         string     `json:"title,omitempty"`
+	Linear        string     `json:"linear,omitempty"`
+	Level         string     `json:"level,omitempty"`
+	Run           string     `json:"run,omitempty"`
+	Question      string     `json:"question,omitempty"`
+	Options       string     `json:"options,omitempty"`
+	Watches       string     `json:"watches,omitempty"`
+	NoAgentKind   string     `json:"no_agent_kind,omitempty"`
 
 	Folded bool     `json:"folded,omitempty"`
 	Count  int      `json:"count,omitempty"`
@@ -202,6 +204,7 @@ type contextThread struct {
 	group      Group  `json:"-"`
 	repoTag    string `json:"-"`
 	roleTag    string `json:"-"`
+	targetTag  string `json:"-"`
 	isNeedsMe  bool   `json:"-"`
 	parkedKind string `json:"-"`
 	cardLine   string `json:"-"`
@@ -630,6 +633,11 @@ func buildContextThread(cfg Config, t Thread, g Group, noAgentKind string, compa
 	if role, err := cfg.resolveRoleForBead(t.Bead, ""); err == nil && role.Name != roleImplementer {
 		ct.Role = role.Name
 	}
+	ct.targetTag = rolloutTargetTag(t.Bead)
+	if target, err := rolloutTarget(t.Bead); err == nil && target != "" {
+		ct.RolloutTarget = target
+	}
+	ct.ReviewLoop = reviewLoopContextLine(t.Bead.ID)
 	ct.State = stateLine(t)
 	agent := "no agent"
 	if t.Agent != nil {
@@ -1058,7 +1066,7 @@ func renderThreadsText(doc *contextDoc) string {
 		if t.Parked && t.ParkedReason != "" {
 			state = "parked (" + t.ParkedReason + ")"
 		}
-		fmt.Fprintf(&s, "- %s%s%s · %s · %s · %s\n", t.Bead, t.repoTag, t.roleTag, state, t.Agent, t.Title)
+		fmt.Fprintf(&s, "- %s%s%s%s · %s · %s · %s\n", t.Bead, t.repoTag, t.roleTag, t.targetTag, state, t.Agent, t.Title)
 		if t.Run != "" {
 			fmt.Fprintf(&s, "  run: %s\n", t.Run)
 		}
@@ -1072,6 +1080,9 @@ func renderThreadsText(doc *contextDoc) string {
 		}
 		if t.PR != nil && t.PR.URL != "" {
 			fmt.Fprintf(&s, "  %s\n", t.PR.URL)
+		}
+		if t.ReviewLoop != "" {
+			fmt.Fprintf(&s, "  review: %s\n", t.ReviewLoop)
 		}
 		if t.Watches != "" {
 			fmt.Fprintf(&s, "  watches: %s\n", t.Watches)

@@ -670,6 +670,7 @@ func (t Ticker) once(st *TickerState) error {
 		t.orphanFinish(st, allBeads, agents, agentsComplete, now)
 	}
 	t.checkBlockers(st, allBeads, threads, agents, agentsComplete, freshPRs, knownPRs, ghRefreshed, promptedThisTick, relaunch, watchOutcomes, now)
+	t.checkReviewLoops(threads, now)
 	t.advanceWorkflows(st, threads, now)
 	t.processJobs(st, threads, agents, now)
 	piCoordStatus := t.nudgeCoordinator(st, agents, now)

@@ -284,6 +284,9 @@ const (
 	EventWatchTriggered  EventKind = "watch_triggered"
 	EventWatchExpired    EventKind = "watch_expired"
 	EventUnblocked       EventKind = "unblocked"
+	EventReviewNeeded    EventKind = "review_needed"
+	EventReviewFeedback  EventKind = "review_feedback"
+	EventReviewPassed    EventKind = "review_passed"
 )
 
 type Event struct {
@@ -328,6 +331,8 @@ func isHousekeepingNote(line string) bool {
 		"AUTO:", "auto:", "VERIFY:", "PR:", "Linear:", "MILESTONE:",
 		"WATCH TRIGGERED", "WATCH EXPIRED",
 		"SNOOZE:", "SNOOZED:",
+		"REVIEW REQUEST:", "REVIEW VERDICT:", "REVIEW FEEDBACK:", "REVIEW ESCALATED:",
+		"CHAINED ROLLOUT:",
 		"autonomy level ",
 		"quartermaster relaunched the worker ",
 		"quartermaster could not relaunch the worker ",

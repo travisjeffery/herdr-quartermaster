@@ -334,6 +334,69 @@ func (b Beads) SetLabel(id, label string, on bool) error {
 	return err
 }
 
+// BeadCreateOpts configures `bd create --json` for helper commands such as
+// chained rollout beads and spawned reviewer beads.
+type BeadCreateOpts struct {
+	Title       string
+	Type        string
+	Priority    int
+	Description string
+	Parent      string
+	Labels      []string
+	BlockedBy   []string
+}
+
+func (b Beads) Create(opts BeadCreateOpts) (Bead, error) {
+	title := strings.TrimSpace(opts.Title)
+	if title == "" {
+		return Bead{}, errors.New("bead title is required")
+	}
+	issueType := opts.Type
+	if issueType == "" {
+		issueType = "task"
+	}
+	args := []string{"create", title, "--json", "-t", issueType, "-p", strconv.Itoa(opts.Priority)}
+	if opts.Description != "" {
+		args = append(args, "-d", opts.Description)
+	}
+	if opts.Parent != "" {
+		args = append(args, "--parent", opts.Parent)
+	}
+	if len(opts.Labels) > 0 {
+		args = append(args, "-l", strings.Join(opts.Labels, ","))
+	}
+	if len(opts.BlockedBy) > 0 {
+		deps := make([]string, 0, len(opts.BlockedBy))
+		for _, dep := range opts.BlockedBy {
+			if dep = strings.TrimSpace(dep); dep != "" {
+				deps = append(deps, "blocked-by:"+dep)
+			}
+		}
+		if len(deps) > 0 {
+			args = append(args, "--deps", strings.Join(deps, ","))
+		}
+	}
+	out, err := b.run(args...)
+	if err != nil {
+		return Bead{}, err
+	}
+	trimmed := bytes.TrimSpace(out)
+	var single Bead
+	if err := json.Unmarshal(trimmed, &single); err == nil && single.ID != "" {
+		return single, nil
+	}
+	var list []Bead
+	if err := json.Unmarshal(trimmed, &list); err == nil && len(list) > 0 && list[0].ID != "" {
+		return list[0], nil
+	}
+	return Bead{}, fmt.Errorf("bd create: unexpected JSON output: %s", shortTitle(string(trimmed), 120))
+}
+
+func (b Beads) AddDep(id, dependsOn string) error {
+	_, err := b.run("dep", "add", id, dependsOn)
+	return err
+}
+
 var prURL = regexp.MustCompile(`https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)`)
 
 // NotedPRs returns the PR URLs a bead's notes mention, most recent last.

@@ -768,11 +768,95 @@ func TestContextAndCoordinatorGuideRoles(t *testing.T) {
 		t.Errorf("context JSON did not include role=reviewer for b-rev: %+v", doc.Threads)
 	}
 
-	// coordinatorGuide documents --role, role:<name>, and quartermaster roles.
+	// coordinatorGuide documents --role, role:<name>, quartermaster roles, ping-pong review, and chained rollout.
 	guide := coordinatorGuide(cfg)
-	for _, want := range []string{"--role implementer|reviewer|investigator|rollout", "role:<name>", "quartermaster roles"} {
+	for _, want := range []string{
+		"--role implementer|reviewer|investigator|rollout",
+		"role:<name>",
+		"quartermaster roles",
+		"quartermaster review request",
+		"quartermaster review verdict",
+		"quartermaster rollout chain",
+		"--rollout-target",
+		"rollout-target:<target>",
+	} {
 		if !strings.Contains(guide, want) {
 			t.Errorf("coordinatorGuide missing %q", want)
 		}
+	}
+}
+
+func TestRolloutTargetLabelParsingBriefAndContext(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	cfg := Config{Repo: "/r"}
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+
+	// Valid target parsing.
+	b := Bead{ID: "roll-1", Title: "Deploy to dev", Status: StatusInProgress, Labels: []string{"role:rollout", "rollout-target:dev"}}
+	if got, err := rolloutTarget(b); err != nil || got != "dev" {
+		t.Fatalf("rolloutTarget = %q, %v; want dev", got, err)
+	}
+	// Rollout brief surfaces target and target-scoped autonomy check.
+	rb := briefForRole(b, builtinRolePreset(roleRollout), "", "/state/roles/roll-1", "/r", "", "", "")
+	for _, want := range []string{"Target environment/stack: `dev`", "--action rollout --target dev", "rolling-out"} {
+		if !strings.Contains(rb, want) {
+			t.Errorf("rolloutBrief missing %q:\n%s", want, rb)
+		}
+	}
+	// Reviewer brief surfaces ping-pong verdict handoff command without PR-authoring boilerplate.
+	revText := briefForRole(Bead{ID: "rev-1", Title: "Review change"}, builtinRolePreset(roleReviewer), "", "/state/roles/rev-1", "/r", "", "", "")
+	if !strings.Contains(revText, "quartermaster review verdict") || strings.Contains(revText, "auto-merge") {
+		t.Errorf("reviewerBrief missing verdict command or leaked auto-merge:\n%s", revText)
+	}
+
+	// Fail closed on empty, invalid, or duplicate rollout-target:* labels.
+	for _, tc := range []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"empty target", []string{"rollout-target:"}, "empty rollout-target:"},
+		{"bad whitespace target", []string{"rollout-target:dev east"}, "invalid rollout target"},
+		{"multiple targets", []string{"rollout-target:dev", "rollout-target:staging"}, "multiple rollout target labels"},
+	} {
+		if _, err := rolloutTarget(Bead{ID: "b-x", Labels: tc.labels}); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err=%v, want %q", tc.name, err, tc.want)
+		}
+	}
+
+	// Context renders [target:dev] tag and JSON rollout_target field, plus warnings for duplicate target labels.
+	bad := Bead{ID: "roll-bad", Title: "Bad targets", Status: StatusInProgress, Labels: []string{"role:rollout", "rollout-target:dev", "rollout-target:prod"}}
+	threads := []Thread{
+		{Bead: b, Agent: &Agent{Name: "roll-1", Kind: "pi", Status: "working"}},
+		{Bead: bad, Agent: &Agent{Name: "roll-bad", Kind: "pi", Status: "idle"}},
+	}
+	out := renderContext(cfg, threads, nil, nil, nil, TickerState{}, nil, now)
+	if !strings.Contains(out, "- roll-1 [role:rollout] [target:dev] · ") {
+		t.Errorf("context text missing target tag:\n%s", out)
+	}
+	if !strings.Contains(out, "WARNING: roll-bad has multiple rollout target labels") {
+		t.Errorf("context text missing duplicate target warning:\n%s", out)
+	}
+	jsonOut, err := renderContextWith(cfg, threads, nil, nil, nil, TickerState{}, nil, now, ContextOptions{JSON: true})
+	if err != nil {
+		t.Fatalf("context JSON: %v", err)
+	}
+	var doc struct {
+		Threads []struct {
+			Bead          string `json:"bead"`
+			RolloutTarget string `json:"rollout_target"`
+		} `json:"threads"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &doc); err != nil {
+		t.Fatalf("unmarshal context JSON: %v", err)
+	}
+	found := false
+	for _, th := range doc.Threads {
+		if th.Bead == "roll-1" && th.RolloutTarget == "dev" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("context JSON missing rollout_target=dev: %+v", doc.Threads)
 	}
 }

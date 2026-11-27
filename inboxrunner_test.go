@@ -86,7 +86,7 @@ func TestInboxRunnerConfigDefaultsAndValidation(t *testing.T) {
 	if !cfg.InboxRunner.notifyEnabled() {
 		t.Fatal("expected notify default true")
 	}
-	wantKinds := []string{"ready_for_review", "review_bump", "orphan_finish", "merged", "closed", "unblocked", "checks_failing", "likely_stale"}
+	wantKinds := []string{"ready_for_review", "review_bump", "review_needed", "review_feedback", "orphan_finish", "merged", "closed", "unblocked", "checks_failing", "likely_stale"}
 	if !slices.Equal(cfg.InboxRunner.Kinds, wantKinds) {
 		t.Fatalf("default kinds = %v, want %v", cfg.InboxRunner.Kinds, wantKinds)
 	}
@@ -1250,5 +1250,189 @@ func TestInboxRunnerLivePiWakeupCoordination(t *testing.T) {
 	wg.Wait()
 	if tickRuns.Load() != 0 {
 		t.Fatalf("same-tick live wakeup should suppress duplicate inbox-runner launch, got %d runs", tickRuns.Load())
+	}
+}
+
+func TestInboxRunnerChainedRolloutAndReviewLoopPreflight(t *testing.T) {
+	cfg, _ := setupInboxRunnerTestEnv(t)
+	cfg.InboxRunner.Command = []string{"true"}
+	cfg.Autonomy.Level = 5
+	cfg.Autonomy.Max = 7
+	cfg.Autonomy.Prod = []string{"*prod*"}
+	cfg.Autonomy.Dev = []string{"dev*", "latest"}
+
+	now := time.Date(2026, 11, 26, 18, 0, 0, 0, time.UTC)
+	old := now.Add(-10 * time.Minute)
+
+	beads := map[string]Bead{
+		"roll-dev": {
+			ID:     "roll-dev",
+			Title:  "Rollout to dev",
+			Status: StatusOpen,
+			Labels: []string{"role:rollout", "rollout-target:dev"},
+		},
+		"roll-prod": {
+			ID:     "roll-prod",
+			Title:  "Rollout to prod",
+			Status: StatusOpen,
+			Labels: []string{"role:rollout", "rollout-target:prod"},
+		},
+		"roll-running": {
+			ID:     "roll-running",
+			Title:  "Already running rollout",
+			Status: StatusInProgress,
+			Labels: []string{"role:rollout", "rollout-target:dev"},
+		},
+		"impl-rev-new": {
+			ID:     "impl-rev-new",
+			Title:  "Needs review on sha2",
+			Status: StatusInProgress,
+		},
+		"impl-rev-done": {
+			ID:     "impl-rev-done",
+			Title:  "Already reviewed sha1",
+			Status: StatusInProgress,
+		},
+	}
+
+	// Seed review loop state: impl-rev-done already passed sha1; impl-rev-new is awaiting sha2 after round 1.
+	if err := saveReviewLoop(ReviewLoopState{
+		Version:       reviewLoopSchemaVersion,
+		Bead:          "impl-rev-done",
+		MaxRounds:     2,
+		State:         reviewStateApproved,
+		CurrentRound:  1,
+		LastHeadSHA:   testHeadSHA1,
+		PassedHeadSHA: testHeadSHA1,
+		UpdatedAt:     old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveReviewLoop(ReviewLoopState{
+		Version:      reviewLoopSchemaVersion,
+		Bead:         "impl-rev-new",
+		ReviewerBead: "rev-existing",
+		MaxRounds:    2,
+		State:        reviewStateChanges,
+		CurrentRound: 1,
+		LastHeadSHA:  testHeadSHA1,
+		UpdatedAt:    old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	devFile := writeTestInboxEvent(t, Event{
+		Bead:    "roll-dev",
+		Kind:    EventUnblocked,
+		Summary: "roll-dev unblocked; run quartermaster dispatch roll-dev --role rollout",
+		At:      old,
+		Clears:  &InboxCondition{Kind: "unblocked_dispatch", Bead: "roll-dev", Key: "dep:impl-1"},
+	})
+	writeTestInboxEvent(t, Event{
+		Bead:    "roll-prod",
+		Kind:    EventUnblocked,
+		Summary: "roll-prod unblocked; class 7 above L5",
+		At:      old.Add(time.Second),
+		Clears:  &InboxCondition{Kind: "unblocked_dispatch", Bead: "roll-prod", Key: "dep:impl-2"},
+	})
+	writeTestInboxEvent(t, Event{
+		Bead:    "roll-running",
+		Kind:    EventUnblocked,
+		Summary: "roll-running unblocked",
+		At:      old.Add(2 * time.Second),
+		Clears:  &InboxCondition{Kind: "unblocked_dispatch", Bead: "roll-running", Key: "dep:impl-3"},
+	})
+	revNewFile := writeTestInboxEvent(t, Event{
+		Bead:    "impl-rev-new",
+		Kind:    EventReviewNeeded,
+		Summary: "impl-rev-new has new head 2222222 ready for review round 2/2",
+		At:      old.Add(3 * time.Second),
+		Clears:  &InboxCondition{Kind: "review_needed", Bead: "impl-rev-new", Key: testHeadSHA2},
+	})
+	writeTestInboxEvent(t, Event{
+		Bead:    "impl-rev-done",
+		Kind:    EventReviewNeeded,
+		Summary: "impl-rev-done stale review_needed for sha1",
+		At:      old.Add(4 * time.Second),
+		Clears:  &InboxCondition{Kind: "review_needed", Bead: "impl-rev-done", Key: testHeadSHA1},
+	})
+
+	var gotPrompt string
+	env := inboxRunnerEnv{
+		now:        func() time.Time { return now },
+		listAgents: func() (map[string]Agent, bool, error) { return nil, false, nil },
+		readInbox:  readInbox,
+		showBead: func(id string) (Bead, error) {
+			b, ok := beads[id]
+			if !ok {
+				return Bead{}, errBeadNotFound
+			}
+			return b, nil
+		},
+		headlessOwned: func(string) bool { return false },
+		coordDir:      coordinatorHome,
+		execCmd: func(_ context.Context, _ Config, _ string, _ []string, prompt string) inboxRunnerExecResult {
+			gotPrompt = prompt
+			_, _ = inboxDoneFiles([]string{devFile, revNewFile})
+			return inboxRunnerExecResult{ExitCode: 0, Output: "dispatched roll-dev and requested review round 2"}
+		},
+		notify: func(_, _ string) desktopResult { return desktopResult{"submitted", "ok"} },
+	}
+
+	// Verify status --json reports exact skip reasons for above-level rollout, already-dispatched rollout, and already-handled review.
+	var statusBuf bytes.Buffer
+	if err := inboxRunnerCmd(cfg, env, []string{"status", "--json"}, &statusBuf); err != nil {
+		t.Fatalf("status --json: %v", err)
+	}
+	var rep InboxRunnerStatusReport
+	if err := json.Unmarshal(statusBuf.Bytes(), &rep); err != nil {
+		t.Fatalf("unmarshal status JSON: %v", err)
+	}
+	if rep.Inbox.EligibleNow != 2 || rep.Inbox.Excluded != 3 {
+		t.Fatalf("unexpected inbox counts: %+v", rep.Inbox)
+	}
+	reasons := map[string]string{}
+	for _, iv := range rep.Inbox.Items {
+		reasons[iv.Bead] = iv.Reason
+	}
+	if reasons["roll-dev"] != "" || reasons["impl-rev-new"] != "" {
+		t.Errorf("eligible items unexpectedly skipped: %+v", reasons)
+	}
+	if !strings.Contains(reasons["roll-prod"], "rollout_above_level (C7 > L5") {
+		t.Errorf("roll-prod reason = %q, want rollout_above_level (C7 > L5)", reasons["roll-prod"])
+	}
+	if reasons["roll-running"] != "already_dispatched" {
+		t.Errorf("roll-running reason = %q, want already_dispatched", reasons["roll-running"])
+	}
+	if reasons["impl-rev-done"] != "review_already_handled" {
+		t.Errorf("impl-rev-done reason = %q, want review_already_handled", reasons["impl-rev-done"])
+	}
+
+	// Run: prompt includes both dedicated rollout and review sections, and never leaks skipped beads.
+	res, err := runInboxRunner(context.Background(), cfg, env, inboxRunnerOpts{Manual: false})
+	if err != nil {
+		t.Fatalf("runInboxRunner: %v", err)
+	}
+	if !res.Ran || res.Acked != 2 || !slices.Equal(res.Eligible, []string{devFile, revNewFile}) {
+		t.Fatalf("unexpected run result: %+v", res)
+	}
+	for _, want := range []string{
+		"## Unblocked chained rollout beads",
+		"roll-dev",
+		"target: `dev` | class: C5 | bead level: L5",
+		"## Bounded review ping-pong items",
+		"impl-rev-new",
+		"round: 2/2",
+		"reviewer: `rev-existing`",
+		"do NOT dispatch a duplicate worker",
+	} {
+		if !strings.Contains(gotPrompt, want) {
+			t.Errorf("prompt missing %q:\n%s", want, gotPrompt)
+		}
+	}
+	for _, forbid := range []string{"roll-prod", "roll-running", "impl-rev-done"} {
+		if strings.Contains(gotPrompt, forbid) {
+			t.Errorf("prompt leaked excluded bead %q:\n%s", forbid, gotPrompt)
+		}
 	}
 }

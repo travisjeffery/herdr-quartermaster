@@ -27,10 +27,14 @@ func defaultInboxCondition(e Event) *InboxCondition {
 	switch e.Kind {
 	case "closed", EventAutoClosed:
 		kind = "manual"
-	case EventLikelyStale, EventLeaseExpired, EventBreaker, EventWatchTriggered, EventWatchExpired, EventUnblocked:
-		// Verify, lease expiry, breakers, watches and blocker wakeups can raise
-		// notices on open/backlog beads, which were never in the active-thread set.
+	case EventLikelyStale, EventLeaseExpired, EventBreaker, EventWatchTriggered, EventWatchExpired, EventUnblocked, EventReviewPassed:
+		// Verify, lease expiry, breakers, watches, blocker wakeups and passed
+		// review notices can apply outside the active-thread set.
 		kind = "bead_closed"
+	case EventReviewNeeded:
+		kind = "review_needed"
+	case EventReviewFeedback:
+		kind = "review_feedback"
 	case EventOrphanFinish:
 		// Orphan finisher notices can apply to open or in_progress agentless
 		// beads and clear once the bead closes or a live agent picks it up.
@@ -99,8 +103,40 @@ func inboxObsolete(it InboxItem, active map[string]Thread) bool {
 	if c.Kind == "bead_closed" {
 		return ok && t.Bead.Status == StatusClosed
 	}
+	if c.Kind == "unblocked_dispatch" {
+		return ok && (t.Bead.Status == StatusClosed || t.Agent != nil || (t.Bead.Status != StatusOpen && t.Bead.Status != StatusBlocked))
+	}
 	if c.Kind == "orphan_finish" {
 		return ok && (t.Bead.Status == StatusClosed || t.Agent != nil)
+	}
+	if c.Kind == "review_needed" {
+		if ok && (t.Bead.Status == StatusClosed || t.Bead.Status == StatusNeedsMe) {
+			return true
+		}
+		if loop, found, err := loadReviewLoop(it.Bead); err == nil && found {
+			if loop.State == reviewStateEscalated {
+				return true
+			}
+			if c.Key != "" && (loop.LastHeadSHA == c.Key || loop.PassedHeadSHA == c.Key) &&
+				(loop.State == reviewStatePending || loop.State == reviewStateApproved || loop.State == reviewStateChanges) {
+				return true
+			}
+		}
+		return false
+	}
+	if c.Kind == "review_feedback" {
+		if ok && (t.Bead.Status == StatusClosed || t.Bead.Status == StatusNeedsMe) {
+			return true
+		}
+		if loop, found, err := loadReviewLoop(it.Bead); err == nil && found {
+			if loop.State == reviewStateEscalated || loop.State == reviewStateApproved {
+				return true
+			}
+			if c.Key != "" && loop.LastHeadSHA != "" && loop.LastHeadSHA != c.Key {
+				return true
+			}
+		}
+		return false
 	}
 	if !ok || (t.Bead.Status != StatusInProgress && t.Bead.Status != StatusNeedsMe && t.Bead.Status != StatusBlocked) {
 		return true
@@ -178,7 +214,7 @@ func reconcileInbox(threads []Thread, show func(string) (Bead, error)) error {
 		if c == nil {
 			c = defaultInboxCondition(it.Event)
 		}
-		if _, known := active[it.Bead]; !known && (c.Kind == "bead_closed" || c.Kind == "orphan_finish") && show != nil && !looked[it.Bead] {
+		if _, known := active[it.Bead]; !known && (c.Kind == "bead_closed" || c.Kind == "orphan_finish" || c.Kind == "unblocked_dispatch" || c.Kind == "review_needed" || c.Kind == "review_feedback") && show != nil && !looked[it.Bead] {
 			looked[it.Bead] = true
 			if b, err := show(it.Bead); err == nil && b.ID == it.Bead {
 				active[it.Bead] = Thread{Bead: b}

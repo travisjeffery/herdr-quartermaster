@@ -82,7 +82,7 @@ func dispatchRPC(cfg Config, h Herdr, id string, o DispatchOpts) (string, error)
 	if host != localHost {
 		return "", errors.New("pi-rpc is local only")
 	}
-	auto, err := cfg.enforce(b, "dispatch", o.By)
+	auto, err := cfg.enforceDispatch(b, role, o.By)
 	if err != nil {
 		return "", err
 	}
