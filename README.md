@@ -221,6 +221,15 @@ criteria requiring remote APIs or commands fail as uncheckable, rather than
 silently enabling more tools. No fallback to Claude occurs. See the
 [pi verifier boundary, trials and activation steps](docs/pi-verifier.md).
 
+For beads that verify live cloud state, deployments, HTTP endpoints, or
+observability queries, you can explicitly opt into `[verifier] mode =
+"live-readonly"` (with `backend = "claude"` or `backend = "agy"`). Defaults
+stay strict unless opted in; `live-readonly` enables only validated read-only
+CLI prefixes/patterns, `GET`/`HEAD`-only HTTP checks, explicit URL domains, and
+explicit read-only MCP tools while failing closed on writes, mutations, and
+credential/secret reads, and labels verifier policy blocks separately from
+live-evidence failures. See [docs/verifier.md](docs/verifier.md).
+
 - **Pass:** the bead closes as usual.
 - **Fail:** nothing closes. The failing criteria and their evidence print for
   whoever ran close (the worker, or the coordinator, which passes them on) and
@@ -1026,12 +1035,21 @@ enabled = false
 devices = ["iphone181"]   # Tailscale node names allowed to tap; anything else is refused
 # port = 8642             # bound to this machine's Tailscale address only
 
-[verifier]                # `quartermaster close`'s read-only check (see Acceptance criteria and the verifier)
+[verifier]                # `quartermaster close`'s read-only check (docs/verifier.md)
 max_rounds = 2            # fails in a row before the bead goes to needs_me
 minutes = 15              # one run's time limit
-# backend = "pi"           # opt-in filesystem-only verifier; default remains "claude"
-# model = "provider/model" # pi only; omit to use pi's configured default
-# command = ["claude", "-p", ...]   # legacy override; cannot combine with backend = "pi"
+# backend = "claude"      # "claude" (default), "agy", or "pi" (filesystem-only)
+# mode = "strict"         # "strict" (default) or opt-in "live-readonly" (claude/agy only)
+# model = "provider/model" # pi or agy only; omit to use the backend's default
+# allow_commands = []     # live-readonly only: validated read-only CLI prefixes/patterns
+# allow_http = false      # live-readonly only: strictly GET/HEAD curl checks
+# allow_domains = []      # live-readonly only: explicit hostnames (no wildcards)
+# allow_mcp = []          # live-readonly only: explicit read-only "server/tool" entries
+# deny_commands = []      # extra deny rules layered on immutable built-in denies
+# deny_mcp = []           # extra MCP deny rules
+# deny_paths = []         # extra credential/secret paths denied to file readers
+# mcp_config = ""         # claude live-readonly only: MCP JSON file for --strict-mcp-config
+# command = ["claude", "-p", ...]   # legacy override; cannot combine with pi/agy/live-readonly
 
 [watches]                 # declarative per-bead watches (docs/watches.md)
 allow_cmd = false         # fail closed: cmd watches are refused unless explicitly enabled
