@@ -45,8 +45,9 @@ EOF
 )"
 ```
 
-To request automatic review notifications whenever the implementer settles on a
-new clean head commit (pre-PR or on an open PR), label the bead:
+To enable automatic bounded pre-PR and new-head implementer ↔ reviewer
+ping-pong whenever the implementer settles on a new clean head commit (pre-PR
+or on an open PR), label the bead:
 
 ```sh
 bd label add task-10 review:required
@@ -56,9 +57,56 @@ bd label add task-10 review:required
 
 Instead of pushing straight to GitHub review without a skeptical pass against
 the bead's design and acceptance criteria, run a bounded review loop using a
-worktree-free `--role reviewer` worker.
+worktree-free `--role reviewer` (or path-escalated security-review) worker.
 
-### Requesting a review round
+### Automatic trigger and risk-path role routing (`[review]`)
+
+Configure optional risk-path routing in `~/.config/quartermaster/config.toml`:
+
+```toml
+[roles.security-review]
+worktree = false
+brief = "reviewer"
+instructions = "Audit auth, IAM, workflow, and schema migration diffs for security and access-control regressions."
+
+[review]
+auto_trigger = true            # default true; set false to emit review_needed without auto-spawning
+security_role = "security-review"  # default; falls back to "reviewer" if the role is not configured
+security_paths = [
+  "**/auth/**",
+  "**/iam/**",
+  "**/.github/workflows/**",
+  "**/migrations/**",
+]
+```
+
+How automatic triggering and routing work:
+
+- **Automatic pre-PR & new-head trigger**: when an active `role:implementer`
+  bead labelled `review:required` reaches a new clean head commit (either an
+  open PR head or an at-rest clean worktree with commits ahead of `base_branch`)
+  while `current_round < max_rounds`, the ticker automatically invokes
+  `quartermaster review request <bead> --head <sha> --spawn --by ticker`, gated
+  by autonomy Class 3 (`dispatch`/`wake`), rolling-hour budgets, and head-SHA
+  deduplication. If auto-trigger is skipped or fails (for example below Class 3,
+  over budget, held, or `auto_trigger = false`), Quartermaster emits one
+  deduplicated `review_needed` inbox event instead.
+- **Headless `inbox-runner` auto-trigger**: when a `review_needed` inbox item
+  for an active `review:required` implementer bead is processed by
+  `inbox-runner`, it invokes `quartermaster review request <bead> --head <sha>
+  --spawn --by inbox-runner` deterministically (subject to Class 3 autonomy,
+  budget, and head-SHA dedup) and acknowledges the inbox file without spending a
+  headless LLM turn.
+- **Path-based security-review selection**: `review request --spawn` inspects
+  changed files with `git diff --name-only <base>...<head>`. If any changed path
+  matches `[review] security_paths` (supporting `**` across directories and
+  `path.Match` segment wildcards) and `security_role` exists in config,
+  Quartermaster spawns and dispatches a `role:<security_role>` sibling bead;
+  otherwise it falls back cleanly to `role:reviewer`. If a later ping-pong round
+  introduces changes matching `security_paths`, Quartermaster upgrades from a
+  plain `role:reviewer` to `role:<security_role>`.
+
+### Requesting a review round manually
 
 ```sh
 # Resolve HEAD from the open PR or clean local worktree (or pass --head <40-sha>),
@@ -125,12 +173,22 @@ Verdict safety invariants:
   `QUESTION:` / `OPTIONS:` / `CLASS: 3` note, and sets the implementer bead to
   `needs_me`. Automated callers cannot reset the cap; only explicit human action
   (`quartermaster review request <bead> --reset --by TJ`) resets it.
+- **Automatic sibling reviewer cleanup on `can_merge`**: when
+  `quartermaster review verdict <bead> --verdict can_merge` records a passing
+  verdict for a spawned sibling reviewer bead, Quartermaster automatically
+  closes the sibling reviewer bead with the verdict summary (gated by autonomy
+  Class 3) and resolves its role directory or worktree — never touching the
+  implementer bead or manually supplied `--reviewer` beads. If the reviewer
+  agent invoked `review verdict` mid-turn (still working), resolution is
+  deferred and completed automatically on the next ticker pass once the agent
+  goes idle.
 - **New-head wakeups**: on each tick, if an implementer bead in
   `changes_requested` (or labelled `review:required`) advances to a new clean
-  head SHA while under `max_rounds`, the ticker emits one deduplicated
-  `review_needed` inbox event for that head. Both the interactive coordinator
-  and headless `inbox-runner` handle `review_needed` and `review_feedback`
-  without looping.
+  head SHA while under `max_rounds`, `review:required` beads automatically start
+  the next bounded review round (falling back to one deduplicated
+  `review_needed` inbox event if gated/disabled), and non-`review:required`
+  active loops emit one deduplicated `review_needed` inbox event for coordinator
+  or `inbox-runner` handling without looping.
 
 Inspect review-loop state at any time:
 

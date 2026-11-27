@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,19 +23,27 @@ const (
 type fakeReviewEnv struct {
 	beads          map[string]Bead
 	headInfo       map[string]reviewHeadInfo
+	changedFiles   map[string][]string
+	changedErr     error
 	tellErr        map[string]error
+	closeErr       map[string]error
+	resolveErr     map[string]error
 	dispatchErr    error
 	enforceErr     error
+	enforceFn      func(b Bead, action, by string) (string, error)
 	now            time.Time
 	nextCreatedSeq int
 
-	created    []BeadCreateOpts
-	notes      []string
-	statuses   map[string]string
-	tells      []struct{ Bead, Text string }
-	dispatches []struct{ Bead, Agent, By string }
-	events     []Event
-	journal    []journalRecord
+	created      []BeadCreateOpts
+	closed       []struct{ Bead, Reason string }
+	resolved     []string
+	notes        []string
+	statuses     map[string]string
+	tells        []struct{ Bead, Text string }
+	dispatches   []struct{ Bead, Role, Agent, By string }
+	enforceCalls []struct{ Bead, Action, By string }
+	events       []Event
+	journal      []journalRecord
 }
 
 func newFakeReviewEnv(beads ...Bead) *fakeReviewEnv {
@@ -40,11 +52,14 @@ func newFakeReviewEnv(beads ...Bead) *fakeReviewEnv {
 		m[b.ID] = b
 	}
 	return &fakeReviewEnv{
-		beads:    m,
-		headInfo: map[string]reviewHeadInfo{},
-		tellErr:  map[string]error{},
-		statuses: map[string]string{},
-		now:      time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC),
+		beads:        m,
+		headInfo:     map[string]reviewHeadInfo{},
+		changedFiles: map[string][]string{},
+		tellErr:      map[string]error{},
+		closeErr:     map[string]error{},
+		resolveErr:   map[string]error{},
+		statuses:     map[string]string{},
+		now:          time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC),
 	}
 }
 
@@ -93,11 +108,42 @@ func (f *fakeReviewEnv) env() reviewLoopEnv {
 			f.beads[id] = created
 			return created, nil
 		},
+		closeBead: func(id, reason string) error {
+			if err := f.closeErr[id]; err != nil {
+				return err
+			}
+			f.closed = append(f.closed, struct{ Bead, Reason string }{id, reason})
+			if b, ok := f.beads[id]; ok {
+				b.Status = StatusClosed
+				b.CloseReason = reason
+				f.beads[id] = b
+			}
+			return nil
+		},
+		resolveReviewer: func(id string) (string, error) {
+			if err := f.resolveErr[id]; err != nil {
+				return "", err
+			}
+			f.resolved = append(f.resolved, id)
+			return "removed role directory /state/roles/" + id, nil
+		},
 		resolveHead: func(b Bead) (reviewHeadInfo, error) {
 			if info, ok := f.headInfo[b.ID]; ok {
 				return info, nil
 			}
 			return reviewHeadInfo{}, errors.New("no head resolved")
+		},
+		changedFiles: func(b Bead, info reviewHeadInfo) ([]string, error) {
+			if f.changedErr != nil {
+				return nil, f.changedErr
+			}
+			if files, ok := f.changedFiles[info.HeadSHA]; ok {
+				return slices.Clone(files), nil
+			}
+			if files, ok := f.changedFiles[b.ID]; ok {
+				return slices.Clone(files), nil
+			}
+			return nil, nil
 		},
 		tell: func(id, text string) (string, error) {
 			if err := f.tellErr[id]; err != nil {
@@ -106,14 +152,18 @@ func (f *fakeReviewEnv) env() reviewLoopEnv {
 			f.tells = append(f.tells, struct{ Bead, Text string }{id, text})
 			return "sent to " + id, nil
 		},
-		dispatchReviewer: func(id, agent, by string) (string, error) {
+		dispatchReviewer: func(id, role, agent, by string) (string, error) {
 			if f.dispatchErr != nil {
 				return "", f.dispatchErr
 			}
-			f.dispatches = append(f.dispatches, struct{ Bead, Agent, By string }{id, agent, by})
+			f.dispatches = append(f.dispatches, struct{ Bead, Role, Agent, By string }{id, role, agent, by})
 			return "started reviewer " + id, nil
 		},
 		enforce: func(b Bead, action, by string) (string, error) {
+			f.enforceCalls = append(f.enforceCalls, struct{ Bead, Action, By string }{b.ID, action, by})
+			if f.enforceFn != nil {
+				return f.enforceFn(b, action, by)
+			}
 			if f.enforceErr != nil {
 				return "", f.enforceErr
 			}
@@ -308,6 +358,18 @@ func TestReviewPingPongLifecycleHeadDedupAndEscalation(t *testing.T) {
 	if err != nil || v3.State.State != reviewStateApproved || v3.State.PassedHeadSHA != testHeadSHA3 || !v3.Routed {
 		t.Fatalf("round 3 can_merge failed: res=%+v err=%v", v3, err)
 	}
+	// Passing verdict must auto-close and resolve the spawned sibling reviewer,
+	// while leaving the implementer bead untouched.
+	if !slices.Equal(v3.ReviewerClosed, []string{"rev-1"}) || !slices.Equal(v3.ReviewerResolved, []string{"rev-1"}) {
+		t.Fatalf("expected rev-1 closed & resolved on can_merge, got closed=%v resolved=%v cleanup=%q",
+			v3.ReviewerClosed, v3.ReviewerResolved, v3.ReviewerCleanup)
+	}
+	if f.beads["rev-1"].Status != StatusClosed || !strings.Contains(f.beads["rev-1"].CloseReason, "All blockers resolved and race tests pass") {
+		t.Fatalf("rev-1 should be closed with verdict summary, got status=%q reason=%q", f.beads["rev-1"].Status, f.beads["rev-1"].CloseReason)
+	}
+	if f.beads["task-impl"].Status != StatusInProgress {
+		t.Fatalf("implementer bead must never be closed by reviewer cleanup, got status=%q", f.beads["task-impl"].Status)
+	}
 
 	// Repeating request on already-passed head deduplicates cleanly.
 	dupPass, err := requestReview(cfg, f.env(), "task-impl", ReviewRequestOpts{HeadSHA: testHeadSHA3})
@@ -432,4 +494,545 @@ func TestReviewCLIAndContextRendering(t *testing.T) {
 	if err := json.Unmarshal([]byte(jsonOut), &doc); err != nil || len(doc.Threads) != 1 || !strings.Contains(doc.Threads[0].ReviewLoop, "changes_requested") {
 		t.Fatalf("context JSON missing review_loop: %v %+v", err, doc.Threads)
 	}
+}
+
+func TestReviewRiskPathSecurityRoleSelectionAndFallback(t *testing.T) {
+	noWorktree := false
+	secPatterns := []string{
+		"**/auth/**",
+		"**/iam/**",
+		"**/.github/workflows/**",
+		"**/migrations/**",
+	}
+
+	t.Run("routes matching diff to configured security-review role", func(t *testing.T) {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		cfg := defaultConfig()
+		cfg.Repo = "/src/app"
+		cfg.Review.SecurityPaths = secPatterns
+		cfg.Roles = map[string]RoleConfig{
+			"security-review": {Worktree: &noWorktree, Brief: roleReviewer},
+		}
+
+		impl := Bead{ID: "task-sec", Title: "Add OIDC token check", Status: StatusInProgress, Priority: 2, Parent: "epic-sec"}
+		f := newFakeReviewEnv(impl)
+		f.changedFiles[testHeadSHA1] = []string{"pkg/auth/oidc.go", "pkg/http/server.go"}
+		f.tellErr["rev-1"] = errors.New("not running")
+
+		res, err := requestReview(cfg, f.env(), "task-sec", ReviewRequestOpts{
+			HeadSHA:       testHeadSHA1,
+			SpawnReviewer: true,
+			By:            "coordinator",
+		})
+		if err != nil {
+			t.Fatalf("requestReview: %v", err)
+		}
+		if res.ReviewerRole != "security-review" {
+			t.Fatalf("ReviewerRole = %q, want security-review", res.ReviewerRole)
+		}
+		if !slices.Equal(res.MatchedSecurityPaths, []string{"pkg/auth/oidc.go"}) {
+			t.Fatalf("MatchedSecurityPaths = %v, want [pkg/auth/oidc.go]", res.MatchedSecurityPaths)
+		}
+		if len(f.created) != 1 || !slices.Contains(f.created[0].Labels, "role:security-review") {
+			t.Fatalf("created bead labels = %+v, want role:security-review", f.created)
+		}
+		if len(f.dispatches) != 1 || f.dispatches[0].Role != "security-review" {
+			t.Fatalf("dispatches = %+v, want role=security-review", f.dispatches)
+		}
+		if !strings.Contains(res.Prompt, "Review role: `security-review`") || !strings.Contains(res.Prompt, "pkg/auth/oidc.go") {
+			t.Errorf("prompt missing security role context:\n%s", res.Prompt)
+		}
+		if !strings.Contains(f.created[0].Description, "pkg/auth/oidc.go") {
+			t.Errorf("reviewer description missing matched security path:\n%s", f.created[0].Description)
+		}
+	})
+
+	t.Run("falls back to reviewer when security role is not configured", func(t *testing.T) {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		cfg := defaultConfig()
+		cfg.Repo = "/src/app"
+		cfg.Review.SecurityPaths = secPatterns
+		// Intentionally omit cfg.Roles["security-review"].
+
+		impl := Bead{ID: "task-fallback", Title: "Update CI workflow", Status: StatusInProgress, Priority: 2}
+		f := newFakeReviewEnv(impl)
+		f.changedFiles[testHeadSHA1] = []string{".github/workflows/ci.yml"}
+		f.tellErr["rev-1"] = errors.New("not running")
+
+		res, err := requestReview(cfg, f.env(), "task-fallback", ReviewRequestOpts{
+			HeadSHA:       testHeadSHA1,
+			SpawnReviewer: true,
+			By:            "coordinator",
+		})
+		if err != nil {
+			t.Fatalf("requestReview: %v", err)
+		}
+		if res.ReviewerRole != roleReviewer {
+			t.Fatalf("ReviewerRole = %q, want fallback %q", res.ReviewerRole, roleReviewer)
+		}
+		if len(f.created) != 1 || !slices.Contains(f.created[0].Labels, "role:reviewer") {
+			t.Fatalf("created bead labels = %+v, want role:reviewer", f.created)
+		}
+		if len(f.dispatches) != 1 || f.dispatches[0].Role != roleReviewer {
+			t.Fatalf("dispatches = %+v, want role=reviewer", f.dispatches)
+		}
+	})
+
+	t.Run("routes non-matching diff to plain reviewer even when security role exists", func(t *testing.T) {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		cfg := defaultConfig()
+		cfg.Repo = "/src/app"
+		cfg.Review.SecurityPaths = secPatterns
+		cfg.Review.SecurityRole = "custom-sec"
+		cfg.Roles = map[string]RoleConfig{
+			"custom-sec": {Worktree: &noWorktree, Brief: roleReviewer},
+		}
+
+		impl := Bead{ID: "task-normal", Title: "Tune cache size", Status: StatusInProgress, Priority: 2}
+		f := newFakeReviewEnv(impl)
+		f.changedFiles[testHeadSHA1] = []string{"pkg/cache/lru.go", "pkg/authz/helper.go"}
+		f.tellErr["rev-1"] = errors.New("not running")
+
+		res, err := requestReview(cfg, f.env(), "task-normal", ReviewRequestOpts{
+			HeadSHA:       testHeadSHA1,
+			SpawnReviewer: true,
+			By:            "coordinator",
+		})
+		if err != nil {
+			t.Fatalf("requestReview: %v", err)
+		}
+		if res.ReviewerRole != roleReviewer || len(res.MatchedSecurityPaths) != 0 {
+			t.Fatalf("unexpected non-security routing: role=%q matched=%v", res.ReviewerRole, res.MatchedSecurityPaths)
+		}
+		if len(f.dispatches) != 1 || f.dispatches[0].Role != roleReviewer {
+			t.Fatalf("dispatches = %+v, want role=reviewer", f.dispatches)
+		}
+	})
+
+	t.Run("round 2 escalates from reviewer to security-review and cleans up both on can_merge", func(t *testing.T) {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		cfg := defaultConfig()
+		cfg.Repo = "/src/app"
+		cfg.Review.SecurityPaths = secPatterns
+		cfg.Roles = map[string]RoleConfig{
+			"security-review": {Worktree: &noWorktree, Brief: roleReviewer},
+		}
+
+		impl := Bead{ID: "task-esc", Title: "Add tenant filter", Status: StatusInProgress, Priority: 2}
+		f := newFakeReviewEnv(impl)
+		f.changedFiles[testHeadSHA1] = []string{"pkg/query/filter.go"}
+		f.changedFiles[testHeadSHA2] = []string{"pkg/query/filter.go", "db/migrations/002_tenant.sql"}
+		f.tellErr["rev-1"] = errors.New("not running")
+		f.tellErr["rev-2"] = errors.New("not running")
+
+		r1, err := requestReview(cfg, f.env(), "task-esc", ReviewRequestOpts{HeadSHA: testHeadSHA1, SpawnReviewer: true})
+		if err != nil || r1.SpawnedBead != "rev-1" || r1.ReviewerRole != roleReviewer {
+			t.Fatalf("round 1 unexpected: res=%+v err=%v", r1, err)
+		}
+		if _, err := recordReviewVerdict(f.env(), "task-esc", ReviewVerdictInput{
+			Verdict:  "cannot_merge",
+			HeadSHA:  testHeadSHA1,
+			Summary:  "Missing DB index",
+			Findings: []ReviewFinding{{File: "pkg/query/filter.go", Line: 20, Summary: "full table scan"}},
+		}); err != nil {
+			t.Fatalf("round 1 verdict: %v", err)
+		}
+
+		// Round 2 touches migrations/** -> spawns a fresh role:security-review sibling instead of reusing plain rev-1.
+		r2, err := requestReview(cfg, f.env(), "task-esc", ReviewRequestOpts{HeadSHA: testHeadSHA2, SpawnReviewer: true})
+		if err != nil || r2.SpawnedBead != "rev-2" || r2.ReviewerRole != "security-review" {
+			t.Fatalf("round 2 should escalate to security-review rev-2: res=%+v err=%v", r2, err)
+		}
+
+		v2, err := recordReviewVerdict(f.env(), "task-esc", ReviewVerdictInput{
+			Verdict: "can_merge",
+			HeadSHA: testHeadSHA2,
+			Summary: "Migration and query verified",
+		})
+		if err != nil {
+			t.Fatalf("round 2 verdict: %v", err)
+		}
+		if !slices.Equal(v2.ReviewerClosed, []string{"rev-1", "rev-2"}) || !slices.Equal(v2.ReviewerResolved, []string{"rev-1", "rev-2"}) {
+			t.Fatalf("expected both rev-1 and rev-2 cleaned up, got closed=%v resolved=%v", v2.ReviewerClosed, v2.ReviewerResolved)
+		}
+		if f.beads["task-esc"].Status != StatusInProgress {
+			t.Fatalf("implementer status = %q, want in_progress", f.beads["task-esc"].Status)
+		}
+	})
+}
+
+func TestReviewGitChangedFilesAndCommitsAheadIntegration(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	repo := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Test User",
+			"GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=Test User",
+			"GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	runGit("init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "README.md")
+	runGit("commit", "-m", "initial")
+	baseSHA := runGit("rev-parse", "HEAD")
+
+	// Fresh branch at base commit has 0 commits ahead of main.
+	runGit("checkout", "-b", "topic/auth-update")
+	if gitWorktreeHasCommitsAhead(repo, "main", baseSHA) {
+		t.Fatal("fresh branch at base commit should report no commits ahead")
+	}
+
+	// Commit a change under pkg/auth/ and verify real git diff inspection selects security-review.
+	authDir := filepath.Join(repo, "pkg", "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "verify.go"), []byte("package auth\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "pkg/auth/verify.go")
+	runGit("commit", "-m", "add auth verifier")
+	headSHA := runGit("rev-parse", "HEAD")
+
+	if !gitWorktreeHasCommitsAhead(repo, "main", headSHA) {
+		t.Fatal("branch with new commit should report commits ahead")
+	}
+
+	files, err := gitChangedFiles(repo, "main", headSHA)
+	if err != nil {
+		t.Fatalf("gitChangedFiles: %v", err)
+	}
+	if !slices.Equal(files, []string{"pkg/auth/verify.go"}) {
+		t.Fatalf("gitChangedFiles = %v, want [pkg/auth/verify.go]", files)
+	}
+
+	noWorktree := false
+	cfg := defaultConfig()
+	cfg.Repo = repo
+	cfg.BaseBranch = "main"
+	cfg.Review.SecurityPaths = []string{"**/auth/**", "**/iam/**"}
+	cfg.Roles = map[string]RoleConfig{
+		"security-review": {Worktree: &noWorktree, Brief: roleReviewer},
+	}
+
+	impl := Bead{ID: "task-git", Title: "Verify tokens", Status: StatusInProgress, Priority: 2}
+	f := newFakeReviewEnv(impl)
+	f.headInfo["task-git"] = reviewHeadInfo{HeadSHA: headSHA, Workdir: repo, Branch: "topic/auth-update"}
+	f.tellErr["rev-1"] = errors.New("not running")
+	env := f.env()
+	env.changedFiles = func(b Bead, info reviewHeadInfo) ([]string, error) {
+		return liveChangedFiles(cfg, b, info)
+	}
+
+	res, err := requestReview(cfg, env, "task-git", ReviewRequestOpts{SpawnReviewer: true, By: "ticker"})
+	if err != nil {
+		t.Fatalf("requestReview with real git diff: %v", err)
+	}
+	if res.ReviewerRole != "security-review" || !slices.Equal(res.MatchedSecurityPaths, []string{"pkg/auth/verify.go"}) {
+		t.Fatalf("unexpected real-git routing: role=%q matched=%v", res.ReviewerRole, res.MatchedSecurityPaths)
+	}
+}
+
+func TestReviewAutoTriggerOnTickerAndFallbackGates(t *testing.T) {
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+
+	t.Run("auto-triggers pre-PR and round-2 heads with autonomy + budget + dedup", func(t *testing.T) {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		cfg := defaultConfig()
+		cfg.Autonomy.Level = 5
+		cfg.Autonomy.Max = 7
+
+		impl := Bead{ID: "task-auto", Title: "Add parser", Status: StatusInProgress, Labels: []string{reviewRequiredLabel}}
+		f := newFakeReviewEnv(impl)
+		f.tellErr["rev-1"] = errors.New("not running")
+		f.enforceFn = func(b Bead, action, by string) (string, error) {
+			return cfg.enforce(b, action, by)
+		}
+
+		curHead := testHeadSHA1
+		var tickerEvents []Event
+		trigEnv := reviewLoopTriggerEnv{
+			resolveHead: func(th Thread) (string, bool) { return curHead, true },
+			autoRequest: func(b Bead, headSHA, prURL string) (ReviewRequestResult, error) {
+				return requestReview(cfg, f.env(), b.ID, ReviewRequestOpts{
+					HeadSHA:       headSHA,
+					PRURL:         prURL,
+					SpawnReviewer: true,
+					By:            "ticker",
+				})
+			},
+			event: func(e Event) error { tickerEvents = append(tickerEvents, e); return nil },
+		}
+
+		threads := []Thread{{Bead: impl, Agent: &Agent{Name: "task-auto", Status: "idle"}}}
+		lines1 := checkReviewLoopsPass(cfg, trigEnv, threads, now)
+		if len(lines1) != 1 || !strings.Contains(lines1[0], "auto-triggered:") {
+			t.Fatalf("expected auto-triggered line on round 1, got %v", lines1)
+		}
+		if len(tickerEvents) != 0 {
+			t.Fatalf("successful auto-trigger should not emit redundant review_needed inbox event, got %+v", tickerEvents)
+		}
+		if len(f.created) != 1 || len(f.dispatches) != 1 {
+			t.Fatalf("expected 1 spawned & dispatched reviewer, got created=%d dispatches=%d", len(f.created), len(f.dispatches))
+		}
+
+		// Head-SHA dedup: repeated ticks on sha1 do nothing.
+		linesDup := checkReviewLoopsPass(cfg, trigEnv, threads, now.Add(time.Minute))
+		if len(linesDup) != 0 || len(f.created) != 1 || len(f.dispatches) != 1 {
+			t.Fatalf("duplicate tick on same head should be no-op: lines=%v created=%d", linesDup, len(f.created))
+		}
+
+		// Round 1 cannot_merge, then new open-PR head sha2 -> auto-triggers round 2/2.
+		if _, err := recordReviewVerdict(f.env(), "task-auto", ReviewVerdictInput{
+			Verdict:  "cannot_merge",
+			HeadSHA:  testHeadSHA1,
+			Summary:  "Edge case panic",
+			Findings: []ReviewFinding{{File: "parser.go", Line: 14, Summary: "nil deref on empty input"}},
+		}); err != nil {
+			t.Fatalf("round 1 verdict: %v", err)
+		}
+		delete(f.tellErr, "rev-1") // reviewer is now live
+		curHead = testHeadSHA2
+		threads[0].PR = &PR{State: "OPEN", HeadSHA: testHeadSHA2, URL: "https://github.com/example/repo/pull/42"}
+
+		lines2 := checkReviewLoopsPass(cfg, trigEnv, threads, now.Add(2*time.Minute))
+		if len(lines2) != 1 || !strings.Contains(lines2[0], "round 2/2") {
+			t.Fatalf("expected round 2/2 auto-trigger on sha2, got %v", lines2)
+		}
+		st, ok, err := loadReviewLoop("task-auto")
+		if err != nil || !ok || st.CurrentRound != 2 || st.State != reviewStatePending || st.Rounds[1].PRURL != "https://github.com/example/repo/pull/42" {
+			t.Fatalf("unexpected round 2 state: ok=%v err=%v st=%+v", ok, err, st)
+		}
+	})
+
+	t.Run("fails closed below class 3 or over dispatch budget and falls back to one review_needed event", func(t *testing.T) {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		cfg := defaultConfig()
+		cfg.Autonomy.Level = 5
+		cfg.Autonomy.Max = 7
+
+		lowBead := Bead{ID: "task-low", Title: "Low autonomy bead", Status: StatusInProgress, Labels: []string{reviewRequiredLabel, "autonomy:2"}}
+		f := newFakeReviewEnv(lowBead)
+		f.enforceFn = func(b Bead, action, by string) (string, error) {
+			return cfg.enforce(b, action, by)
+		}
+
+		var tickerEvents []Event
+		trigEnv := reviewLoopTriggerEnv{
+			resolveHead: func(th Thread) (string, bool) { return testHeadSHA1, true },
+			autoRequest: func(b Bead, headSHA, prURL string) (ReviewRequestResult, error) {
+				return requestReview(cfg, f.env(), b.ID, ReviewRequestOpts{
+					HeadSHA:       headSHA,
+					PRURL:         prURL,
+					SpawnReviewer: true,
+					By:            "ticker",
+				})
+			},
+			event: func(e Event) error { tickerEvents = append(tickerEvents, e); return nil },
+		}
+		threads := []Thread{{Bead: lowBead, Agent: &Agent{Name: "task-low", Status: "idle"}}}
+		checkReviewLoopsPass(cfg, trigEnv, threads, now)
+		checkReviewLoopsPass(cfg, trigEnv, threads, now.Add(time.Minute))
+		if len(f.created) != 0 || len(f.dispatches) != 0 {
+			t.Fatalf("autonomy:2 bead must not spawn reviewer, got created=%d dispatches=%d", len(f.created), len(f.dispatches))
+		}
+		if len(tickerEvents) != 1 || tickerEvents[0].Kind != EventReviewNeeded || !strings.Contains(tickerEvents[0].Summary, "auto-trigger skipped") {
+			t.Fatalf("expected 1 fallback review_needed event with skip reason, got %+v", tickerEvents)
+		}
+
+		// Exhaust global dispatch budget and verify L5 bead also fails closed without spawning.
+		cfg.Autonomy.Budget.Dispatches = 1
+		if err := appendJournal(journalRecord{At: time.Now(), Kind: journalCheck, Bead: "other", Class: 3, Action: "dispatch", Pass: true}); err != nil {
+			t.Fatal(err)
+		}
+		budgetBead := Bead{ID: "task-budget", Title: "Budgeted bead", Status: StatusInProgress, Labels: []string{reviewRequiredLabel}}
+		f.beads[budgetBead.ID] = budgetBead
+		threads2 := []Thread{{Bead: budgetBead, Agent: &Agent{Name: "task-budget", Status: "idle"}}}
+		checkReviewLoopsPass(cfg, trigEnv, threads2, now.Add(2*time.Minute))
+		if len(f.created) != 0 || len(f.dispatches) != 0 {
+			t.Fatalf("budget-exhausted bead must not spawn reviewer, got created=%d", len(f.created))
+		}
+		if len(tickerEvents) != 2 || !strings.Contains(tickerEvents[1].Summary, "budget:") {
+			t.Fatalf("expected budget fallback review_needed event, got %+v", tickerEvents)
+		}
+	})
+
+	t.Run("respects auto_trigger = false and held/headless guards", func(t *testing.T) {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		off := false
+		cfg := defaultConfig()
+		cfg.Review.AutoTrigger = &off
+
+		impl := Bead{ID: "task-off", Title: "Manual review only", Status: StatusInProgress, Labels: []string{reviewRequiredLabel}}
+		autoCalls := 0
+		var events []Event
+		trigEnv := reviewLoopTriggerEnv{
+			resolveHead: func(th Thread) (string, bool) { return testHeadSHA1, true },
+			autoRequest: func(b Bead, headSHA, prURL string) (ReviewRequestResult, error) {
+				autoCalls++
+				return ReviewRequestResult{}, nil
+			},
+			event: func(e Event) error { events = append(events, e); return nil },
+		}
+		checkReviewLoopsPass(cfg, trigEnv, []Thread{{Bead: impl}}, now)
+		if autoCalls != 0 || len(events) != 1 || events[0].Kind != EventReviewNeeded {
+			t.Fatalf("auto_trigger=false should emit review_needed without autoRequest: calls=%d events=%+v", autoCalls, events)
+		}
+	})
+}
+
+func TestReviewCanMergeCleanupGuardsAndDeferredResolve(t *testing.T) {
+	t.Run("manual non-spawned reviewer is not auto-closed", func(t *testing.T) {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		cfg := defaultConfig()
+		impl := Bead{ID: "task-m", Title: "Manual reviewer test", Status: StatusInProgress}
+		manualRev := Bead{ID: "rev-manual", Title: "Human-managed reviewer", Status: StatusInProgress, Labels: []string{"role:reviewer"}}
+		f := newFakeReviewEnv(impl, manualRev)
+
+		if _, err := requestReview(cfg, f.env(), "task-m", ReviewRequestOpts{HeadSHA: testHeadSHA1, ReviewerBead: "rev-manual"}); err != nil {
+			t.Fatalf("requestReview: %v", err)
+		}
+		res, err := recordReviewVerdict(f.env(), "task-m", ReviewVerdictInput{
+			Verdict: "can_merge",
+			HeadSHA: testHeadSHA1,
+			Summary: "Looks good",
+		})
+		if err != nil {
+			t.Fatalf("recordReviewVerdict: %v", err)
+		}
+		if len(res.ReviewerClosed) != 0 || len(f.closed) != 0 || len(f.resolved) != 0 {
+			t.Fatalf("manual non-spawned reviewer should not be auto-closed/resolved: res=%+v closed=%v resolved=%v", res, f.closed, f.resolved)
+		}
+	})
+
+	t.Run("never closes or resolves implementer bead even on corrupted state", func(t *testing.T) {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		impl := Bead{ID: "task-safe", Title: "Must stay open", Status: StatusInProgress}
+		otherImpl := Bead{ID: "task-other-impl", Title: "Another implementer", Status: StatusInProgress}
+		f := newFakeReviewEnv(impl, otherImpl)
+
+		if err := saveReviewLoop(ReviewLoopState{
+			Version:          reviewLoopSchemaVersion,
+			Bead:             "task-safe",
+			ReviewerBead:     "task-safe",
+			ReviewerSpawned:  true,
+			SpawnedReviewers: []string{"task-safe", "task-other-impl"},
+			MaxRounds:        2,
+			State:            reviewStatePending,
+			CurrentRound:     1,
+			LastHeadSHA:      testHeadSHA1,
+			Rounds:           []ReviewRound{{Round: 1, HeadSHA: testHeadSHA1}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := recordReviewVerdict(f.env(), "task-safe", ReviewVerdictInput{
+			Verdict: "can_merge",
+			HeadSHA: testHeadSHA1,
+			Summary: "Verified",
+		})
+		if err != nil {
+			t.Fatalf("recordReviewVerdict: %v", err)
+		}
+		if len(f.closed) != 0 || len(f.resolved) != 0 || len(res.ReviewerClosed) != 0 {
+			t.Fatalf("must never close or resolve implementer beads: closed=%v resolved=%v", f.closed, f.resolved)
+		}
+		if f.beads["task-safe"].Status != StatusInProgress || f.beads["task-other-impl"].Status != StatusInProgress {
+			t.Fatalf("implementer statuses modified: %+v", f.beads)
+		}
+	})
+
+	t.Run("defers resolve when reviewer agent is still working and finishes on next ticker pass", func(t *testing.T) {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		cfg := defaultConfig()
+		impl := Bead{ID: "task-def", Title: "Deferred resolve", Status: StatusInProgress}
+		f := newFakeReviewEnv(impl)
+		f.tellErr["rev-1"] = errors.New("not running")
+
+		if _, err := requestReview(cfg, f.env(), "task-def", ReviewRequestOpts{HeadSHA: testHeadSHA1, SpawnReviewer: true}); err != nil {
+			t.Fatalf("requestReview: %v", err)
+		}
+		// Simulate the reviewer agent invoking `quartermaster review verdict` mid-turn.
+		f.resolveErr["rev-1"] = errors.New("rev-1's agent is still working")
+
+		res, err := recordReviewVerdict(f.env(), "task-def", ReviewVerdictInput{
+			Verdict: "can_merge",
+			HeadSHA: testHeadSHA1,
+			Summary: "Clean diff and passing tests",
+		})
+		if err != nil {
+			t.Fatalf("recordReviewVerdict should succeed even when resolve defers: %v", err)
+		}
+		if !slices.Equal(res.ReviewerClosed, []string{"rev-1"}) || len(res.ReviewerResolved) != 0 {
+			t.Fatalf("expected rev-1 closed and resolve deferred: closed=%v resolved=%v", res.ReviewerClosed, res.ReviewerResolved)
+		}
+		if !slices.Equal(res.State.PendingResolveBeads, []string{"rev-1"}) {
+			t.Fatalf("PendingResolveBeads = %v, want [rev-1]", res.State.PendingResolveBeads)
+		}
+
+		// Reviewer finishes its turn -> next ticker pass resolves rev-1 and clears PendingResolveBeads.
+		delete(f.resolveErr, "rev-1")
+		trigEnv := reviewLoopTriggerEnv{
+			show:            f.env().show,
+			resolveReviewer: f.env().resolveReviewer,
+		}
+		lines := checkReviewLoopsPass(cfg, trigEnv, nil, f.now.Add(15*time.Second))
+		if len(lines) != 1 || !strings.Contains(lines[0], "resolved finished reviewer rev-1") {
+			t.Fatalf("expected deferred resolve on next tick, got %v", lines)
+		}
+		if !slices.Equal(f.resolved, []string{"rev-1"}) {
+			t.Fatalf("resolved = %v, want [rev-1]", f.resolved)
+		}
+		st, ok, err := loadReviewLoop("task-def")
+		if err != nil || !ok || len(st.PendingResolveBeads) != 0 {
+			t.Fatalf("PendingResolveBeads should be empty after deferred resolve: ok=%v err=%v pending=%v", ok, err, st.PendingResolveBeads)
+		}
+	})
+
+	t.Run("skips cleanup when reviewer bead is below class 3 without failing verdict", func(t *testing.T) {
+		t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+		cfg := defaultConfig()
+		cfg.Autonomy.Level = 5
+		impl := Bead{ID: "task-lowrev", Title: "Low autonomy reviewer cleanup", Status: StatusInProgress}
+		f := newFakeReviewEnv(impl)
+		f.tellErr["rev-1"] = errors.New("not running")
+
+		if _, err := requestReview(cfg, f.env(), "task-lowrev", ReviewRequestOpts{HeadSHA: testHeadSHA1, SpawnReviewer: true}); err != nil {
+			t.Fatalf("requestReview: %v", err)
+		}
+		// Lower spawned reviewer bead to autonomy:2 before verdict.
+		rb := f.beads["rev-1"]
+		rb.Labels = append(rb.Labels, "autonomy:2")
+		f.beads["rev-1"] = rb
+		f.enforceFn = func(b Bead, action, by string) (string, error) {
+			return cfg.enforce(b, action, by)
+		}
+
+		res, err := recordReviewVerdict(f.env(), "task-lowrev", ReviewVerdictInput{
+			Verdict: "can_merge",
+			HeadSHA: testHeadSHA1,
+			Summary: "Approved",
+		})
+		if err != nil {
+			t.Fatalf("verdict should succeed even when cleanup is skipped: %v", err)
+		}
+		if len(res.ReviewerClosed) != 0 || len(res.ReviewerResolved) != 0 || !strings.Contains(res.ReviewerCleanup, "cleanup skipped") {
+			t.Fatalf("expected cleanup skipped below class 3, got res=%+v", res)
+		}
+		if f.beads["rev-1"].Status == StatusClosed {
+			t.Fatal("rev-1 at autonomy:2 should remain open")
+		}
+	})
 }
