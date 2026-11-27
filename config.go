@@ -106,6 +106,10 @@ type Config struct {
 	// can be overridden here (roles.go, docs/roles.md).
 	Roles map[string]RoleConfig `toml:"roles"`
 
+	// Councils configures named multi-model planning council panels
+	// ([councils.<name>]); empty by default (council.go, docs/council.md).
+	Councils map[string]CouncilConfig `toml:"councils"`
+
 	// Autonomy is the dial: how far beads go without TJ; see
 	// docs/design/autonomy-dial.md. It also decides what auto_close and
 	// auto_resolve did: the ticker closes and resolves at level 3 and above.
@@ -361,6 +365,103 @@ func (c Config) validateReview() error {
 	for _, raw := range r.SecurityPaths {
 		if err := validateReviewPathGlob(raw); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+const defaultCouncilTimeoutMinutes = 20
+
+// CouncilConfig is one [councils.<name>] table in config.toml: configures a
+// multi-model planning council with isolated read-only member panelists and a
+// blind fact-checking chair role.
+type CouncilConfig struct {
+	// Members lists >=2 unique role names referencing built-in or configured
+	// [roles.<name>] presets that independently produce planning artifacts.
+	Members []string `toml:"members"`
+	// Chair names the built-in or configured [roles.<name>] preset that
+	// fact-checks and synthesizes submitted member plans.
+	Chair string `toml:"chair"`
+	// Anonymize controls whether member plans are anonymized as Plan A,
+	// Plan B, ... with zero role/model leakage before chair synthesis
+	// (default true).
+	Anonymize *bool `toml:"anonymize"`
+	// MinQuorum is the minimum number of submitted member plans required to
+	// advance to chair synthesis at deadline (default len(members); must
+	// satisfy 1 <= min_quorum <= len(members)).
+	MinQuorum int `toml:"min_quorum"`
+	// TimeoutMinutes is the fan-out deadline in minutes (default 20; must be > 0).
+	TimeoutMinutes int `toml:"timeout_minutes"`
+	// AutoCleanup controls whether helper member and chair beads are
+	// automatically closed and resolved once synthesis completes (default true).
+	AutoCleanup *bool `toml:"auto_cleanup"`
+}
+
+func (c CouncilConfig) anonymizeEnabled() bool   { return desktopBool(c.Anonymize, true) }
+func (c CouncilConfig) autoCleanupEnabled() bool { return desktopBool(c.AutoCleanup, true) }
+
+func (c CouncilConfig) effectiveMinQuorum() int {
+	if c.MinQuorum > 0 {
+		return c.MinQuorum
+	}
+	return len(c.Members)
+}
+
+func (c CouncilConfig) effectiveTimeoutMinutes() int {
+	if c.TimeoutMinutes > 0 {
+		return c.TimeoutMinutes
+	}
+	return defaultCouncilTimeoutMinutes
+}
+
+func (c CouncilConfig) effectiveTimeout() time.Duration {
+	return time.Duration(c.effectiveTimeoutMinutes()) * time.Minute
+}
+
+func (c Config) validateCouncilRoles(scope string, members []string, chair string) error {
+	if len(members) < 2 {
+		return fmt.Errorf("%s members requires at least 2 unique roles (got %d)", scope, len(members))
+	}
+	seen := make(map[string]bool, len(members))
+	for _, raw := range members {
+		if raw == "" || strings.TrimSpace(raw) != raw {
+			return fmt.Errorf("%s member role %q must be non-empty without surrounding whitespace", scope, raw)
+		}
+		if seen[raw] {
+			return fmt.Errorf("%s duplicate member role %q", scope, raw)
+		}
+		seen[raw] = true
+		if _, err := c.resolveRole(raw); err != nil {
+			return fmt.Errorf("%s member role %q: %w", scope, raw, err)
+		}
+	}
+	if chair == "" || strings.TrimSpace(chair) != chair {
+		return fmt.Errorf("%s chair role is required and must not have surrounding whitespace", scope)
+	}
+	if _, err := c.resolveRole(chair); err != nil {
+		return fmt.Errorf("%s chair role %q: %w", scope, chair, err)
+	}
+	return nil
+}
+
+// validateCouncils fails closed on invalid [councils.<name>] tables.
+func (c Config) validateCouncils(md *toml.MetaData) error {
+	for _, name := range slices.Sorted(maps.Keys(c.Councils)) {
+		if name == "" || strings.TrimSpace(name) != name || !roleNameRE.MatchString(name) {
+			return fmt.Errorf("[councils.%s] invalid council name (must match ^[a-z0-9][a-z0-9_-]*$)", name)
+		}
+		cc := c.Councils[name]
+		scope := fmt.Sprintf("[councils.%s]", name)
+		if err := c.validateCouncilRoles(scope, cc.Members, cc.Chair); err != nil {
+			return err
+		}
+		minQuorumDefined := md != nil && md.IsDefined("councils", name, "min_quorum")
+		if cc.MinQuorum < 0 || (cc.MinQuorum == 0 && minQuorumDefined) || cc.MinQuorum > len(cc.Members) {
+			return fmt.Errorf("%s min_quorum %d must be between 1 and %d", scope, cc.MinQuorum, len(cc.Members))
+		}
+		timeoutDefined := md != nil && md.IsDefined("councils", name, "timeout_minutes")
+		if cc.TimeoutMinutes < 0 || (cc.TimeoutMinutes == 0 && timeoutDefined) {
+			return fmt.Errorf("%s timeout_minutes %d must be > 0", scope, cc.TimeoutMinutes)
 		}
 	}
 	return nil
@@ -996,6 +1097,9 @@ func loadConfig() (Config, error) {
 		return cfg, err
 	}
 	if err := cfg.validateRoles(); err != nil {
+		return cfg, err
+	}
+	if err := cfg.validateCouncils(&md); err != nil {
 		return cfg, err
 	}
 	if err := cfg.validateTap(); err != nil {

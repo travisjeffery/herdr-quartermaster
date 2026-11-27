@@ -27,9 +27,10 @@ func defaultInboxCondition(e Event) *InboxCondition {
 	switch e.Kind {
 	case "closed", EventAutoClosed:
 		kind = "manual"
-	case EventLikelyStale, EventLeaseExpired, EventBreaker, EventWatchTriggered, EventWatchExpired, EventUnblocked, EventReviewPassed:
-		// Verify, lease expiry, breakers, watches, blocker wakeups and passed
-		// review notices can apply outside the active-thread set.
+	case EventLikelyStale, EventLeaseExpired, EventBreaker, EventWatchTriggered, EventWatchExpired, EventUnblocked, EventReviewPassed, EventCouncilDone, EventCouncilFailed:
+		// Verify, lease expiry, breakers, watches, blocker wakeups, passed
+		// review notices, and planning council results can apply outside the
+		// active-thread set.
 		kind = "bead_closed"
 	case EventReviewNeeded:
 		kind = "review_needed"

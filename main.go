@@ -31,6 +31,7 @@ Usage:
                 [--by WHO] [--json]                    state), and spawn a fresh-context worker on the same dir
   quartermaster shift show <bead> [--json]             inspect the latest handoff artifact recorded for a bead
   quartermaster roles [--json]                         list built-in and configured [roles.<name>] presets
+  quartermaster council start|submit|status|cancel ... multi-model planning council (isolated fan-out, blind fact-checked chair synthesis)
   quartermaster review request|verdict|status ...      bounded implementer-reviewer ping-pong loop (head-SHA dedup, round cap)
   quartermaster rollout chain|status ...               attach or inspect dependent role:rollout beads for target environments
   quartermaster rpc status|output|events <bead>        inspect a native worker (no Herdr needed)
@@ -289,6 +290,8 @@ func run(args []string) error {
 		return notifyCmd(cfg, liveNotifyEnv(cfg, nil), rest, os.Stdout)
 	case "review":
 		return reviewCmd(cfg, liveReviewLoopEnv(cfg, h), rest, os.Stdin, os.Stdout)
+	case "council":
+		return councilCmd(cfg, liveCouncilEnv(cfg, h, nil), rest, os.Stdin, os.Stdout)
 	case "rollout":
 		return rolloutCmd(cfg, liveRolloutChainEnv(cfg), rest, os.Stdout)
 	case "shift":
