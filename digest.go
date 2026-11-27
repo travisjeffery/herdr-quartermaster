@@ -285,9 +285,13 @@ func pickPR(urls []string, prs map[string]DigestPR) (*DigestPR, int) {
 // digestObservation renders a full ticker observation in the digest, including
 // when its separate GitHub lookup is unavailable.
 func digestObservation(p PR) DigestPR {
+	return digestObservationWith(p, nil)
+}
+
+func digestObservationWith(p PR, ignore []string) DigestPR {
 	d := DigestPR{Number: p.Number, URL: p.URL, State: p.State, MergedAt: p.MergedAt,
 		IsDraft: p.IsDraft, HeadSHA: p.HeadSHA, MergeState: p.MergeState, ReviewDecision: p.ReviewDecision}
-	c := summarizeChecks(p.Checks)
+	c := summarizeChecksWith(p.Checks, ignore)
 	switch {
 	case len(c.Failing) > 0:
 		d.Checks = "FAILURE"
@@ -385,7 +389,7 @@ func buildDigest(in digestInputs, prev digestState, prefixes []string, now time.
 			}
 		}
 		if pr == nil && th.PR != nil && b.Status != StatusOpen {
-			fallback := digestObservation(*th.PR)
+			fallback := digestObservationWith(*th.PR, in.cfg.IgnoreChecks)
 			pr = &fallback
 			if fallback.State == "OPEN" {
 				open = 1

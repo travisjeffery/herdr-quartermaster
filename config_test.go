@@ -143,3 +143,95 @@ mcp_config = "~/.config/quartermaster/verifier-mcp.json"
 		})
 	}
 }
+
+func TestLoadConfigIgnoreChecksValidation(t *testing.T) {
+	writeCfg := func(t *testing.T, body string) {
+		t.Helper()
+		dir := t.TempDir()
+		t.Setenv("QUARTERMASTER_CONFIG_DIR", dir)
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("defaults empty and fails closed", func(t *testing.T) {
+		writeCfg(t, "repo = \"/tmp/repo\"\n")
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig failed: %v", err)
+		}
+		if len(cfg.IgnoreChecks) != 0 {
+			t.Fatalf("IgnoreChecks = %v, want empty", cfg.IgnoreChecks)
+		}
+	})
+
+	t.Run("explicit empty list loads cleanly", func(t *testing.T) {
+		writeCfg(t, "repo = \"/tmp/repo\"\nignore_checks = []\n")
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig failed: %v", err)
+		}
+		if len(cfg.IgnoreChecks) != 0 {
+			t.Fatalf("IgnoreChecks = %v, want empty", cfg.IgnoreChecks)
+		}
+	})
+
+	t.Run("exact names and valid globs load cleanly", func(t *testing.T) {
+		writeCfg(t, `
+repo = "/tmp/repo"
+ignore_checks = [
+  "* (report-only)",
+  "advisory/*",
+  "Coverage Report",
+  "check-[0-9]",
+  "build [linux]",
+]
+`)
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig failed: %v", err)
+		}
+		want := []string{"* (report-only)", "advisory/*", "Coverage Report", "check-[0-9]", "build [linux]"}
+		if !slices.Equal(cfg.IgnoreChecks, want) {
+			t.Fatalf("IgnoreChecks = %v, want %v", cfg.IgnoreChecks, want)
+		}
+	})
+
+	invalid := map[string]struct {
+		toml string
+		want string
+	}{
+		"empty pattern": {
+			toml: "repo = \"/tmp/repo\"\nignore_checks = [\"\"]\n",
+			want: "ignore_checks",
+		},
+		"whitespace-only pattern": {
+			toml: "repo = \"/tmp/repo\"\nignore_checks = [\"   \"]\n",
+			want: "ignore_checks",
+		},
+		"unclosed bracket": {
+			toml: "repo = \"/tmp/repo\"\nignore_checks = [\"[unclosed\"]\n",
+			want: "ignore_checks",
+		},
+		"unclosed bracket after prefix": {
+			toml: "repo = \"/tmp/repo\"\nignore_checks = [\"scan-[report-only\"]\n",
+			want: "ignore_checks",
+		},
+		"empty character class": {
+			toml: "repo = \"/tmp/repo\"\nignore_checks = [\"scan-[]\"]\n",
+			want: "ignore_checks",
+		},
+		"trailing escape": {
+			toml: "repo = \"/tmp/repo\"\nignore_checks = [\"scan\\\\\"]\n",
+			want: "ignore_checks",
+		},
+	}
+	for name, tc := range invalid {
+		t.Run("reject/"+name, func(t *testing.T) {
+			writeCfg(t, tc.toml)
+			if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("loadConfig() err = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}

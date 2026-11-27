@@ -683,3 +683,270 @@ func TestCoordinatorGuideDocumentsReadyForReviewAndBump(t *testing.T) {
 		t.Fatal("event kinds are not distinct")
 	}
 }
+
+func TestReadyForReviewIgnoreChecks(t *testing.T) {
+	ignore := []string{"* (report-only)", "advisory/*"}
+	cases := []struct {
+		name   string
+		ignore []string
+		checks []Check
+		want   bool
+	}{
+		{
+			name:   "ignored failing check allows ready_for_review",
+			ignore: ignore,
+			checks: []Check{
+				{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+				{Name: "Scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+			},
+			want: true,
+		},
+		{
+			name:   "ignored failing check with slash and different case allows ready_for_review",
+			ignore: ignore,
+			checks: []Check{
+				{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+				{Name: "CI / Coverage (REPORT-ONLY)", Status: "COMPLETED", Conclusion: "FAILURE"},
+			},
+			want: true,
+		},
+		{
+			name:   "ignored pending check allows ready_for_review",
+			ignore: ignore,
+			checks: []Check{
+				{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+				{Context: "advisory/slow", State: "PENDING"},
+			},
+			want: true,
+		},
+		{
+			name:   "empty ignore_checks fails closed on report-only failure",
+			ignore: nil,
+			checks: []Check{
+				{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+				{Name: "Scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+			},
+			want: false,
+		},
+		{
+			name:   "only ignored failing check fails closed (zero remaining checks)",
+			ignore: ignore,
+			checks: []Check{
+				{Name: "Scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+			},
+			want: false,
+		},
+		{
+			name:   "only ignored passing check fails closed (zero remaining checks)",
+			ignore: ignore,
+			checks: []Check{
+				{Name: "Scan (report-only)", Status: "COMPLETED", Conclusion: "SUCCESS"},
+			},
+			want: false,
+		},
+		{
+			name:   "non-ignored failure still blocks readiness",
+			ignore: ignore,
+			checks: []Check{
+				{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+				{Name: "lint", Status: "COMPLETED", Conclusion: "FAILURE"},
+				{Name: "Scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+			},
+			want: false,
+		},
+		{
+			name:   "non-ignored pending check still blocks readiness",
+			ignore: ignore,
+			checks: []Check{
+				{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+				{Name: "e2e", Status: "IN_PROGRESS"},
+				{Name: "Scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := reviewReadyPR("sha1", t0)
+			pr.MergeState = "UNSTABLE"
+			pr.Checks = tc.checks
+			got := readyForReview(pr, summarizeChecksWith(pr.Checks, tc.ignore))
+			if got != tc.want {
+				t.Fatalf("readyForReview = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGatePRsRespectsIgnoreChecks(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	queryLog := filepath.Join(dir, "gh-query.log")
+	t.Setenv("GH_QUERY_LOG", queryLog)
+
+	resp, err := json.Marshal(map[string]any{
+		"data": map[string]any{
+			"viewer": map[string]string{"login": "owner"},
+			"p0": map[string]any{
+				"pullRequest": map[string]any{
+					"headRefOid":    "sha-review",
+					"author":        map[string]string{"login": "owner"},
+					"reviews":       map[string]any{"pageInfo": map[string]bool{"hasNextPage": false}, "nodes": []any{}},
+					"reviewThreads": map[string]any{"pageInfo": map[string]bool{"hasNextPage": false}, "nodes": []any{}},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GH_QUERY_LOG\"\nprintf '%s\\n' '" + string(resp) + "'\n"
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	cfg := defaultConfig()
+	cfg.IgnoreChecks = []string{"* (report-only)"}
+	tk := Ticker{cfg: cfg, gh: GH{repo: dir}, log: log.New(io.Discard, "", 0), now: func() time.Time { return now }}
+
+	ignoredOnlyFailure := *reviewReadyPR("sha-review", now)
+	ignoredOnlyFailure.Number = 31
+	ignoredOnlyFailure.URL = "https://github.com/acme/app/pull/31"
+	ignoredOnlyFailure.MergeState = "UNSTABLE"
+	ignoredOnlyFailure.Gate = nil
+	ignoredOnlyFailure.Checks = []Check{
+		{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+		{Name: "coverage (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+	}
+
+	zeroRemaining := ignoredOnlyFailure
+	zeroRemaining.Number = 32
+	zeroRemaining.URL = "https://github.com/acme/app/pull/32"
+	zeroRemaining.Checks = []Check{
+		{Name: "coverage (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+	}
+
+	realFailure := ignoredOnlyFailure
+	realFailure.Number = 33
+	realFailure.URL = "https://github.com/acme/app/pull/33"
+	realFailure.Checks = []Check{
+		{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+		{Name: "lint", Status: "COMPLETED", Conclusion: "FAILURE"},
+		{Name: "coverage (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+	}
+
+	prs := map[string]PR{
+		"task-ignored":        ignoredOnlyFailure,
+		"task-zero-remaining": zeroRemaining,
+		"task-real-failure":   realFailure,
+	}
+	tk.gatePRs(prs)
+
+	raw, err := os.ReadFile(queryLog)
+	if err != nil {
+		t.Fatalf("expected gh graphql call: %v", err)
+	}
+	q := string(raw)
+	if !strings.Contains(q, "pullRequest(number: 31)") {
+		t.Fatalf("query missing candidate with ignored-only failure #31:\n%s", q)
+	}
+	for _, skip := range []string{"pullRequest(number: 32)", "pullRequest(number: 33)"} {
+		if strings.Contains(q, skip) {
+			t.Fatalf("query should not fetch gate for ineligible %s:\n%s", skip, q)
+		}
+	}
+	if g := prs["task-ignored"].Gate; g == nil || g.Head != "sha-review" || g.OpenThreads != 0 {
+		t.Fatalf("candidate gate not applied: %+v", g)
+	}
+}
+
+func TestReadyForReviewEndToEndWithIgnoreChecks(t *testing.T) {
+	dir := fakeTools(t)
+	t.Setenv("PATH", dir)
+	if err := os.WriteFile(filepath.Join(dir, "bd"), []byte("#!/bin/sh\ncase \"$1\" in list) printf '%s\\n' '[{\"id\":\"task-1\",\"status\":\"in_progress\",\"title\":\"Queue worker\"}]' ;; esac\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	runTick := func(pr PR) ([]InboxItem, TickerState) {
+		t.Helper()
+		cfg := defaultConfig()
+		cfg.Repo = t.TempDir()
+		cfg.Nudge = false
+		cfg.VerifyMinutes = 0
+		cfg.IgnoreChecks = []string{"* (report-only)"}
+		disabled := false
+		cfg.Desktop.Enabled = &disabled
+		tk := newTicker(cfg, log.New(io.Discard, "", 0))
+		tk.now = func() time.Time { return now }
+		st := loadState()
+		st.LastGH = now
+		st.PRs["task-1"] = pr
+		if err := tk.once(&st); err != nil {
+			t.Fatalf("ticker once at %v: %v", now, err)
+		}
+		if err := saveState(st); err != nil {
+			t.Fatalf("saveState: %v", err)
+		}
+		items, err := readInbox()
+		if err != nil {
+			t.Fatalf("readInbox: %v", err)
+		}
+		return items, st
+	}
+
+	// Tick 1: required check running while advisory check is already failing -> baseline only.
+	tick1 := *reviewReadyPR("sha1", now)
+	tick1.MergeState = "UNSTABLE"
+	tick1.Checks = []Check{
+		{Name: "test", Status: "IN_PROGRESS"},
+		{Name: "Scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+	}
+	if items, st := runTick(tick1); len(items) != 0 || len(st.Threads["task-1"].Pending) != 0 {
+		t.Fatalf("tick 1 emitted unexpected items=%+v prompts=%+v", items, st.Threads["task-1"].Pending)
+	}
+
+	// Tick 2: required checks pass while advisory check still fails -> emits ready_for_review,
+	// does NOT emit checks_failing, and queues NO failing-check worker prompt.
+	now = now.Add(2 * time.Minute)
+	tick2 := *reviewReadyPR("sha1", now)
+	tick2.MergeState = "UNSTABLE"
+	tick2.Checks = []Check{
+		{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+		{Name: "vet", Status: "COMPLETED", Conclusion: "SUCCESS"},
+		{Name: "Scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+	}
+	items, st := runTick(tick2)
+	if len(items) != 1 || items[0].Kind != EventReadyForReview {
+		t.Fatalf("tick 2 inbox = %+v, want single ready_for_review event", items)
+	}
+	if len(st.Threads["task-1"].Pending) != 0 || len(st.Threads["task-1"].Failing) != 0 {
+		t.Fatalf("tick 2 snapshot recorded failing/prompt for ignored check: %+v", st.Threads["task-1"])
+	}
+	if _, err := inboxDone([]string{items[0].File}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tick 3: new head has a real non-ignored failure plus the ignored failure ->
+	// emits checks_failing naming only the real failure and suppresses ready_for_review.
+	now = now.Add(5 * time.Minute)
+	tick3 := *reviewReadyPR("sha2", now)
+	tick3.MergeState = "UNSTABLE"
+	tick3.Checks = []Check{
+		{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+		{Name: "lint", Status: "COMPLETED", Conclusion: "FAILURE"},
+		{Name: "Scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+	}
+	items, st = runTick(tick3)
+	if len(items) != 1 || items[0].Kind != EventFailing {
+		t.Fatalf("tick 3 inbox = %+v, want single checks_failing event", items)
+	}
+	if !strings.Contains(items[0].Summary, "lint") || strings.Contains(items[0].Summary, "report-only") {
+		t.Fatalf("tick 3 checks_failing summary = %q, want only lint", items[0].Summary)
+	}
+	if !slices.Equal(st.Threads["task-1"].Failing, []string{"lint"}) {
+		t.Fatalf("tick 3 snapshot Failing = %v, want [lint]", st.Threads["task-1"].Failing)
+	}
+}

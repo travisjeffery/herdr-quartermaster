@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -45,6 +46,11 @@ type Config struct {
 	// same head SHA without a new human review before the ticker emits one
 	// bounded review_bump inbox reminder. 0 disables review_bump reminders.
 	ReviewBumpHours int `toml:"review_bump_hours"`
+	// IgnoreChecks lists advisory or report-only CI check names or
+	// case-insensitive glob patterns (path.Match syntax) excluded from PR
+	// failure/pending readiness evaluation. Empty by default (fail closed:
+	// nothing is ignored unless explicitly configured).
+	IgnoreChecks []string `toml:"ignore_checks"`
 	// Only keys with these team prefixes count as Linear issues; empty accepts
 	// any key outside a small denylist.
 	LinearPrefixes []string `toml:"linear_prefixes"`
@@ -216,6 +222,18 @@ func (c DesktopConfig) cooldown() time.Duration {
 func (c Config) validateDesktop() error {
 	if c.Desktop.CooldownSeconds != nil && *c.Desktop.CooldownSeconds < 0 {
 		return fmt.Errorf("[desktop] cooldown_seconds %d is negative; use 0 to disable cooldown", *c.Desktop.CooldownSeconds)
+	}
+	return nil
+}
+
+func (c Config) validateIgnoreChecks() error {
+	for _, raw := range c.IgnoreChecks {
+		if strings.TrimSpace(raw) == "" {
+			return errors.New("ignore_checks contains an empty pattern")
+		}
+		if _, err := path.Match(strings.ToLower(raw), ""); err != nil {
+			return fmt.Errorf("ignore_checks pattern %q: %w", raw, err)
+		}
 	}
 	return nil
 }
@@ -869,6 +887,9 @@ func loadConfig() (Config, error) {
 	}
 	if cfg.ReviewBumpHours < 0 {
 		return cfg, fmt.Errorf("review_bump_hours %d is negative; use 0 to disable review bump reminders", cfg.ReviewBumpHours)
+	}
+	if err := cfg.validateIgnoreChecks(); err != nil {
+		return cfg, err
 	}
 	if cfg.NeedsMeParkedDays != nil && *cfg.NeedsMeParkedDays < 0 {
 		return cfg, fmt.Errorf("needs_me_parked_days %d is negative; use 0 to disable age-based parking", *cfg.NeedsMeParkedDays)
