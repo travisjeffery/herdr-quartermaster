@@ -884,6 +884,15 @@ func loadConfig() (Config, error) {
 	if err := cfg.validateCIRerun(); err != nil {
 		return cfg, err
 	}
+	if cfg.Verifier.MCPConfig != "" {
+		cfg.Verifier.MCPConfig = expandHome(cfg.Verifier.MCPConfig)
+	}
+	for i, p := range cfg.Verifier.DenyPaths {
+		cfg.Verifier.DenyPaths[i] = expandHome(p)
+	}
+	if err := cfg.Verifier.validate(); err != nil {
+		return cfg, err
+	}
 	if cfg.Repo == "" {
 		return cfg, errNoRepo
 	}
