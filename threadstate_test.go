@@ -299,3 +299,139 @@ func TestPRSelectionKeepsSourceOrderAndLatestMerge(t *testing.T) {
 		t.Fatal("selector reordered caller input")
 	}
 }
+
+func TestIgnoreChecksMatchingAndSummary(t *testing.T) {
+	cases := []struct {
+		name    string
+		label   string
+		pattern string
+		want    bool
+	}{
+		{"exact case-insensitive", "Coverage Report", "coverage report", true},
+		{"suffix glob case-insensitive", "Lint (Report-Only)", "* (report-only)", true},
+		{"suffix glob spans slash in check name", "CI / Security Scan (report-only)", "* (report-only)", true},
+		{"non-matching required check", "CI / Unit Tests", "* (report-only)", false},
+		{"slash glob matches one segment", "Advisory/Coverage", "advisory/*", true},
+		{"slash glob respects segment boundary", "advisory/sub/coverage", "advisory/*", false},
+		{"single-char wildcard", "check-3", "check-?", true},
+		{"char class glob", "check-7", "check-[0-9]", true},
+		{"literal bracketed exact match", "build [linux]", "build [linux]", true},
+		{"malformed glob fails closed even on literal text", "[unclosed", "[unclosed", false},
+		{"empty pattern fails closed", "lint", "", false},
+		{"whitespace pattern fails closed", "lint", "   ", false},
+		{"empty label never ignored", "", "*", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := checkMatchesIgnore(tc.label, tc.pattern); got != tc.want {
+				t.Fatalf("checkMatchesIgnore(%q, %q) = %v, want %v", tc.label, tc.pattern, got, tc.want)
+			}
+		})
+	}
+
+	checks := []Check{
+		{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+		{Name: "Scan (Report-Only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+		{Name: "Scan (Report-Only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+		{Context: "advisory/coverage", State: "ERROR"},
+		{Name: "CI / Slow Advisory (report-only)", Status: "IN_PROGRESS"},
+		{Name: "Audit (report-only)", Status: "COMPLETED", Conclusion: "SUCCESS"},
+	}
+
+	// Default empty ignore list: nothing ignored (fail closed).
+	unfiltered := summarizeChecksWith(checks, nil)
+	if !slices.Equal(unfiltered.Failing, []string{"Scan (Report-Only)", "advisory/coverage"}) ||
+		unfiltered.Pending != 1 || unfiltered.Passing != 2 ||
+		len(unfiltered.IgnoredFailing) != 0 || unfiltered.IgnoredPending != 0 || unfiltered.IgnoredPassing != 0 {
+		t.Fatalf("unfiltered = %+v", unfiltered)
+	}
+
+	// Configured ignore patterns filter failing, pending, and passing advisory checks
+	// out of readiness counts while retaining them for non-blocking display.
+	filtered := summarizeChecksWith(checks, []string{"* (report-only)", "advisory/*"})
+	if len(filtered.Failing) != 0 || filtered.Pending != 0 || filtered.Passing != 1 {
+		t.Fatalf("filtered blocking counts = %+v, want 0 failing, 0 pending, 1 passing", filtered)
+	}
+	if !slices.Equal(filtered.IgnoredFailing, []string{"Scan (Report-Only)", "advisory/coverage"}) ||
+		filtered.IgnoredPending != 1 || filtered.IgnoredPassing != 1 {
+		t.Fatalf("filtered advisory counts = %+v", filtered)
+	}
+	summary := checkSummary(filtered)
+	for _, want := range []string{"1 passed", "2 advisory failing (Scan (Report-Only), advisory/coverage)", "1 advisory running", "1 advisory passed"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("checkSummary = %q, missing %q", summary, want)
+		}
+	}
+}
+
+func TestIgnoreChecksThreadStateAndViews(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	b := Bead{ID: "task-1", Status: StatusInProgress, Title: "Queue worker", UpdatedAt: t0, Notes: "PR: https://github.com/example/app/pull/7"}
+	a := Agent{Name: b.ID, Status: "idle", Seq: 4}
+	pr := PR{
+		Number:         7,
+		Title:          "Queue worker",
+		URL:            "https://github.com/example/app/pull/7",
+		State:          "OPEN",
+		HeadSHA:        "sha1",
+		MergeState:     "UNSTABLE",
+		Mergeable:      "MERGEABLE",
+		ReviewDecision: "REVIEW_REQUIRED",
+		DetailsFresh:   true,
+		Checks: []Check{
+			{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+			{Name: "CI / Scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+		},
+	}
+	st := TickerState{
+		PRs:     map[string]PR{b.ID: pr},
+		Threads: map[string]Snapshot{b.ID: {AgentStatus: a.Status, AgentSeq: a.Seq}},
+	}
+	byName := map[string]Agent{a.Name: a}
+
+	// Without ignore_checks: classified as failing (fail closed).
+	thDefault := threadFor(defaultConfig(), st, b, byName)
+	if s := thDefault.derived(); s.Kind != ThreadDelivering || s.Gate != GateFailing || classify(thDefault) != GroupFailing {
+		t.Fatalf("default config state = %+v (group %s), want failing", s, classify(thDefault))
+	}
+
+	// With matching ignore_checks: classified as delivering/review across all views
+	// while retaining non-blocking advisory info in display/status output.
+	cfg := defaultConfig()
+	cfg.IgnoreChecks = []string{"* (report-only)"}
+	th := threadFor(cfg, st, b, byName)
+	s := th.derived()
+	if s.Kind != ThreadDelivering || s.Gate != GateReview || classify(th) != GroupReview {
+		t.Fatalf("ignored-only failure state = %+v (group %s), want review", s, classify(th))
+	}
+	if len(th.Checks.Failing) != 0 || th.Checks.Passing != 1 || !slices.Equal(th.Checks.IgnoredFailing, []string{"CI / Scan (report-only)"}) {
+		t.Fatalf("unexpected checks = %+v", th.Checks)
+	}
+	if got := stateLine(th); !strings.HasPrefix(got, "review · PR #7") || !strings.Contains(got, "advisory failing (CI / Scan (report-only))") {
+		t.Fatalf("stateLine = %q, want review with non-blocking advisory info", got)
+	}
+
+	// Board, detail, digest fallback, report, and context all agree.
+	rows := buildRows(cfg, boardData{Beads: []Bead{b}, Agents: []Agent{a}, State: st}, sortPriority)
+	if len(rows) != 2 || rows[1].group != GroupReview || rows[1].state.Gate != GateReview {
+		t.Fatalf("board = %+v, want GroupReview", rows)
+	}
+	detail := strings.Join(texts(detailLines(rows[1], &beadDetail{full: &b}, 120)), "\n")
+	if !strings.Contains(detail, "1 passed, 1 advisory failing (CI / Scan (report-only))") {
+		t.Fatalf("detail missing non-blocking advisory summary:\n%s", detail)
+	}
+	d, _ := buildDigest(digestInputs{cfg: cfg, open: []Bead{b}, agents: byName, ticker: st, branch: map[string]string{}, prs: map[string]DigestPR{}}, digestState{}, nil, t0)
+	if it := item(t, d, b.ID); it.Section != SecWaiting || it.State.Gate != GateReview || it.PR == nil || it.PR.Checks != "SUCCESS" {
+		t.Fatalf("digest fallback = %+v (PR=%+v), want review/SUCCESS", it, it.PR)
+	}
+	r := buildReportFor(cfg, t0, nil, []Bead{b}, nil, st)
+	reportTh := th
+	reportTh.Level = ""
+	if len(r.InFlight) != 1 || r.InFlight[0].Derived.Gate != GateReview || r.InFlight[0].State != stateLine(reportTh) {
+		t.Fatalf("report = %+v, want %q", r.InFlight, stateLine(reportTh))
+	}
+	out := renderContext(cfg, []Thread{th}, nil, nil, nil, st, nil, t0)
+	if !strings.Contains(out, stateLine(th)) {
+		t.Fatalf("context missing %q:\n%s", stateLine(th), out)
+	}
+}

@@ -210,7 +210,7 @@ func threadForAt(cfg Config, st TickerState, b Bead, byName map[string]Agent, no
 		policy := tickerMergePolicy(cfg, b, pr)
 		pr.Policy = &policy
 		th.PR = &pr
-		th.Checks = summarizeChecks(pr.Checks)
+		th.Checks = summarizeChecksWith(pr.Checks, cfg.IgnoreChecks)
 		th.Reviews = reviewsNotBy(pr.Reviews, st.Login)
 		th.BotReviews = botReviews(pr.Reviews)
 	}
@@ -408,7 +408,7 @@ func eachLimit(n, limit int, f func(int)) {
 func (t Ticker) gatePRs(prs map[string]PR) {
 	var want []PR
 	for _, pr := range prs {
-		c := summarizeChecks(pr.Checks)
+		c := summarizeChecksWith(pr.Checks, t.cfg.IgnoreChecks)
 		if pr.DetailsFresh && (mergeable(&pr, c) || reviewGateCandidate(&pr, c)) {
 			want = append(want, pr)
 		}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -144,9 +145,17 @@ const listFields = "number,title,url,headRefName,state,isDraft,mergedAt,headRefO
 const detailFields = listFields + ",reviewDecision,statusCheckRollup,reviews,mergeStateStatus,mergeable,autoMergeRequest"
 
 type Checks struct {
-	Failing []string
-	Pending int
-	Passing int
+	Failing        []string
+	Pending        int
+	Passing        int
+	IgnoredFailing []string
+	IgnoredPending int
+	IgnoredPassing int
+}
+
+func (c Checks) hasAny() bool {
+	return len(c.Failing) > 0 || c.Pending > 0 || c.Passing > 0 ||
+		len(c.IgnoredFailing) > 0 || c.IgnoredPending > 0 || c.IgnoredPassing > 0
 }
 
 func (c Check) label() string {
@@ -154,6 +163,60 @@ func (c Check) label() string {
 		return c.Name
 	}
 	return c.Context
+}
+
+// checkMatchesIgnore reports whether a check label matches one ignore_checks
+// entry (exact case-insensitive match or case-insensitive path.Match glob).
+// Empty labels, empty patterns, and malformed globs always fail closed.
+func checkMatchesIgnore(label, pattern string) bool {
+	if label == "" || strings.TrimSpace(pattern) == "" {
+		return false
+	}
+	lp := strings.ToLower(pattern)
+	if _, err := path.Match(lp, ""); err != nil {
+		return false
+	}
+	ln := strings.ToLower(label)
+	if ln == lp {
+		return true
+	}
+	if ok, err := path.Match(lp, ln); err == nil && ok {
+		return true
+	}
+	// Check names often include '/' (for example "Workflow / Job (report-only)").
+	// When the pattern itself does not specify '/', allow glob wildcards to span
+	// '/' while keeping path.Match syntax and validation semantics.
+	if !strings.ContainsAny(lp, "/\x00") && strings.Contains(ln, "/") {
+		if ok, err := path.Match(lp, strings.ReplaceAll(ln, "/", "\x00")); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// checkIgnored reports whether c matches any configured ignore_checks pattern.
+func checkIgnored(c Check, ignore []string) bool {
+	if len(ignore) == 0 {
+		return false
+	}
+	label := c.label()
+	for _, pattern := range ignore {
+		if checkMatchesIgnore(label, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func checkPending(c Check) bool {
+	if status := strings.ToUpper(c.Status); status != "" && status != "COMPLETED" {
+		return true
+	}
+	result := strings.ToUpper(c.Conclusion)
+	if result == "" {
+		result = strings.ToUpper(c.State)
+	}
+	return result == "PENDING" || result == "EXPECTED"
 }
 
 func checkFailed(c Check) bool {
@@ -172,17 +235,34 @@ func checkFailed(c Check) bool {
 }
 
 func summarizeChecks(checks []Check) Checks {
+	return summarizeChecksWith(checks, nil)
+}
+
+// summarizeChecksWith aggregates check outcomes while excluding checks matched
+// by ignore from blocking failure, pending, and passing counts. Ignored checks
+// are retained in IgnoredFailing/IgnoredPending/IgnoredPassing for non-blocking
+// display output; if all checks are ignored, Passing stays 0 (fail closed).
+func summarizeChecksWith(checks []Check, ignore []string) Checks {
 	var s Checks
 	seen := map[string]bool{}
+	seenIgnored := map[string]bool{}
 	for _, c := range checks {
-		result := strings.ToUpper(c.Conclusion)
-		if result == "" {
-			result = strings.ToUpper(c.State)
+		if checkIgnored(c, ignore) {
+			switch {
+			case checkPending(c):
+				s.IgnoredPending++
+			case checkFailed(c):
+				if !seenIgnored[c.label()] {
+					seenIgnored[c.label()] = true
+					s.IgnoredFailing = append(s.IgnoredFailing, c.label())
+				}
+			default:
+				s.IgnoredPassing++
+			}
+			continue
 		}
 		switch {
-		case strings.ToUpper(c.Status) != "" && strings.ToUpper(c.Status) != "COMPLETED":
-			s.Pending++
-		case result == "PENDING" || result == "EXPECTED":
+		case checkPending(c):
 			s.Pending++
 		case checkFailed(c):
 			if !seen[c.label()] {
@@ -194,6 +274,7 @@ func summarizeChecks(checks []Check) Checks {
 		}
 	}
 	sort.Strings(s.Failing)
+	sort.Strings(s.IgnoredFailing)
 	return s
 }
 

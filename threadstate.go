@@ -9,6 +9,7 @@ type ThreadState struct {
 	Waiting      WaitOn
 	Command      string
 	PR           *PR
+	Checks       Checks
 	Gate         DeliveryGate
 	RollingOut   bool
 	Next         bool
@@ -66,10 +67,13 @@ const (
 // An open bead's idle agent and historical PRs do not start its work.
 // A parent bead that still has open child beads is not classified as merged
 // just because an earlier PR merged.
+// Advisory checks matched by ignore_checks are excluded from t.Checks.Failing
+// and t.Checks.Pending before derivation (retained in t.Checks.Ignored* for
+// non-blocking display), so they do not classify an open PR as failing.
 // Background compaction is not an answer to needs_me. Missing evidence retains
 // the existing active-turn behavior; this function never resumes a bead.
 func deriveThreadState(t Thread) ThreadState {
-	s := ThreadState{PR: t.PR, RollingOut: t.Bead.HasLabel(LabelRollingOut),
+	s := ThreadState{PR: t.PR, Checks: t.Checks, RollingOut: t.Bead.HasLabel(LabelRollingOut),
 		Next: t.Bead.HasLabel(LabelNext), ActiveTurn: answered(t),
 		Blockers: t.Blockers, OpenChildren: t.OpenChildren, UpdatedAt: t.Bead.UpdatedAt}
 	if t.Agent != nil {

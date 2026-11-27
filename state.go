@@ -148,6 +148,9 @@ func stateLine(t Thread) string {
 		case t.PR.State == "OPEN" && t.Checks.Pending > 0:
 			s += " checks running"
 		}
+		if t.PR.State == "OPEN" && len(t.Checks.IgnoredFailing) > 0 {
+			s += " · advisory failing (" + strings.Join(t.Checks.IgnoredFailing, ", ") + ")"
+		}
 	}
 	for _, r := range t.Runs {
 		if r.Status != "completed" {

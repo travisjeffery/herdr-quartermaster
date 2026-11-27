@@ -174,12 +174,16 @@ func ciRerunPRKey(pr *PR) string {
 // cached observation of the same failed job even when the check name is
 // unchanged.
 func ciFailureFingerprint(pr *PR) string {
+	return ciFailureFingerprintWith(pr, nil)
+}
+
+func ciFailureFingerprintWith(pr *PR, ignore []string) string {
 	if pr == nil {
 		return ""
 	}
 	var parts []string
 	for _, c := range pr.Checks {
-		if !checkFailed(c) {
+		if checkIgnored(c, ignore) || !checkFailed(c) {
 			continue
 		}
 		result := strings.ToUpper(cmp.Or(c.Conclusion, c.State))
@@ -344,12 +348,16 @@ func ciRerunBlockReason(th Thread, env ciRerunEnv) string {
 // when every failing check belongs to a GitHub Actions run and every failed
 // job individually matches at least one pattern in patterns.
 func inspectCIRerunFailure(pr *PR, patterns []*regexp.Regexp, env ciRerunEnv) ciFailureAnalysis {
+	return inspectCIRerunFailureWith(pr, patterns, nil, env)
+}
+
+func inspectCIRerunFailureWith(pr *PR, patterns []*regexp.Regexp, ignore []string, env ciRerunEnv) ciFailureAnalysis {
 	if pr == nil {
 		return ciFailureAnalysis{NonFlakeReason: "no PR"}
 	}
 	var failing []Check
 	for _, c := range pr.Checks {
-		if checkFailed(c) {
+		if !checkIgnored(c, ignore) && checkFailed(c) {
 			failing = append(failing, c)
 		}
 	}
@@ -400,7 +408,7 @@ func inspectCIRerunFailure(pr *PR, patterns []*regexp.Regexp, env ciRerunEnv) ci
 		var failedJobs []RunJob
 		seenJob := map[int64]bool{}
 		for _, j := range detail.Jobs {
-			if jobFailed(j) {
+			if jobFailed(j) && !checkIgnored(Check{Name: j.Name}, ignore) {
 				failedJobs = append(failedJobs, j)
 				if j.ID > 0 {
 					seenJob[j.ID] = true
@@ -598,7 +606,7 @@ func runCIRerun(cfg Config, env ciRerunEnv, th Thread, prev Snapshot, first, ghR
 
 	if first {
 		if len(th.Checks.Failing) > 0 {
-			fp := ciFailureFingerprint(th.PR)
+			fp := ciFailureFingerprintWith(th.PR, cfg.IgnoreChecks)
 			st.LastFingerprint = fp
 			st.SurfacedFingerprint = fp
 			applyCIRerunSnapshot(snap, st)
@@ -623,7 +631,7 @@ func runCIRerun(cfg Config, env ciRerunEnv, th Thread, prev Snapshot, first, ghR
 		return ciRerunResult{}
 	}
 
-	fp := ciFailureFingerprint(th.PR)
+	fp := ciFailureFingerprintWith(th.PR, cfg.IgnoreChecks)
 	wasSuppressed := st.PendingRerun || st.WaitingCompletion
 	class := cfg.CIRerun.minLevel()
 
@@ -745,7 +753,7 @@ func runCIRerun(cfg Config, env ciRerunEnv, th Thread, prev Snapshot, first, ghR
 		return surface(false)
 	}
 
-	analysis := inspectCIRerunFailure(th.PR, patterns, env)
+	analysis := inspectCIRerunFailureWith(th.PR, patterns, cfg.IgnoreChecks, env)
 	if !analysis.AllFlake {
 		logf("ci rerun %s: PR #%d not a pure flake (%s)", id, th.PR.Number, analysis.NonFlakeReason)
 		return surface(false)

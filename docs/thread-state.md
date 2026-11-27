@@ -36,6 +36,37 @@ other views for the same question, agent status and sequence. The active turn
 that asks a question (or a working agent without that evidence) still renders
 as working until it settles. Nothing in the projection updates bead status.
 
+## Advisory checks (`ignore_checks`)
+
+Optional top-level `ignore_checks` in `config.toml` excludes configured
+advisory or report-only CI check names from blocking failure and pending
+readiness checks:
+
+```toml
+ignore_checks = [
+  "* (report-only)",
+  "advisory/*",
+  "Coverage Report",
+]
+```
+
+Each entry matches check names (or status contexts) case-insensitively by exact
+match or `path.Match` glob syntax (patterns without `/` allow wildcards to span
+`/` in check names such as `CI / Scan (report-only)`).
+
+Fail-closed guarantees:
+
+- `ignore_checks` defaults to empty; nothing is ignored unless configured.
+- Empty entries and malformed glob patterns fail config validation closed.
+- Ignored checks are excluded from `Checks.Failing`, `Checks.Pending`, and
+  `Checks.Passing`, and retained in `IgnoredFailing`, `IgnoredPending`, and
+  `IgnoredPassing` for non-blocking display/status output.
+- A PR with zero remaining non-ignored passing checks, or with any non-ignored
+  failing or pending check, is never classified as green or `ready_for_review`.
+- When all non-ignored checks pass and only ignored checks fail or remain
+  pending, the PR is not classified as `checks failing`, does not emit
+  `checks_failing`, and remains eligible for `ready_for_review`.
+
 ## Views
 
 - `classify` maps the shared state to the existing sidebar/board group names.

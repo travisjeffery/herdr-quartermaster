@@ -1,8 +1,10 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDependenciesDoNotReclassifyActiveThreads(t *testing.T) {
@@ -168,4 +170,155 @@ func TestExplicitBlockedOutranksPRAndWorkingAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIgnoreChecksFailClosedRegressions(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	cfg := defaultConfig()
+	cfg.IgnoreChecks = []string{"* (report-only)", "advisory/*"}
+	now := time.Now()
+	b := Bead{ID: "task-1", Status: StatusInProgress, Notes: "PR: https://github.com/example/app/pull/7"}
+	agents := map[string]Agent{b.ID: {Name: b.ID, Status: "idle", Seq: 1}}
+
+	basePR := func(checks ...Check) PR {
+		return PR{
+			Number:         7,
+			URL:            "https://github.com/example/app/pull/7",
+			State:          "OPEN",
+			HeadSHA:        "sha1",
+			MergeState:     "UNSTABLE",
+			Mergeable:      "MERGEABLE",
+			ReviewDecision: "REVIEW_REQUIRED",
+			DetailsFresh:   true,
+			Gate:           &MergeGate{Head: "sha1", Author: "owner", Viewer: "owner", OpenThreads: 0, At: now},
+			Checks:         checks,
+		}
+	}
+
+	t.Run("zero remaining non-ignored checks never qualifies as green or ready_for_review", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			check Check
+		}{
+			{"only ignored failing check", Check{Name: "scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"}},
+			{"only ignored pending check", Check{Name: "scan (report-only)", Status: "IN_PROGRESS"}},
+			{"only ignored passing check", Check{Name: "scan (report-only)", Status: "COMPLETED", Conclusion: "SUCCESS"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				st := TickerState{PRs: map[string]PR{b.ID: basePR(tc.check)}}
+				th := threadForAt(cfg, st, b, agents, now)
+				if th.Checks.Passing != 0 || th.Checks.Pending != 0 || len(th.Checks.Failing) != 0 {
+					t.Fatalf("unexpected remaining checks: %+v", th.Checks)
+				}
+				if readyForReview(th.PR, th.Checks) || reviewGateCandidate(th.PR, th.Checks) {
+					t.Fatalf("PR with zero remaining checks marked ready_for_review: %+v", th.Checks)
+				}
+				if got := greenKey(th); got != "" {
+					t.Fatalf("PR with zero remaining checks marked green: %q", got)
+				}
+			})
+		}
+	})
+
+	t.Run("mixed real and ignored failure blocks readiness and emits checks_failing for real check only", func(t *testing.T) {
+		pr := basePR(
+			Check{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+			Check{Name: "lint", Status: "COMPLETED", Conclusion: "FAILURE"},
+			Check{Name: "scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+		)
+		st := TickerState{PRs: map[string]PR{b.ID: pr}}
+		th := threadForAt(cfg, st, b, agents, now)
+		if classify(th) != GroupFailing {
+			t.Fatalf("group = %s, want GroupFailing", classify(th))
+		}
+		if !slices.Equal(th.Checks.Failing, []string{"lint"}) || !slices.Equal(th.Checks.IgnoredFailing, []string{"scan (report-only)"}) {
+			t.Fatalf("checks = %+v", th.Checks)
+		}
+		if readyForReview(th.PR, th.Checks) || greenKey(th) != "" {
+			t.Fatal("non-ignored failure did not block readiness")
+		}
+		prev := Snapshot{Group: GroupReview, PRNumber: 7, PRState: "OPEN", ReviewReadyTracked: true}
+		out := transition(th, prev, false, now)
+		var failingEvs []Event
+		for _, e := range out.Events {
+			if e.Kind == EventReadyForReview {
+				t.Fatalf("unexpected ready_for_review on mixed failure: %+v", out.Events)
+			}
+			if e.Kind == EventFailing {
+				failingEvs = append(failingEvs, e)
+			}
+		}
+		if len(failingEvs) != 1 || !strings.Contains(failingEvs[0].Summary, "lint") || strings.Contains(failingEvs[0].Summary, "report-only") {
+			t.Fatalf("unexpected failing events: %+v", failingEvs)
+		}
+	})
+
+	t.Run("non-ignored pending check still blocks even when advisory check is ignored", func(t *testing.T) {
+		pr := basePR(
+			Check{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+			Check{Name: "e2e", Status: "IN_PROGRESS"},
+			Check{Name: "scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE"},
+		)
+		st := TickerState{PRs: map[string]PR{b.ID: pr}}
+		th := threadForAt(cfg, st, b, agents, now)
+		if th.Checks.Pending != 1 || len(th.Checks.Failing) != 0 {
+			t.Fatalf("checks = %+v", th.Checks)
+		}
+		if readyForReview(th.PR, th.Checks) || greenKey(th) != "" || mergeable(th.PR, th.Checks) {
+			t.Fatal("non-ignored pending check failed to block readiness")
+		}
+	})
+
+	t.Run("ignored pending check does not block readiness when non-ignored checks pass", func(t *testing.T) {
+		pr := basePR(
+			Check{Name: "test", Status: "COMPLETED", Conclusion: "SUCCESS"},
+			Check{Name: "advisory/slow", Status: "IN_PROGRESS"},
+		)
+		st := TickerState{PRs: map[string]PR{b.ID: pr}}
+		th := threadForAt(cfg, st, b, agents, now)
+		if th.Checks.Pending != 0 || th.Checks.IgnoredPending != 1 || th.Checks.Passing != 1 {
+			t.Fatalf("checks = %+v", th.Checks)
+		}
+		if !readyForReview(th.PR, th.Checks) || greenKey(th) == "" {
+			t.Fatalf("ignored pending check blocked readiness: %+v", th.Checks)
+		}
+	})
+
+	t.Run("ci rerun inspection skips ignored advisory failures across runs and same run", func(t *testing.T) {
+		pr := basePR(
+			Check{Name: "test", Status: "COMPLETED", Conclusion: "FAILURE", DetailsURL: "https://github.com/acme/app/actions/runs/42/job/101"},
+			Check{Name: "Scan (report-only)", Status: "COMPLETED", Conclusion: "FAILURE", DetailsURL: "https://github.com/acme/app/actions/runs/42/job/102"},
+			Check{Context: "advisory/external", State: "FAILURE", TargetURL: "https://status.example.com/check/9"},
+		)
+		patterns, err := cfg.CIRerun.compilePatterns()
+		if err != nil {
+			t.Fatal(err)
+		}
+		env := ciRerunEnv{
+			runDetail: func(repo, runID string) (RunDetail, error) {
+				return RunDetail{
+					ID:         42,
+					Status:     "completed",
+					Conclusion: "failure",
+					Jobs: []RunJob{
+						{ID: 101, Name: "test", Status: "completed", Conclusion: "failure"},
+						{ID: 102, Name: "Scan (report-only)", Status: "completed", Conclusion: "failure"},
+					},
+				}, nil
+			},
+			annotations: func(repo string, jobID int64) ([]CheckAnnotation, error) {
+				if jobID == 102 {
+					return []CheckAnnotation{{Message: "advisory lint violation"}}, nil
+				}
+				return []CheckAnnotation{{Message: "The self-hosted runner lost communication with the server."}}, nil
+			},
+		}
+		analysis := inspectCIRerunFailureWith(&pr, patterns, cfg.IgnoreChecks, env)
+		if !analysis.AllFlake {
+			t.Fatalf("ignored advisory failure poisoned flake analysis: %+v", analysis)
+		}
+		if fpIgnored, fpOnlyReal := ciFailureFingerprintWith(&pr, cfg.IgnoreChecks), ciFailureFingerprint(&PR{Checks: pr.Checks[:1]}); fpIgnored != fpOnlyReal {
+			t.Fatalf("fingerprint included ignored check: %q vs %q", fpIgnored, fpOnlyReal)
+		}
+	})
 }

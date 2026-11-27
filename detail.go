@@ -87,6 +87,10 @@ func prName(pr PR) string {
 
 // prSummary is one PR's state in a line: what the ticker last saw of it.
 func prSummary(pr PR) string {
+	return prSummaryWithChecks(pr, summarizeChecks(pr.Checks))
+}
+
+func prSummaryWithChecks(pr PR, checks Checks) string {
 	parts := []string{prName(pr)}
 	if pr.State == "" {
 		return prName(pr) + " · not looked up yet"
@@ -102,7 +106,7 @@ func prSummary(pr PR) string {
 		if pr.ReviewDecision != "" {
 			parts = append(parts, strings.ToLower(strings.ReplaceAll(pr.ReviewDecision, "_", " ")))
 		}
-		if c := checkSummary(summarizeChecks(pr.Checks)); c != "" {
+		if c := checkSummary(checks); c != "" {
 			parts = append(parts, c)
 		}
 	}
@@ -119,6 +123,15 @@ func checkSummary(c Checks) string {
 	}
 	if c.Passing > 0 {
 		s = append(s, fmt.Sprintf("%d passed", c.Passing))
+	}
+	if n := len(c.IgnoredFailing); n > 0 {
+		s = append(s, fmt.Sprintf("%d advisory failing (%s)", n, strings.Join(c.IgnoredFailing, ", ")))
+	}
+	if c.IgnoredPending > 0 {
+		s = append(s, fmt.Sprintf("%d advisory running", c.IgnoredPending))
+	}
+	if c.IgnoredPassing > 0 {
+		s = append(s, fmt.Sprintf("%d advisory passed", c.IgnoredPassing))
 	}
 	if len(s) == 0 {
 		return ""
@@ -662,7 +675,11 @@ func detailLinesWithOpts(r boardRow, d *beadDetail, w int, opts detailOpts) []st
 			add(ansiDim, "  (none known)")
 		}
 		for _, pr := range r.prs {
-			para("", "  ", prSummary(pr))
+			line := prSummary(pr)
+			if r.state != nil && r.state.PR != nil && pr.URL == r.state.PR.URL && pr.Number == r.state.PR.Number && r.state.Checks.hasAny() {
+				line = prSummaryWithChecks(pr, r.state.Checks)
+			}
+			para("", "  ", line)
 			if pr.Title != "" {
 				para(ansiDim, "    ", pr.Title)
 			}
