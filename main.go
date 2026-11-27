@@ -24,8 +24,11 @@ Usage:
                 [--host H] [--force] [--by WHO]        on host H (default: the bead's host: label, else
                                                        local); --force ignores the bead's needs: labels;
                                                        --role selects a built-in or [roles.<name>] role
+                [--rollout-target T]                   attach (or reuse) a dependent role:rollout bead for target T
                 [--backend herdr|pi-rpc]               opt in to native pi RPC; no default or live sessions change
   quartermaster roles [--json]                         list built-in and configured [roles.<name>] presets
+  quartermaster review request|verdict|status ...      bounded implementer-reviewer ping-pong loop (head-SHA dedup, round cap)
+  quartermaster rollout chain|status ...               attach or inspect dependent role:rollout beads for target environments
   quartermaster rpc status|output|events <bead>        inspect a native worker (no Herdr needed)
   quartermaster rpc tell <bead> <request-id> <text>     idempotent submission/reconciliation; never replays intent
   quartermaster rpc steer <bead> <request-id> <text>    explicit running-turn steering (class 3); never tell fallback
@@ -278,10 +281,15 @@ func run(args []string) error {
 		return inboxRunnerCmd(cfg, liveInboxRunnerEnv(cfg, h.on(cfg.coordSocket()), nil), rest, os.Stdout)
 	case "notify":
 		return notifyCmd(cfg, liveNotifyEnv(cfg, nil), rest, os.Stdout)
+	case "review":
+		return reviewCmd(cfg, liveReviewLoopEnv(cfg, h), rest, os.Stdin, os.Stdout)
+	case "rollout":
+		return rolloutCmd(cfg, liveRolloutChainEnv(cfg), rest, os.Stdout)
 	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	kind := fs.String("agent", "", "agent kind: claude, codex, muse, pi, agy or auto")
 	roleFlag := fs.String("role", "", "dispatch, focus: worker role (implementer, reviewer, investigator, rollout, or configured [roles.<name>])")
+	rolloutTargetFlag := fs.String("rollout-target", "", "dispatch: attach (or reuse) a dependent role:rollout bead targeting this environment or stack")
 	backend := fs.String("backend", "", "dispatch: herdr (default) or pi-rpc (local, headless)")
 	focus := fs.Bool("focus", false, "focus the new workspace")
 	repoFlag := fs.String("repo", "", "configure: the repository quartermaster works in, written to config.toml if it has none")
@@ -323,9 +331,9 @@ func run(args []string) error {
 		fmt.Println(msg)
 	case "dispatch":
 		if len(pos) != 1 {
-			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex|muse|pi|agy] [--role R] [--focus] [--host H] [--force]")
+			return fmt.Errorf("usage: quartermaster dispatch <bead> [--agent claude|codex|muse|pi|agy] [--role R] [--rollout-target T] [--focus] [--host H] [--force]")
 		}
-		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Role: *roleFlag, Backend: *backend, Focus: *focus, Host: *hostFlag, Force: *force, By: *by})
+		msg, err := dispatch(cfg, h, pos[0], DispatchOpts{Kind: *kind, Role: *roleFlag, RolloutTarget: *rolloutTargetFlag, Backend: *backend, Focus: *focus, Host: *hostFlag, Force: *force, By: *by})
 		if err != nil {
 			return err
 		}

@@ -26,9 +26,11 @@ import (
 // so ticker restarts never repeat nudges.
 
 const (
-	blockerActionWoken      = "woken"
-	blockerActionNotified   = "notified"
-	blockerActionWakeFailed = "wake_failed"
+	blockerActionWoken          = "woken"
+	blockerActionDispatched     = "dispatched"
+	blockerActionDispatchFailed = "dispatch_failed"
+	blockerActionNotified       = "notified"
+	blockerActionWakeFailed     = "wake_failed"
 
 	blockerWakeHeaderPrefix = "[" + toolName + ": automated, not the user, approves nothing]"
 )
@@ -74,11 +76,12 @@ const (
 )
 
 type clearedBlocker struct {
-	Kind      clearedBlockerKind
-	Key       string // "dep:<id>" or "pr:<url>"
-	BeadID    string
-	BeadTitle string
-	PR        PR
+	Kind        clearedBlockerKind
+	Key         string // "dep:<id>" or "pr:<url>"
+	BeadID      string
+	BeadTitle   string
+	UpstreamPRs []string
+	PR          PR
 }
 
 func depBlockerKey(id string) string { return "dep:" + id }
@@ -363,6 +366,14 @@ func blockerInboxSummary(b Bead, cleared []clearedBlocker, remainingDeps []strin
 		} else {
 			s += "; woke idle worker"
 		}
+	case blockerActionDispatched:
+		if skipReason != "" {
+			s += "; auto-dispatched chained rollout worker (" + skipReason + ")"
+		} else {
+			s += "; auto-dispatched chained rollout worker"
+		}
+	case blockerActionDispatchFailed:
+		s += fmt.Sprintf("; chained rollout auto-dispatch failed (%s); run `quartermaster dispatch %s --role rollout`", skipReason, b.ID)
 	case blockerActionWakeFailed:
 		s += fmt.Sprintf("; worker wake failed (%s)", skipReason)
 	default:
@@ -371,7 +382,11 @@ func blockerInboxSummary(b Bead, cleared []clearedBlocker, remainingDeps []strin
 		}
 		switch {
 		case b.Status == StatusOpen && len(remainingDeps) == 0:
-			s += fmt.Sprintf("; run `quartermaster dispatch %s`", b.ID)
+			if target, err := rolloutTarget(b); err == nil && target != "" && b.HasLabel(roleLabel+roleRollout) {
+				s += fmt.Sprintf("; run `quartermaster dispatch %s --role rollout`", b.ID)
+			} else {
+				s += fmt.Sprintf("; run `quartermaster dispatch %s`", b.ID)
+			}
 		case (b.Status == StatusInProgress || b.Status == StatusBlocked) && skipReason == "no worker running":
 			s += fmt.Sprintf("; run `quartermaster resume %s`", b.ID)
 		}
@@ -391,20 +406,22 @@ func blockerDedupeKey(cs []clearedBlocker) string {
 // blockerWakeEnv injects external dependencies for blocker-cleared wakeup so
 // unit tests run deterministically without live bd, gh, or herdr calls.
 type blockerWakeEnv struct {
-	show      func(id string) (Bead, error)
-	note      func(id, text string) error
-	lookupPRs func(urls []string) (map[string]PR, error)
-	watches   func() ([]Watch, error)
-	agentFor  func(b Bead) (*Agent, error)
-	wake      func(b Bead, a Agent, text string) error
-	enforce   func(b Bead, action, by string) (string, error)
-	event     func(Event) error
-	journal   func(journalRecord) error
-	liveAsk   func(a *Agent) bool
-	held      func(id string) bool
-	headless  func(id string) bool
-	parked    func(id string) bool
-	logf      func(format string, args ...any)
+	show            func(id string) (Bead, error)
+	note            func(id, text string) error
+	lookupPRs       func(urls []string) (map[string]PR, error)
+	watches         func() ([]Watch, error)
+	agentFor        func(b Bead) (*Agent, error)
+	wake            func(b Bead, a Agent, text string) error
+	enforce         func(b Bead, action, by string) (string, error)
+	enforceRollout  func(b Bead, target, by string) (string, int, error)
+	dispatchRollout func(b Bead, target string) (string, error)
+	event           func(Event) error
+	journal         func(journalRecord) error
+	liveAsk         func(a *Agent) bool
+	held            func(id string) bool
+	headless        func(id string) bool
+	parked          func(id string) bool
+	logf            func(format string, args ...any)
 }
 
 func (t Ticker) liveBlockerWakeEnv() blockerWakeEnv {
@@ -436,6 +453,14 @@ func (t Ticker) liveBlockerWakeEnv() blockerWakeEnv {
 		},
 		enforce: func(b Bead, action, by string) (string, error) {
 			return t.cfg.enforce(b, action, by)
+		},
+		enforceRollout: func(b Bead, target, by string) (string, int, error) {
+			return t.cfg.enforceRolloutDispatch(b, target, by)
+		},
+		dispatchRollout: func(b Bead, _ string) (string, error) {
+			// Autonomy dial and budget were already enforced at the target's
+			// rollout class immediately prior via enforceRollout.
+			return dispatch(t.cfg, t.herdr, b.ID, DispatchOpts{Role: roleRollout, By: "TJ"})
 		},
 		event:   writeEvent,
 		journal: appendJournal,
@@ -774,10 +799,11 @@ func blockerWakeupPass(
 			}
 			if depBead.Status == StatusClosed {
 				newlyCleared = append(newlyCleared, clearedBlocker{
-					Kind:      clearedBlockerDep,
-					Key:       key,
-					BeadID:    depID,
-					BeadTitle: depBead.Title,
+					Kind:        clearedBlockerDep,
+					Key:         key,
+					BeadID:      depID,
+					BeadTitle:   depBead.Title,
+					UpstreamPRs: deliveryNotedPRs(depBead.Notes),
 				})
 			} else if depBead.Status != "" && depBead.Status != "deferred" {
 				// Still active/open despite list skew: retain for retry.
@@ -829,7 +855,7 @@ func blockerWakeupPass(
 			action, detail, line := handleClearedBlockers(
 				cfg, env, st, b, threadByID[id], agents, agentsComplete,
 				promptedThisTick, relaunch, watchWokenPRs[id],
-				newlyCleared, remainingDeps, now,
+				newlyCleared, remainingDeps, len(nextOpenPRs) > 0, now,
 			)
 			if line != "" {
 				lines = append(lines, line)
@@ -893,6 +919,7 @@ func handleClearedBlockers(
 	watchWoken map[string]bool,
 	cleared []clearedBlocker,
 	remainingDeps []string,
+	hasRemainingOpenPRs bool,
 	now time.Time,
 ) (action, detail, line string) {
 	id := b.ID
@@ -919,6 +946,18 @@ func handleClearedBlockers(
 			_ = env.journal(journalRecord{At: now, Kind: journalUnblocked, Bead: id, Class: classHousekeeping, Action: blockerActionWoken, Pass: true, Text: summary})
 		}
 		return blockerActionWoken, "woken by gh-pr watch", summary
+	}
+
+	// First-class chained rollout auto-dispatch: when an open role:rollout bead
+	// with rollout-target:<target> clears its final blocker, auto-dispatch it
+	// if within the target's autonomy dial class (e.g. C5 configured dev at L5).
+	if b.Status == StatusOpen && len(remainingDeps) == 0 && !hasRemainingOpenPRs {
+		if target, ok, err := isChainedRolloutBead(cfg, b); err == nil && ok {
+			return handleUnblockedChainedRollout(
+				cfg, env, b, target, agents, agentsComplete, relaunch,
+				cleared, desc, dedupeKey, now,
+			)
+		}
 	}
 
 	agent, skipReason := checkBlockerWakeEligibility(env, st, b, th, agents, agentsComplete, promptedThisTick, relaunch)
@@ -954,13 +993,17 @@ func handleClearedBlockers(
 
 	if skipReason != "" {
 		summary := blockerInboxSummary(b, cleared, remainingDeps, blockerActionNotified, skipReason)
+		clearsKind := "bead_closed"
+		if b.Status == StatusOpen && len(remainingDeps) == 0 {
+			clearsKind = "unblocked_dispatch"
+		}
 		if env.event != nil {
 			if err := env.event(Event{
 				Bead:    id,
 				Kind:    EventUnblocked,
 				Summary: summary,
 				At:      now,
-				Clears:  &InboxCondition{Kind: "bead_closed", Bead: id, Key: dedupeKey},
+				Clears:  &InboxCondition{Kind: clearsKind, Bead: id, Key: dedupeKey},
 			}); err != nil {
 				return "", "", fmt.Sprintf("%s: write unblocked event: %v", id, err)
 			}
@@ -1110,4 +1153,158 @@ func checkBlockerWakeEligibility(
 		return nil, "worker wake unavailable"
 	}
 	return a, ""
+}
+
+// handleUnblockedChainedRollout evaluates and performs autonomy-dial-gated
+// auto-dispatch for an open role:rollout bead carrying rollout-target:<target>
+// once all of its blockers have cleared.
+func handleUnblockedChainedRollout(
+	cfg Config,
+	env blockerWakeEnv,
+	b Bead,
+	target string,
+	agents map[string]Agent,
+	agentsComplete bool,
+	relaunch map[string]bool,
+	cleared []clearedBlocker,
+	desc, dedupeKey string,
+	now time.Time,
+) (action, detail, line string) {
+	id := b.ID
+	targetCls := max(actionClasses["dispatch"], cfg.Autonomy.targetClass(target))
+	skipReason := ""
+
+	switch {
+	case env.held != nil && env.held(id):
+		skipReason = "bead is on hold"
+	case env.headless != nil && env.headless(id):
+		skipReason = "headless-owned bead"
+	case relaunch[agentName(id)]:
+		skipReason = "worker is scheduled for relaunch"
+	case !agentsComplete:
+		skipReason = "worker discovery incomplete"
+	case agents != nil && agents[agentName(id)].Name != "":
+		skipReason = "worker already running"
+	case env.dispatchRollout == nil:
+		skipReason = "auto-dispatch unavailable"
+	}
+
+	if skipReason == "" && env.show != nil {
+		cur, err := env.show(id)
+		if err != nil {
+			skipReason = "re-read bead failed: " + err.Error()
+		} else if cur.Status != StatusOpen {
+			skipReason = "bead is " + cur.Status
+		} else if t2, ok, rerr := isChainedRolloutBead(cfg, cur); rerr != nil || !ok || t2 != target {
+			skipReason = "rollout target or role changed"
+		} else {
+			b = cur
+		}
+	}
+
+	var autoPrefix string
+	cls := targetCls
+	if skipReason == "" {
+		if env.enforceRollout != nil {
+			prefix, c, err := env.enforceRollout(b, target, "ticker")
+			if err != nil {
+				skipReason = err.Error()
+			} else {
+				autoPrefix = prefix
+				if c > 0 {
+					cls = c
+				}
+			}
+		} else {
+			lvl, why := cfg.beadLevel(b, autonomyStopped())
+			prefix, err := allow(b.ID, "ticker", fmt.Sprintf("chained rollout dispatch (%s)", target), targetCls, lvl, why)
+			if err != nil {
+				skipReason = err.Error()
+			} else {
+				autoPrefix = prefix
+			}
+		}
+	}
+
+	if skipReason != "" {
+		summary := blockerInboxSummary(b, cleared, nil, blockerActionNotified, skipReason)
+		if env.event != nil {
+			if err := env.event(Event{
+				Bead:    id,
+				Kind:    EventUnblocked,
+				Summary: summary,
+				At:      now,
+				Clears:  &InboxCondition{Kind: "unblocked_dispatch", Bead: id, Key: dedupeKey},
+			}); err != nil {
+				return "", "", fmt.Sprintf("%s: write unblocked event: %v", id, err)
+			}
+		}
+		if env.journal != nil {
+			_ = env.journal(journalRecord{At: now, Kind: journalUnblocked, Bead: id, Class: cls, Action: blockerActionNotified, Pass: false, Text: summary})
+		}
+		return blockerActionNotified, skipReason, summary
+	}
+
+	if env.note != nil {
+		upstreamNote := fmt.Sprintf("Upstream blocker cleared: %s (target=%s)", desc, target)
+		var prs []string
+		for _, c := range cleared {
+			for _, u := range c.UpstreamPRs {
+				if !slices.Contains(prs, u) {
+					prs = append(prs, u)
+				}
+			}
+		}
+		if len(prs) > 0 {
+			upstreamNote += "; upstream PR(s): " + strings.Join(prs, ", ")
+		}
+		_ = env.note(id, upstreamNote)
+	}
+	dispatchMsg, err := env.dispatchRollout(b, target)
+	if err != nil {
+		summary := blockerInboxSummary(b, cleared, nil, blockerActionDispatchFailed, err.Error())
+		if env.event != nil {
+			_ = env.event(Event{
+				Bead:    id,
+				Kind:    EventUnblocked,
+				Summary: summary,
+				At:      now,
+				Clears:  &InboxCondition{Kind: "unblocked_dispatch", Bead: id, Key: dedupeKey},
+			})
+		}
+		if env.journal != nil {
+			_ = env.journal(journalRecord{At: now, Kind: journalUnblocked, Bead: id, Class: cls, Action: blockerActionDispatchFailed, Pass: false, Text: summary})
+		}
+		return blockerActionDispatchFailed, err.Error(), summary
+	}
+
+	if autoPrefix == "" {
+		autoPrefix = fmt.Sprintf("AUTO: [ticker L%d C%d]", cls, cls)
+	}
+	autoNote := fmt.Sprintf("%s auto-dispatched chained rollout bead %s for target %s after blocker cleared: %s", autoPrefix, id, target, desc)
+	if dispatchMsg != "" {
+		autoNote += " — " + shortTitle(dispatchMsg, 100)
+	}
+	if env.note != nil {
+		if nerr := env.note(id, autoNote); nerr != nil && env.logf != nil {
+			env.logf("blocker wakeup: note %s: %v", id, nerr)
+		}
+	}
+	if env.journal != nil {
+		_ = env.journal(journalRecord{At: now, Kind: journalAuto, Bead: id, Class: cls, Action: "rollout_dispatch", Pass: true, Text: autoNote})
+		_ = env.journal(journalRecord{At: now, Kind: journalUnblocked, Bead: id, Class: cls, Action: blockerActionDispatched, Pass: true, Text: desc})
+	}
+	summary := blockerInboxSummary(b, cleared, nil, blockerActionDispatched, "target "+target)
+	if env.event != nil {
+		if err := env.event(Event{
+			Bead:    id,
+			Kind:    EventUnblocked,
+			Summary: summary,
+			At:      now,
+			Clears:  &InboxCondition{Kind: "bead_closed", Bead: id, Key: dedupeKey},
+		}); err != nil && env.logf != nil {
+			env.logf("blocker wakeup: write unblocked event %s: %v", id, err)
+		}
+	}
+	return blockerActionDispatched, "target " + target, summary
 }

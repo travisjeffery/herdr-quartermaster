@@ -191,3 +191,10 @@ in `waiting` (or unfinished `running`) state:
 - If a preview file changes on disk between `gate_check` / `approval` and `plan_step`, both
   `workflow approve` and `plan_step` refuse execution on the digest mismatch.
 - The ticker never approves anything above the bead's autonomy level or budget on its own.
+
+## End-to-end delivery loop (ping-pong review and chained rollouts)
+
+For the coordinator-driven **design → implement ↔ skeptical reviewer ping-pong →
+PR/merge → auto-chained rollout-to-target** workflow (`quartermaster review` and
+`quartermaster rollout`), see
+[docs/workflow-delivery-loop.md](workflow-delivery-loop.md).

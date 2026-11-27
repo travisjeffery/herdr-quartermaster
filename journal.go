@@ -52,6 +52,8 @@ const (
 	journalUnblocked = "unblocked"
 	// journalCIRerun is a bounded ticker CI flake auto-rerun or escalation (cirerun.go).
 	journalCIRerun = "ci_rerun"
+	// journalReview is an implementer-reviewer ping-pong request, verdict, or escalation (reviewloop.go).
+	journalReview = "review"
 )
 
 type journalRecord struct {

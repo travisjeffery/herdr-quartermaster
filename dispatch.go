@@ -68,7 +68,10 @@ type DispatchOpts struct {
 	Backend string
 	Kind    string
 	Role    string
-	Focus   bool
+	// RolloutTarget optionally attaches (or reuses) a dependent role:rollout
+	// bead blocked on this implementer bead targeting RolloutTarget.
+	RolloutTarget string
+	Focus         bool
 	// Host runs the worker there; empty means the bead's host: label, else
 	// local.
 	Host string
@@ -193,7 +196,15 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 	if b.Status == StatusClosed {
 		return "", fmt.Errorf("%s is closed", id)
 	}
-	auto, err := cfg.enforce(b, "dispatch", o.By)
+	if o.RolloutTarget != "" {
+		if err := validateRolloutTarget(o.RolloutTarget); err != nil {
+			return "", fmt.Errorf("--rollout-target: %w", err)
+		}
+		if role.Name != roleImplementer {
+			return "", fmt.Errorf("--rollout-target applies only to implementer dispatches, not role %q", role.Name)
+		}
+	}
+	auto, err := cfg.enforceDispatch(b, role, o.By)
 	if err != nil {
 		return "", err
 	}
@@ -282,7 +293,11 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 		// brief still leaves the dispatch on record.
 		roleSuffix := ""
 		if role.Name != roleImplementer {
-			roleSuffix = " (" + role.Name + ")"
+			if target, terr := rolloutTarget(b); terr == nil && target != "" && role.Name == roleRollout {
+				roleSuffix = " (" + role.Name + ", target " + target + ")"
+			} else {
+				roleSuffix = " (" + role.Name + ")"
+			}
 		}
 		_ = bd.Note(id, fmt.Sprintf("%s dispatched %s%s%s — quartermaster dispatch", auto, kind, roleSuffix, onHost(host)))
 	}
@@ -316,12 +331,36 @@ func dispatch(cfg Config, h Herdr, id string, o DispatchOpts) (string, error) {
 			return "", err
 		}
 		h.Notify("quartermaster: "+id+" is waiting for you", "Answer its startup prompt (folder trust?) in "+where+"; the brief follows.")
-		return startedSummary() + "; it is at a startup prompt, the brief is queued", nil
+		summary := startedSummary() + "; it is at a startup prompt, the brief is queued"
+		if o.RolloutTarget != "" {
+			ch, cerr := chainRolloutBead(cfg, liveRolloutChainEnv(cfg), id, RolloutChainOpts{
+				Target:      o.RolloutTarget,
+				By:          o.By,
+				SkipEnforce: true,
+			})
+			if cerr != nil {
+				return summary, fmt.Errorf("started worker, but chaining rollout bead failed: %w", cerr)
+			}
+			summary += "; " + ch.Message
+		}
+		return summary, nil
 	}
 	if err := hh.Prompt(name, text); err != nil {
 		return "", fmt.Errorf("brief %s: %w", name, err)
 	}
-	return startedSummary(), nil
+	summary := startedSummary()
+	if o.RolloutTarget != "" {
+		ch, cerr := chainRolloutBead(cfg, liveRolloutChainEnv(cfg), id, RolloutChainOpts{
+			Target:      o.RolloutTarget,
+			By:          o.By,
+			SkipEnforce: true,
+		})
+		if cerr != nil {
+			return summary, fmt.Errorf("started worker, but chaining rollout bead failed: %w", cerr)
+		}
+		summary += "; " + ch.Message
+	}
+	return summary, nil
 }
 
 // resolve removes a finished bead's linked worktree and, once its PR merged,

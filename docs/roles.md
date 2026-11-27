@@ -13,9 +13,9 @@ under `[roles.<name>]` in `~/.config/quartermaster/config.toml`:
 | Role | Default `worktree` | Default `brief` | Purpose |
 | --- | --- | --- | --- |
 | `implementer` | `true` | `implementer` | Default coding worker. Preserves existing worktree, branch, PR-authoring, and auto-merge workflow verbatim. |
-| `reviewer` | `false` | `reviewer` | Skeptical, evidence-first PR reviewer. Inspects full diff, CI checks, and all review threads; omits PR-authoring/auto-merge boilerplate; approves at the exact verified head SHA only when explicitly authorized with zero blocking findings, otherwise stops at `needs_me` with file/line findings and a draft comment. Never includes bead IDs or AI tooling mentions in public reviews. |
+| `reviewer` | `false` | `reviewer` | Skeptical, evidence-first PR or pre-PR reviewer. Inspects full diff, tests/CI checks, and all review threads against the target bead's description, design notes, and `## Acceptance` criteria; records structured `can_merge` / `cannot_merge` verdicts via `quartermaster review verdict` (routing findings back to the implementer via `quartermaster tell` and capping back-and-forth before escalating to `needs_me`); omits PR-authoring/auto-merge boilerplate; approves at the exact verified head SHA only when explicitly authorized with zero blocking findings. Never includes bead IDs or AI tooling mentions in public reviews. |
 | `investigator` | `false` | `investigator` | Strictly read-only triage and root-cause diagnosis. Gathers live evidence with zero mutations to repos, PRs, or infrastructure; summarizes findings and recommended follow-up beads with `## Acceptance` criteria. |
-| `rollout` | `false` | `rollout` | Post-merge rollout and live verification. Uses `rolling-out` and Actions run URLs, validates IaC previews with `quartermaster gate plan`, respects autonomy dial and `needs_me` gates, verifies live acceptance criteria, and closes via `quartermaster close`. |
+| `rollout` | `false` | `rollout` | Post-merge rollout and live verification. Uses `rolling-out`, optional `rollout-target:<target>` target-class dial gating (Class 5 for configured `[autonomy] dev`, Class 6 for other non-prod, Class 7 for prod/unmatched), and Actions run URLs; validates IaC previews with `quartermaster gate plan`, respects autonomy dial and `needs_me` gates, verifies live acceptance criteria, and closes via `quartermaster close`. |
 
 ## Selecting and persisting a role
 
@@ -128,3 +128,24 @@ quartermaster roles --json
 containing `name`, `worktree`, `agent`, `model`, `thinking`, `args`, `brief`,
 `exclude_tools`, `instructions`, `instructions_file`, `custom`, and
 `configured`.
+
+## Ping-pong reviews and chained rollouts
+
+Two built-in workflow helpers build directly on `reviewer` and `rollout` roles:
+
+- **Bounded implementer ↔ reviewer ping-pong (`quartermaster review`)**: runs a
+  worktree-free `role:reviewer` pass against an implementer bead's exact head
+  commit SHA, tracks rounds and head-SHA dedup in
+  `<state>/review-loops/<bead>.json`, routes blocking `cannot_merge` findings
+  back to the implementer via `quartermaster tell`, and escalates to `needs_me`
+  once `max_rounds` is reached.
+- **Chained implement → rollout (`quartermaster rollout chain`,
+  `quartermaster dispatch --rollout-target <target>`)**: attaches a dependent
+  worktree-free `role:rollout` bead with `rollout-target:<target>` and a
+  `blocks` dependency on the implementer bead. Once the implementer bead closes,
+  the ticker auto-dispatches the rollout bead when its autonomy level reaches
+  the target's class (Class 5 for configured `[autonomy] dev`, Class 6 for other
+  non-prod, Class 7 for prod or unmatched targets).
+
+See [docs/workflow-delivery-loop.md](workflow-delivery-loop.md) for the full
+end-to-end guide.

@@ -21,7 +21,9 @@ const (
 	roleInvestigator = "investigator"
 	roleRollout      = "rollout"
 
-	roleLabel = "role:"
+	roleLabel           = "role:"
+	rolloutTargetLabel  = "rollout-target:"
+	reviewRequiredLabel = "review:required"
 )
 
 var (
@@ -39,6 +41,7 @@ var (
 	}
 	roleNameRE      = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 	thinkingTokenRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	rolloutTargetRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 )
 
 // RoleConfig is one [roles.<name>] table in config.toml. It overrides a
@@ -337,7 +340,81 @@ func roleTag(cfg Config, b Bead) string {
 	return " [role:" + role.Name + "]"
 }
 
-// unknownRoles surfaces invalid or duplicate role:* labels as context warnings.
+// validateRolloutTarget verifies that target is a safe, non-empty environment
+// or stack token without whitespace.
+func validateRolloutTarget(target string) error {
+	if target == "" || strings.TrimSpace(target) != target || !rolloutTargetRE.MatchString(target) {
+		return fmt.Errorf("invalid rollout target %q (want letters, digits, '.', '_', ':', '/', or '-' with no whitespace)", target)
+	}
+	return nil
+}
+
+// rolloutTarget returns the single rollout-target:<target> label on b, "" if
+// none is present, or an error if b carries an empty, invalid, or multiple
+// distinct rollout-target:* labels.
+func rolloutTarget(b Bead) (string, error) {
+	var found []string
+	for _, l := range b.Labels {
+		target, ok := strings.CutPrefix(l, rolloutTargetLabel)
+		if !ok {
+			continue
+		}
+		if target == "" {
+			return "", fmt.Errorf("%s has an empty %s label", b.ID, rolloutTargetLabel)
+		}
+		if err := validateRolloutTarget(target); err != nil {
+			return "", fmt.Errorf("%s: %w", b.ID, err)
+		}
+		if !slices.Contains(found, target) {
+			found = append(found, target)
+		}
+	}
+	if len(found) > 1 {
+		return "", fmt.Errorf("%s has multiple rollout target labels (%s); keep only one", b.ID, strings.Join(found, ", "))
+	}
+	if len(found) == 1 {
+		return found[0], nil
+	}
+	return "", nil
+}
+
+// setRolloutTargetLabel persists rollout-target:<target> on b, removing any
+// conflicting rollout-target:* labels. Empty target removes existing labels.
+func setRolloutTargetLabel(bd Beads, b Bead, target string) error {
+	if target != "" {
+		if err := validateRolloutTarget(target); err != nil {
+			return err
+		}
+	}
+	for _, l := range b.Labels {
+		cur, ok := strings.CutPrefix(l, rolloutTargetLabel)
+		if !ok {
+			continue
+		}
+		if cur != target {
+			if err := bd.SetLabel(b.ID, l, false); err != nil {
+				return err
+			}
+		}
+	}
+	if target == "" || b.HasLabel(rolloutTargetLabel+target) {
+		return nil
+	}
+	return bd.SetLabel(b.ID, rolloutTargetLabel+target, true)
+}
+
+// rolloutTargetTag renders a concise target tag for context output when a bead
+// carries a valid rollout-target:<target> label.
+func rolloutTargetTag(b Bead) string {
+	target, err := rolloutTarget(b)
+	if err != nil || target == "" {
+		return ""
+	}
+	return " [target:" + target + "]"
+}
+
+// unknownRoles surfaces invalid or duplicate role:* or rollout-target:* labels
+// as context warnings.
 func unknownRoles(cfg Config, threads []Thread, beadLists ...[]Bead) []string {
 	beads := make([]Bead, 0, len(threads))
 	for _, t := range threads {
@@ -346,15 +423,21 @@ func unknownRoles(cfg Config, threads []Thread, beadLists ...[]Bead) []string {
 	for _, l := range beadLists {
 		beads = append(beads, l...)
 	}
-	seen := map[string]bool{}
+	seenRole := map[string]bool{}
+	seenTarget := map[string]bool{}
 	var out []string
 	for _, b := range beads {
-		if seen[b.ID] {
-			continue
+		if !seenRole[b.ID] {
+			if _, err := cfg.resolveRoleForBead(b, ""); err != nil {
+				seenRole[b.ID] = true
+				out = append(out, err.Error()+".")
+			}
 		}
-		if _, err := cfg.resolveRoleForBead(b, ""); err != nil {
-			seen[b.ID] = true
-			out = append(out, err.Error()+".")
+		if !seenTarget[b.ID] {
+			if _, err := rolloutTarget(b); err != nil {
+				seenTarget[b.ID] = true
+				out = append(out, err.Error()+".")
+			}
 		}
 	}
 	return out
@@ -740,11 +823,12 @@ func reviewerBrief(b Bead, role EffectiveRole, branch, workdir, repoRef, linear,
 	var s strings.Builder
 	writeRoleHeader(&s, "reviewer", b, role, branch, workdir, repoRef)
 	s.WriteString(`Role mandate (skeptical code reviewer):
-- Review the target pull request or change skeptically and evidence-first: inspect the exact current head commit SHA, full diff, CI/check results, and all existing review threads and comments (including outdated threads) before drawing conclusions.
-- Lead with a clear verdict (` + "`can merge`" + ` or ` + "`cannot merge`" + `) and state what blocks vs what is non-blocking: block only on concrete defects with a triggering case and consequence (correctness bugs, security/auth/privacy/access regressions, data loss, unsafe migrations or billing/money issues, broken required checks, or user-visible requirement violations). Put optional polish, style preferences, and non-blocking cleanup under ` + "`Later`" + `, and cap review back-and-forth at 2 rounds unless a concrete blocker remains.
+- Review the target pull request or pre-PR worktree change skeptically and evidence-first against the target bead's description, design notes, and ` + "`## Acceptance`" + ` criteria: inspect the exact current head commit SHA, full diff, tests/CI check results, and all existing review threads and comments (including outdated threads) before drawing conclusions.
+- Lead with a clear verdict (` + "`can merge`" + ` or ` + "`cannot merge`" + `) and state what blocks vs what is non-blocking: block only on concrete defects with a triggering case and consequence (correctness bugs, security/auth/privacy/access regressions, data loss, unsafe migrations or billing/money issues, broken required checks, or user-visible requirement violations). Put optional polish, style preferences, and non-blocking cleanup under ` + "`Later`" + `, and cap review back-and-forth at the review loop's max rounds (default 2) unless a concrete blocker remains.
+- When reviewing an implementer bead in a Quartermaster ping-pong loop, record your structured verdict so Quartermaster tracks the reviewed head SHA and routes blocking findings back to the implementer via ` + "`quartermaster tell`" + ` (or escalates to ` + "`needs_me`" + ` at the round cap): ` + "`quartermaster review verdict <target-bead> --head <40-char-sha> --verdict can_merge|cannot_merge --summary \"...\" [--finding \"file:line: defect — consequence\"] [--later \"...\"]`" + `.
 - Do not create branches, push commits, open new pull requests, or merge changes from this role.
 - Approve at the exact verified head commit SHA ONLY when the bead or user explicitly authorized approval, all required checks are verified, zero blocking findings remain, and ` + "`quartermaster autonomy check " + b.ID + " --class 8`" + ` passes (or explicit human authorization was given).
-- Whenever any blocking finding, unresolved risk, missing check, or missing approval authorization exists, do NOT approve: record exact file/line findings and a concise draft review comment in ` + "`bd note " + b.ID + "`" + `, set ` + "`bd update " + b.ID + " --status needs_me`" + ` with a ` + "`CLASS:`" + ` line (and ` + "`QUESTION:`" + ` / ` + "`OPTIONS:`" + ` when choices are enumerable), and stop.
+- Whenever any blocking finding, unresolved risk, missing check, or missing approval authorization exists outside a recorded ping-pong handoff, do NOT approve: record exact file/line findings and a concise draft review comment in ` + "`bd note " + b.ID + "`" + `, set ` + "`bd update " + b.ID + " --status needs_me`" + ` with a ` + "`CLASS:`" + ` line (and ` + "`QUESTION:`" + ` / ` + "`OPTIONS:`" + ` when choices are enumerable), and stop.
 - Keep all public review comments and approvals strictly neutral: never include bead IDs, internal tracking keys, or AI/coding-assistant tooling mentions.
 
 `)
@@ -779,10 +863,14 @@ func investigatorBrief(b Bead, role EffectiveRole, branch, workdir, repoRef, lin
 func rolloutBrief(b Bead, role EffectiveRole, branch, workdir, repoRef, linear, globalInstructions, roleInstructions string) string {
 	var s strings.Builder
 	writeRoleHeader(&s, "rollout", b, role, branch, workdir, repoRef)
-	s.WriteString(`Role mandate (post-merge rollout and verification):
-- Drive post-merge rollout, provisioning, deployment, and live verification without authoring pull requests or creating throwaway branches.
-- Label the bead ` + "`rolling-out`" + ` (` + "`bd label add " + b.ID + " rolling-out`" + `) while rollout steps are active, and record every GitHub Actions run URL in ` + "`bd note " + b.ID + "`" + ` so the ticker tracks them.
-- Watch CI/deploy runs, inspect IaC previews (` + "`pulumi preview --json`" + ` / ` + "`tofu show -json`" + `) through ` + "`quartermaster gate plan`" + `, and check live service/cluster health at each stage before advancing.
+	target, _ := rolloutTarget(b)
+	s.WriteString("Role mandate (post-merge rollout and verification):\n")
+	if target != "" {
+		fmt.Fprintf(&s, "- Target environment/stack: `%s`. Before deploying, applying, or rolling out to `%s`, run `quartermaster autonomy check %s --action rollout --target %s` (configured `[autonomy] dev` targets are class 5; other non-prod targets are class 6; production or unmatched targets are class 7).\n", target, target, b.ID, target)
+	}
+	s.WriteString(`- Drive post-merge rollout, provisioning, deployment, and live verification without authoring pull requests or creating throwaway branches.
+- Label the bead ` + "`rolling-out`" + ` (` + "`bd label add " + b.ID + " rolling-out`" + `) while rollout steps are active, inspect the upstream merged PR and merge commit SHA from the bead's notes/description, and record every GitHub Actions run URL in ` + "`bd note " + b.ID + "`" + ` so the ticker tracks them.
+- Watch CI/build/deploy runs, inspect IaC previews (` + "`pulumi preview --json`" + ` / ` + "`tofu show -json`" + `) through ` + "`quartermaster gate plan`" + `, and check live service/cluster health at each stage before advancing.
 - Respect the autonomy dial and ` + "`needs_me`" + ` gates at every stage: note expected changes and rollback plans before class 6+ steps, stop at ` + "`needs_me`" + ` when a step exceeds the bead's level or fails verification, and never route around shims or plan digests.
 - Verify every ` + "`## Acceptance`" + ` criterion against live evidence once rollout converges, then close via ` + "`quartermaster close " + b.ID + " --by worker --reason \"...\"`" + ` (which runs the read-only verifier and clears ` + "`rolling-out`" + ` on pass).
 

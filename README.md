@@ -838,6 +838,19 @@ cleanly into `pi`'s `--exclude-tools`), `brief`, and `instructions` /
 `context`), and inspect effective roles with `quartermaster roles [--json]`.
 See [docs/roles.md](docs/roles.md).
 
+Built on these roles, Quartermaster also supports the bounded **design →
+implement ↔ skeptical reviewer ping-pong → PR/merge → auto-chained rollout**
+delivery loop: `quartermaster review request|verdict|status` tracks reviewed
+head SHAs and capped rounds (`max_rounds`, default 2) across worktree-free
+`role:reviewer` passes, routes concrete blocking findings back via
+`quartermaster tell`, and escalates to `needs_me` at the cap; `quartermaster
+dispatch <bead> --rollout-target <target>` and `quartermaster rollout
+chain|status` attach a dependent `role:rollout` bead carrying
+`rollout-target:<target>` that auto-dispatches once the PR bead closes when
+within the autonomy dial (Class 5 for configured `[autonomy] dev` targets,
+Class 6 for other non-prod, Class 7 for prod or unmatched targets). See
+[docs/workflow-delivery-loop.md](docs/workflow-delivery-loop.md).
+
 ### Antigravity (agy) workers
 
 Google's [Antigravity](https://antigravity.google/) CLI is opt-in (details,

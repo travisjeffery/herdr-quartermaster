@@ -1063,3 +1063,148 @@ func TestBlockerWakeupReopenedDependencyFiresAgainOnSecondClose(t *testing.T) {
 		t.Fatalf("close #2 wakes = %d, want 2", len(f.wakes))
 	}
 }
+
+func TestChainedRolloutAutoDispatchAutonomyDialAndDedupe(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	now := t0
+
+	cfg := testBlockerConfig()
+	cfg.Autonomy.Prod = []string{"*prod*"}
+	cfg.Autonomy.Dev = []string{"dev*", "latest"}
+	cfg.Autonomy.Max = 7
+
+	runCase := func(t *testing.T, target string, level int, agentsComplete bool, extraDep bool, wantDispatched bool, wantSummarySub string) {
+		t.Helper()
+		c := cfg
+		c.Autonomy.Level = level
+		impl := Bead{
+			ID:     "impl-1",
+			Title:  "Implement retry backoff",
+			Status: StatusInProgress,
+			Notes:  "PR: https://github.com/acme/app/pull/77",
+		}
+		deps := []Dependency{{DependsOn: "impl-1", Type: "blocks"}}
+		var allLive []Bead
+		allLive = append(allLive, impl)
+		if extraDep {
+			dep2 := Bead{ID: "impl-2", Title: "Other prereq", Status: StatusInProgress}
+			deps = append(deps, Dependency{DependsOn: "impl-2", Type: "blocks"})
+			allLive = append(allLive, dep2)
+		}
+		roll := Bead{
+			ID:           "roll-1",
+			Title:        "Rollout retry backoff to " + target,
+			Status:       StatusOpen,
+			Labels:       []string{"role:rollout", "rollout-target:" + target},
+			Dependencies: deps,
+		}
+		allLive = append(allLive, roll)
+
+		f := newFakeBlockerEnv(level, allLive...)
+		var dispatched []string
+		env := f.env()
+		env.enforceRollout = func(b Bead, tgt, by string) (string, int, error) {
+			cls := max(actionClasses["dispatch"], c.Autonomy.targetClass(tgt))
+			prefix, err := allow(b.ID, by, fmt.Sprintf("chained rollout dispatch (%s)", tgt), cls, level, "")
+			return prefix, cls, err
+		}
+		env.dispatchRollout = func(b Bead, tgt string) (string, error) {
+			dispatched = append(dispatched, b.ID+":"+tgt)
+			return "started pi on " + b.ID + " (role rollout)", nil
+		}
+
+		st := TickerState{}
+		// Tick 1: baseline.
+		blockerWakeupPass(c, env, &st, allLive, nil, map[string]Agent{}, agentsComplete, nil, nil, true, nil, nil, nil, nil, now)
+		if len(dispatched) != 0 || len(f.events) != 0 {
+			t.Fatalf("baseline should not dispatch or emit: dispatched=%v events=%+v", dispatched, f.events)
+		}
+
+		// Close impl-1.
+		impl.Status = StatusClosed
+		f.beads["impl-1"] = impl
+		nextLive := []Bead{roll}
+		if extraDep {
+			nextLive = append(nextLive, f.beads["impl-2"])
+		}
+
+		// Tick 2: transition detected.
+		t2 := now.Add(time.Minute)
+		blockerWakeupPass(c, env, &st, nextLive, nil, map[string]Agent{}, agentsComplete, nil, nil, true, nil, nil, nil, nil, t2)
+		if wantDispatched {
+			if len(dispatched) != 1 || dispatched[0] != "roll-1:"+target {
+				t.Fatalf("dispatched = %v, want [roll-1:%s]", dispatched, target)
+			}
+			// Upstream PR URL should be noted on the rollout bead alongside AUTO note.
+			joinedNotes := strings.Join(f.notes, "\n")
+			if !strings.Contains(joinedNotes, "https://github.com/acme/app/pull/77") || !strings.Contains(joinedNotes, "AUTO: [ticker L") {
+				t.Fatalf("expected upstream PR and AUTO note on rollout bead, got:\n%s", joinedNotes)
+			}
+		} else if len(dispatched) != 0 {
+			t.Fatalf("unexpected dispatch: %v", dispatched)
+		}
+		if len(f.events) != 1 || f.events[0].Kind != EventUnblocked || !strings.Contains(f.events[0].Summary, wantSummarySub) {
+			t.Fatalf("events = %+v, want 1 unblocked containing %q", f.events, wantSummarySub)
+		}
+
+		// Tick 3 + simulated restart: must NEVER duplicate dispatch or inbox event!
+		restarted := roundTripTickerState(t, st)
+		blockerWakeupPass(c, env, &restarted, nextLive, nil, map[string]Agent{}, agentsComplete, nil, nil, true, nil, nil, nil, nil, t2.Add(time.Minute))
+		if wantDispatched && len(dispatched) != 1 {
+			t.Fatalf("restart duplicated rollout dispatch: %v", dispatched)
+		}
+		if len(f.events) != 1 {
+			t.Fatalf("restart duplicated unblocked event: %+v", f.events)
+		}
+	}
+
+	t.Run("dev target auto-dispatches at L5", func(t *testing.T) {
+		runCase(t, "dev", 5, true, false, true, "auto-dispatched chained rollout worker (target dev)")
+	})
+	t.Run("latest dev target auto-dispatches at L5", func(t *testing.T) {
+		runCase(t, "latest", 5, true, false, true, "auto-dispatched chained rollout worker (target latest)")
+	})
+	t.Run("dev target blocked at L4 surfaces unblocked_dispatch", func(t *testing.T) {
+		runCase(t, "dev", 4, true, false, false, "class 5")
+	})
+	t.Run("staging target blocked at L5", func(t *testing.T) {
+		runCase(t, "staging", 5, true, false, false, "class 6")
+	})
+	t.Run("staging target auto-dispatches at L6", func(t *testing.T) {
+		runCase(t, "staging", 6, true, false, true, "auto-dispatched chained rollout worker (target staging)")
+	})
+	t.Run("prod target blocked at L6", func(t *testing.T) {
+		runCase(t, "prod", 6, true, false, false, "class 7")
+	})
+	t.Run("incomplete agent discovery fails closed", func(t *testing.T) {
+		runCase(t, "dev", 5, false, false, false, "worker discovery incomplete")
+	})
+	t.Run("remaining blocking dep prevents premature auto-dispatch", func(t *testing.T) {
+		runCase(t, "dev", 5, true, true, false, "remaining blockers: impl-2")
+	})
+}
+
+func TestUnblockedDispatchInboxClearsOnceDispatched(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	it := InboxItem{
+		Event: Event{
+			Bead:    "roll-1",
+			Kind:    EventUnblocked,
+			Summary: "roll-1 unblocked; run quartermaster dispatch roll-1 --role rollout",
+			At:      t0,
+			Clears:  &InboxCondition{Kind: "unblocked_dispatch", Bead: "roll-1", Key: "dep:impl-1"},
+		},
+	}
+	// Open with no agent: stays unread.
+	if inboxObsolete(it, map[string]Thread{"roll-1": {Bead: Bead{ID: "roll-1", Status: StatusOpen}}}) {
+		t.Fatal("open unblocked rollout bead should stay unread")
+	}
+	// Once dispatched (in_progress with agent): auto-clears cleanly.
+	if !inboxObsolete(it, map[string]Thread{"roll-1": {Bead: Bead{ID: "roll-1", Status: StatusInProgress}, Agent: &Agent{Name: "roll-1", Status: "working"}}}) {
+		t.Fatal("dispatched rollout bead should archive stale unblocked_dispatch event")
+	}
+	// Closed: also clears.
+	if !inboxObsolete(it, map[string]Thread{"roll-1": {Bead: Bead{ID: "roll-1", Status: StatusClosed}}}) {
+		t.Fatal("closed rollout bead should archive unblocked_dispatch event")
+	}
+}
