@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -31,6 +32,7 @@ const (
 	blockerActionDispatchFailed = "dispatch_failed"
 	blockerActionNotified       = "notified"
 	blockerActionWakeFailed     = "wake_failed"
+	blockerActionLocked         = "locked"
 
 	blockerWakeHeaderPrefix = "[" + toolName + ": automated, not the user, approves nothing]"
 )
@@ -56,9 +58,22 @@ type BlockerState struct {
 // BeadBlockerState holds one bead's currently tracked blockers and already
 // handled cleared blockers.
 type BeadBlockerState struct {
-	LiveDeps []string               `json:"live_deps,omitempty"`
-	OpenPRs  []string               `json:"open_prs,omitempty"`
-	Cleared  map[string]BlockerMark `json:"cleared,omitempty"`
+	LiveDeps        []string               `json:"live_deps,omitempty"`
+	OpenPRs         []string               `json:"open_prs,omitempty"`
+	Cleared         map[string]BlockerMark `json:"cleared,omitempty"`
+	HeldLocks       map[string]string      `json:"held_locks,omitempty"`
+	DeferredCleared []DeferredBlocker      `json:"deferred_cleared,omitempty"`
+}
+
+// DeferredBlocker persists a cleared dependency or PR blocker that was held
+// back while the bead waited on a shared lock:<name> label.
+type DeferredBlocker struct {
+	Kind        clearedBlockerKind `json:"kind"`
+	Key         string             `json:"key"`
+	BeadID      string             `json:"bead_id,omitempty"`
+	BeadTitle   string             `json:"bead_title,omitempty"`
+	UpstreamPRs []string           `json:"upstream_prs,omitempty"`
+	PR          *PR                `json:"pr,omitempty"`
 }
 
 // BlockerMark records the deduplicated action taken for one cleared blocker.
@@ -71,21 +86,24 @@ type BlockerMark struct {
 type clearedBlockerKind string
 
 const (
-	clearedBlockerDep clearedBlockerKind = "dep"
-	clearedBlockerPR  clearedBlockerKind = "pr"
+	clearedBlockerDep  clearedBlockerKind = "dep"
+	clearedBlockerPR   clearedBlockerKind = "pr"
+	clearedBlockerLock clearedBlockerKind = "lock"
 )
 
 type clearedBlocker struct {
 	Kind        clearedBlockerKind
-	Key         string // "dep:<id>" or "pr:<url>"
+	Key         string // "dep:<id>", "pr:<url>", or "lock:<name>"
 	BeadID      string
 	BeadTitle   string
+	LockName    string
 	UpstreamPRs []string
 	PR          PR
 }
 
-func depBlockerKey(id string) string { return "dep:" + id }
-func prBlockerKey(u string) string   { return "pr:" + u }
+func depBlockerKey(id string) string    { return "dep:" + id }
+func prBlockerKey(u string) string      { return "pr:" + u }
+func lockBlockerKey(name string) string { return resourceLockLabel + strings.ToLower(name) }
 
 func ghPRURL(repo string, num int) string {
 	if repo == "" || num <= 0 {
@@ -326,6 +344,11 @@ func formatClearedBlocker(c clearedBlocker) string {
 			return fmt.Sprintf("referenced PR (%s) merged", strings.Join(meta, ", "))
 		}
 		return "referenced PR merged"
+	case clearedBlockerLock:
+		if c.BeadID != "" {
+			return fmt.Sprintf("resource lock %s%s released by %s", resourceLockLabel, c.LockName, c.BeadID)
+		}
+		return fmt.Sprintf("resource lock %s%s released", resourceLockLabel, c.LockName)
 	default:
 		return c.Key
 	}
@@ -556,12 +579,16 @@ func blockerWakeupPass(
 
 	nonClosed := make(map[string]Bead, len(all))
 	liveIDs := make([]string, 0, len(all))
+	var activeHolders []Bead
 	for _, b := range all {
 		if b.Status == StatusClosed {
 			continue
 		}
 		nonClosed[b.ID] = b
 		liveIDs = append(liveIDs, b.ID)
+		if b.Status == StatusInProgress {
+			activeHolders = append(activeHolders, b)
+		}
 	}
 	slices.Sort(liveIDs)
 
@@ -701,8 +728,12 @@ func blockerWakeupPass(
 				}
 			}
 			slices.Sort(openPRs)
-			if len(liveDeps) > 0 || len(openPRs) > 0 {
-				nextBeads[id] = BeadBlockerState{LiveDeps: liveDeps, OpenPRs: openPRs}
+			heldLocks, _, lockErr := heldResourceLocksFor(b, activeHolders)
+			if lockErr != nil {
+				heldLocks = nil
+			}
+			if len(liveDeps) > 0 || len(openPRs) > 0 || len(heldLocks) > 0 {
+				nextBeads[id] = BeadBlockerState{LiveDeps: liveDeps, OpenPRs: openPRs, HeldLocks: heldLocks}
 			}
 		}
 		st.Blockers = BlockerState{
@@ -848,6 +879,65 @@ func blockerWakeupPass(
 		}
 		slices.Sort(nextOpenPRs)
 
+		// Shared-resource mutex labels (lock:<name>): skip locked open/blocked
+		// beads cleanly without erroring or emitting duplicate spam, deferring
+		// any cleared blockers until the holding bead closes or removes the
+		// lock:<name> label.
+		curHeldLocks, lockConflicts, lockErr := heldResourceLocksFor(b, activeHolders)
+		if lockErr != nil {
+			// Malformed lock:* label on b itself: fail closed cleanly.
+			nextDeferred := mergeDeferredBlockers(prev.DeferredCleared, newlyCleared)
+			if len(nextLiveDeps) > 0 || len(nextOpenPRs) > 0 || len(clearedMarks) > 0 || len(nextDeferred) > 0 {
+				nextBeads[id] = BeadBlockerState{
+					LiveDeps:        nextLiveDeps,
+					OpenPRs:         nextOpenPRs,
+					Cleared:         clearedMarks,
+					DeferredCleared: nextDeferred,
+				}
+			}
+			continue
+		}
+		if len(lockConflicts) > 0 {
+			for lockName := range curHeldLocks {
+				delete(clearedMarks, lockBlockerKey(lockName))
+			}
+			nextDeferred := mergeDeferredBlockers(prev.DeferredCleared, newlyCleared)
+			if len(newlyCleared) > 0 || !maps.Equal(prev.HeldLocks, curHeldLocks) {
+				lines = append(lines, fmt.Sprintf("%s skipped while locked (%s)", id, formatResourceLockConflicts(lockConflicts)))
+			}
+			nextBeads[id] = BeadBlockerState{
+				LiveDeps:        nextLiveDeps,
+				OpenPRs:         nextOpenPRs,
+				Cleared:         clearedMarks,
+				HeldLocks:       curHeldLocks,
+				DeferredCleared: nextDeferred,
+			}
+			continue
+		}
+
+		// No resource lock conflicts remain: restore any blockers deferred
+		// while locked, and surface released lock:<name> transitions once no
+		// dependency or PR blockers remain.
+		if len(prev.DeferredCleared) > 0 {
+			newlyCleared = append(newlyCleared, deferredToCleared(prev.DeferredCleared, clearedMarks, newlyCleared)...)
+		}
+		if len(prev.HeldLocks) > 0 && len(remainingDeps) == 0 && len(nextOpenPRs) == 0 {
+			for _, lockName := range sortedKeys(prev.HeldLocks) {
+				key := lockBlockerKey(lockName)
+				if _, alreadyCleared := clearedMarks[key]; alreadyCleared {
+					continue
+				}
+				newlyCleared = append(newlyCleared, clearedBlocker{
+					Kind:     clearedBlockerLock,
+					Key:      key,
+					LockName: lockName,
+					BeadID:   prev.HeldLocks[lockName],
+				})
+			}
+		}
+
+		var nextHeldLocks map[string]string
+		var nextDeferred []DeferredBlocker
 		if len(newlyCleared) > 0 {
 			sort.SliceStable(newlyCleared, func(i, j int) bool {
 				return newlyCleared[i].Key < newlyCleared[j].Key
@@ -855,16 +945,24 @@ func blockerWakeupPass(
 			action, detail, line := handleClearedBlockers(
 				cfg, env, st, b, threadByID[id], agents, agentsComplete,
 				promptedThisTick, relaunch, watchWokenPRs[id],
-				newlyCleared, remainingDeps, len(nextOpenPRs) > 0, now,
+				newlyCleared, remainingDeps, len(nextOpenPRs) > 0, activeHolders, now,
 			)
 			if line != "" {
 				lines = append(lines, line)
 			}
-			if action != "" {
-				for _, c := range newlyCleared {
-					clearedMarks[c.Key] = BlockerMark{Action: action, At: now, Detail: detail}
+			switch action {
+			case blockerActionLocked:
+				// Live re-read discovered a newly added lock conflict right
+				// before auto-dispatch: defer cleanly without spam.
+				if env.show != nil {
+					if cur, serr := env.show(id); serr == nil {
+						if hl, _, herr := heldResourceLocksFor(cur, activeHolders); herr == nil && len(hl) > 0 {
+							nextHeldLocks = hl
+						}
+					}
 				}
-			} else {
+				nextDeferred = mergeDeferredBlockers(nil, newlyCleared)
+			case "":
 				// Event write failed before any wake occurred; keep blockers
 				// pending so the next tick retries cleanly.
 				for _, c := range newlyCleared {
@@ -878,18 +976,34 @@ func blockerWakeupPass(
 							nextOpenPRs = append(nextOpenPRs, c.PR.URL)
 							globalOpenSet[c.PR.URL] = true
 						}
+					case clearedBlockerLock:
+						if nextHeldLocks == nil {
+							nextHeldLocks = map[string]string{}
+						}
+						nextHeldLocks[c.LockName] = c.BeadID
 					}
 				}
 				slices.Sort(nextLiveDeps)
 				slices.Sort(nextOpenPRs)
+			default:
+				for _, c := range newlyCleared {
+					clearedMarks[c.Key] = BlockerMark{Action: action, At: now, Detail: detail}
+				}
+				if action == blockerActionDispatched {
+					dispatched := b
+					dispatched.Status = StatusInProgress
+					activeHolders = append(activeHolders, dispatched)
+				}
 			}
 		}
 
-		if len(nextLiveDeps) > 0 || len(nextOpenPRs) > 0 || len(clearedMarks) > 0 {
+		if len(nextLiveDeps) > 0 || len(nextOpenPRs) > 0 || len(clearedMarks) > 0 || len(nextHeldLocks) > 0 || len(nextDeferred) > 0 {
 			nextBeads[id] = BeadBlockerState{
-				LiveDeps: nextLiveDeps,
-				OpenPRs:  nextOpenPRs,
-				Cleared:  clearedMarks,
+				LiveDeps:        nextLiveDeps,
+				OpenPRs:         nextOpenPRs,
+				Cleared:         clearedMarks,
+				HeldLocks:       nextHeldLocks,
+				DeferredCleared: nextDeferred,
 			}
 		}
 	}
@@ -920,6 +1034,7 @@ func handleClearedBlockers(
 	cleared []clearedBlocker,
 	remainingDeps []string,
 	hasRemainingOpenPRs bool,
+	activeHolders []Bead,
 	now time.Time,
 ) (action, detail, line string) {
 	id := b.ID
@@ -955,7 +1070,7 @@ func handleClearedBlockers(
 		if target, ok, err := isChainedRolloutBead(cfg, b); err == nil && ok {
 			return handleUnblockedChainedRollout(
 				cfg, env, b, target, agents, agentsComplete, relaunch,
-				cleared, desc, dedupeKey, now,
+				activeHolders, cleared, desc, dedupeKey, now,
 			)
 		}
 	}
@@ -1166,6 +1281,7 @@ func handleUnblockedChainedRollout(
 	agents map[string]Agent,
 	agentsComplete bool,
 	relaunch map[string]bool,
+	activeHolders []Bead,
 	cleared []clearedBlocker,
 	desc, dedupeKey string,
 	now time.Time,
@@ -1198,6 +1314,12 @@ func handleUnblockedChainedRollout(
 		} else if t2, ok, rerr := isChainedRolloutBead(cfg, cur); rerr != nil || !ok || t2 != target {
 			skipReason = "rollout target or role changed"
 		} else {
+			if _, conflicts, lerr := heldResourceLocksFor(cur, activeHolders); lerr != nil || len(conflicts) > 0 {
+				if lerr != nil {
+					return blockerActionLocked, lerr.Error(), fmt.Sprintf("%s skipped (%v)", id, lerr)
+				}
+				return blockerActionLocked, formatResourceLockConflicts(conflicts), fmt.Sprintf("%s skipped while locked (%s)", id, formatResourceLockConflicts(conflicts))
+			}
 			b = cur
 		}
 	}
@@ -1307,4 +1429,94 @@ func handleUnblockedChainedRollout(
 		}
 	}
 	return blockerActionDispatched, "target " + target, summary
+}
+
+// heldResourceLocksFor returns any lock:<name> conflicts blocking an open or
+// blocked bead from being dispatched or woken while another in_progress bead
+// holds the same lock. Beads already in_progress already own their locks.
+func heldResourceLocksFor(b Bead, holders []Bead) (map[string]string, []ResourceLockConflict, error) {
+	if b.Status != StatusOpen && b.Status != StatusBlocked {
+		return nil, nil, nil
+	}
+	conflicts, err := findResourceLockConflicts(b, holders)
+	if err != nil || len(conflicts) == 0 {
+		return nil, conflicts, err
+	}
+	held := make(map[string]string, len(conflicts))
+	for _, c := range conflicts {
+		if _, exists := held[c.Lock]; !exists {
+			held[c.Lock] = c.HolderBead
+		}
+	}
+	return held, conflicts, nil
+}
+
+// mergeDeferredBlockers combines previously deferred cleared blockers with any
+// newly cleared non-lock blockers, deduplicating by blocker Key.
+func mergeDeferredBlockers(prev []DeferredBlocker, newly []clearedBlocker) []DeferredBlocker {
+	if len(prev) == 0 && len(newly) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(prev)+len(newly))
+	var out []DeferredBlocker
+	for _, d := range prev {
+		if d.Key == "" || d.Kind == clearedBlockerLock || seen[d.Key] {
+			continue
+		}
+		seen[d.Key] = true
+		out = append(out, d)
+	}
+	for _, c := range newly {
+		if c.Key == "" || c.Kind == clearedBlockerLock || seen[c.Key] {
+			continue
+		}
+		seen[c.Key] = true
+		db := DeferredBlocker{
+			Kind:        c.Kind,
+			Key:         c.Key,
+			BeadID:      c.BeadID,
+			BeadTitle:   c.BeadTitle,
+			UpstreamPRs: slices.Clone(c.UpstreamPRs),
+		}
+		if c.Kind == clearedBlockerPR {
+			cp := c.PR
+			db.PR = &cp
+		}
+		out = append(out, db)
+	}
+	return out
+}
+
+// deferredToCleared restores deferred blockers not already marked cleared or
+// present in existing.
+func deferredToCleared(defs []DeferredBlocker, clearedMarks map[string]BlockerMark, existing []clearedBlocker) []clearedBlocker {
+	if len(defs) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(existing))
+	for _, c := range existing {
+		seen[c.Key] = true
+	}
+	var out []clearedBlocker
+	for _, d := range defs {
+		if d.Key == "" || seen[d.Key] {
+			continue
+		}
+		if _, already := clearedMarks[d.Key]; already {
+			continue
+		}
+		seen[d.Key] = true
+		c := clearedBlocker{
+			Kind:        d.Kind,
+			Key:         d.Key,
+			BeadID:      d.BeadID,
+			BeadTitle:   d.BeadTitle,
+			UpstreamPRs: slices.Clone(d.UpstreamPRs),
+		}
+		if d.PR != nil {
+			c.PR = *d.PR
+		}
+		out = append(out, c)
+	}
+	return out
 }

@@ -1208,3 +1208,276 @@ func TestUnblockedDispatchInboxClearsOnceDispatched(t *testing.T) {
 		t.Fatal("closed rollout bead should archive unblocked_dispatch event")
 	}
 }
+
+func TestBlockerWakeupResourceLockSkipsAndDispatchesOnClose(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	now := t0
+
+	cfg := testBlockerConfig()
+	cfg.Autonomy.Level = 5
+	cfg.Autonomy.Prod = []string{"*prod*"}
+	cfg.Autonomy.Dev = []string{"dev*"}
+	cfg.Autonomy.Max = 7
+
+	impl := Bead{
+		ID:     "impl-1",
+		Title:  "Ship schema migration",
+		Status: StatusInProgress,
+		Notes:  "PR: https://github.com/acme/app/pull/88",
+	}
+	holder := Bead{
+		ID:     "holder-1",
+		Title:  "Upgrade staging cluster",
+		Status: StatusInProgress,
+		Labels: []string{"lock:staging-cluster"},
+	}
+	roll := Bead{
+		ID:           "roll-1",
+		Title:        "Rollout schema migration to dev",
+		Status:       StatusOpen,
+		Labels:       []string{"role:rollout", "rollout-target:dev", "lock:staging-cluster"},
+		Dependencies: []Dependency{{DependsOn: "impl-1", Type: "blocks"}},
+	}
+
+	f := newFakeBlockerEnv(5, impl, holder, roll)
+	var dispatched []string
+	env := f.env()
+	env.enforceRollout = func(b Bead, tgt, by string) (string, int, error) {
+		cls := max(actionClasses["dispatch"], cfg.Autonomy.targetClass(tgt))
+		prefix, err := allow(b.ID, by, fmt.Sprintf("chained rollout dispatch (%s)", tgt), cls, 5, "")
+		return prefix, cls, err
+	}
+	env.dispatchRollout = func(b Bead, tgt string) (string, error) {
+		dispatched = append(dispatched, b.ID+":"+tgt)
+		return "started pi on " + b.ID, nil
+	}
+
+	st := TickerState{}
+	// Tick 1: baseline.
+	blockerWakeupPass(cfg, env, &st, []Bead{impl, holder, roll}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(dispatched) != 0 || len(f.events) != 0 {
+		t.Fatalf("baseline emitted unexpected actions: dispatched=%v events=%+v", dispatched, f.events)
+	}
+
+	// Tick 2: impl-1 closes while holder-1 STILL holds lock:staging-cluster.
+	impl.Status = StatusClosed
+	f.beads["impl-1"] = impl
+	now = now.Add(time.Minute)
+	lines := blockerWakeupPass(cfg, env, &st, []Bead{holder, roll}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(dispatched) != 0 || len(f.events) != 0 || len(f.notes) != 0 {
+		t.Fatalf("locked bead should be skipped cleanly: dispatched=%v events=%+v notes=%+v", dispatched, f.events, f.notes)
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "skipped while locked") || !strings.Contains(lines[0], "holder-1") {
+		t.Fatalf("expected single lock-skip log line, got %+v", lines)
+	}
+
+	// Tick 3: holder-1 still holds lock:staging-cluster -> zero spam, zero extra show calls.
+	showsBefore := f.showCalls
+	now = now.Add(time.Minute)
+	lines = blockerWakeupPass(cfg, env, &st, []Bead{holder, roll}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(dispatched) != 0 || len(f.events) != 0 || len(lines) != 0 || f.showCalls != showsBefore {
+		t.Fatalf("repeat tick while locked should emit no spam: dispatched=%v events=%+v lines=%+v shows=%d->%d", dispatched, f.events, lines, showsBefore, f.showCalls)
+	}
+
+	// Tick 4 (after ticker restart): holder-1 closes -> roll-1 auto-dispatches immediately.
+	holder.Status = StatusClosed
+	f.beads["holder-1"] = holder
+	restarted := roundTripTickerState(t, st)
+	now = now.Add(time.Minute)
+	blockerWakeupPass(cfg, env, &restarted, []Bead{roll}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(dispatched) != 1 || dispatched[0] != "roll-1:dev" {
+		t.Fatalf("expected roll-1:dev auto-dispatch after holder closed, got %v", dispatched)
+	}
+	if len(f.events) != 1 || f.events[0].Kind != EventUnblocked || !strings.Contains(f.events[0].Summary, "auto-dispatched") {
+		t.Fatalf("expected one unblocked auto-dispatch event, got %+v", f.events)
+	}
+	joinedNotes := strings.Join(f.notes, "\n")
+	if !strings.Contains(joinedNotes, "https://github.com/acme/app/pull/88") || !strings.Contains(joinedNotes, "lock:staging-cluster") {
+		t.Fatalf("expected deferred upstream PR and lock release in notes:\n%s", joinedNotes)
+	}
+
+	// Tick 5 + restart: no duplicate dispatch or event.
+	restarted2 := roundTripTickerState(t, restarted)
+	now = now.Add(time.Minute)
+	blockerWakeupPass(cfg, env, &restarted2, []Bead{roll}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(dispatched) != 1 || len(f.events) != 1 {
+		t.Fatalf("steady state duplicated actions: dispatched=%v events=%+v", dispatched, f.events)
+	}
+}
+
+func TestBlockerWakeupResourceLockDispatchesWhenLabelRemoved(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	now := t0
+
+	cfg := testBlockerConfig()
+	cfg.Autonomy.Level = 5
+	cfg.Autonomy.Prod = []string{"*prod*"}
+	cfg.Autonomy.Dev = []string{"dev*"}
+	cfg.Autonomy.Max = 7
+
+	holder := Bead{
+		ID:     "holder-1",
+		Title:  "Toggle CI workflow",
+		Status: StatusInProgress,
+		Labels: []string{"lock:ci-workflow-toggle"},
+	}
+	roll := Bead{
+		ID:     "roll-2",
+		Title:  "Rollout CI change to dev",
+		Status: StatusOpen,
+		Labels: []string{"role:rollout", "rollout-target:dev", "lock:ci-workflow-toggle"},
+	}
+	f := newFakeBlockerEnv(5, holder, roll)
+	var dispatched []string
+	env := f.env()
+	env.enforceRollout = func(b Bead, tgt, by string) (string, int, error) {
+		cls := max(actionClasses["dispatch"], cfg.Autonomy.targetClass(tgt))
+		prefix, err := allow(b.ID, by, fmt.Sprintf("chained rollout dispatch (%s)", tgt), cls, 5, "")
+		return prefix, cls, err
+	}
+	env.dispatchRollout = func(b Bead, tgt string) (string, error) {
+		dispatched = append(dispatched, b.ID+":"+tgt)
+		return "started pi on " + b.ID, nil
+	}
+
+	st := TickerState{}
+	// Tick 1: baseline while holder-1 holds lock:ci-workflow-toggle.
+	blockerWakeupPass(cfg, env, &st, []Bead{holder, roll}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(dispatched) != 0 || len(f.events) != 0 {
+		t.Fatalf("baseline should emit nothing: dispatched=%v events=%+v", dispatched, f.events)
+	}
+
+	// Tick 2: still held -> silent skip.
+	now = now.Add(time.Minute)
+	lines := blockerWakeupPass(cfg, env, &st, []Bead{holder, roll}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(dispatched) != 0 || len(f.events) != 0 || len(lines) != 0 {
+		t.Fatalf("still-locked tick should be silent: dispatched=%v events=%+v lines=%+v", dispatched, f.events, lines)
+	}
+
+	// Tick 3: holder-1 stays in_progress but removes lock:ci-workflow-toggle.
+	holder.Labels = nil
+	f.beads["holder-1"] = holder
+	now = now.Add(time.Minute)
+	blockerWakeupPass(cfg, env, &st, []Bead{holder, roll}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(dispatched) != 1 || dispatched[0] != "roll-2:dev" {
+		t.Fatalf("expected roll-2:dev dispatched once lock label removed, got %v", dispatched)
+	}
+	if len(f.events) != 1 || !strings.Contains(f.events[0].Summary, "lock:ci-workflow-toggle released by holder-1") {
+		t.Fatalf("unexpected events: %+v", f.events)
+	}
+}
+
+func TestBlockerWakeupResourceLockSerializesSameTickDispatches(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	now := t0
+
+	cfg := testBlockerConfig()
+	cfg.Autonomy.Level = 5
+	cfg.Autonomy.Prod = []string{"*prod*"}
+	cfg.Autonomy.Dev = []string{"dev*"}
+	cfg.Autonomy.Max = 7
+
+	impl := Bead{ID: "impl-1", Title: "Shared prereq", Status: StatusInProgress}
+	rollA := Bead{
+		ID:           "roll-a",
+		Title:        "First staging rollout",
+		Status:       StatusOpen,
+		Labels:       []string{"role:rollout", "rollout-target:dev", "lock:staging-cluster"},
+		Dependencies: []Dependency{{DependsOn: "impl-1", Type: "blocks"}},
+	}
+	rollB := Bead{
+		ID:           "roll-b",
+		Title:        "Second staging rollout",
+		Status:       StatusOpen,
+		Labels:       []string{"role:rollout", "rollout-target:dev", "lock:staging-cluster"},
+		Dependencies: []Dependency{{DependsOn: "impl-1", Type: "blocks"}},
+	}
+
+	f := newFakeBlockerEnv(5, impl, rollA, rollB)
+	var dispatched []string
+	env := f.env()
+	env.enforceRollout = func(b Bead, tgt, by string) (string, int, error) {
+		cls := max(actionClasses["dispatch"], cfg.Autonomy.targetClass(tgt))
+		prefix, err := allow(b.ID, by, fmt.Sprintf("chained rollout dispatch (%s)", tgt), cls, 5, "")
+		return prefix, cls, err
+	}
+	env.dispatchRollout = func(b Bead, tgt string) (string, error) {
+		dispatched = append(dispatched, b.ID)
+		b.Status = StatusInProgress
+		f.beads[b.ID] = b
+		return "started pi on " + b.ID, nil
+	}
+
+	st := TickerState{}
+	// Tick 1: baseline.
+	blockerWakeupPass(cfg, env, &st, []Bead{impl, rollA, rollB}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+
+	// Tick 2: impl-1 closes -> roll-a dispatches; roll-b is immediately serialized and skipped cleanly in the same tick.
+	impl.Status = StatusClosed
+	f.beads["impl-1"] = impl
+	now = now.Add(time.Minute)
+	blockerWakeupPass(cfg, env, &st, []Bead{rollA, rollB}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(dispatched) != 1 || dispatched[0] != "roll-a" {
+		t.Fatalf("expected only roll-a dispatched on tick 2, got %v", dispatched)
+	}
+	if len(f.events) != 1 || f.events[0].Bead != "roll-a" {
+		t.Fatalf("expected only roll-a event on tick 2, got %+v", f.events)
+	}
+
+	// Tick 3: roll-a is in_progress -> roll-b stays skipped with zero spam.
+	now = now.Add(time.Minute)
+	lines := blockerWakeupPass(cfg, env, &st, []Bead{f.beads["roll-a"], rollB}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(dispatched) != 1 || len(f.events) != 1 || len(lines) != 0 {
+		t.Fatalf("expected silent wait while roll-a holds lock: dispatched=%v events=%+v lines=%+v", dispatched, f.events, lines)
+	}
+
+	// Tick 4: roll-a closes -> roll-b now dispatches automatically.
+	rollAClosed := f.beads["roll-a"]
+	rollAClosed.Status = StatusClosed
+	f.beads["roll-a"] = rollAClosed
+	now = now.Add(time.Minute)
+	blockerWakeupPass(cfg, env, &st, []Bead{rollB}, nil, map[string]Agent{}, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(dispatched) != 2 || dispatched[1] != "roll-b" {
+		t.Fatalf("expected roll-b dispatched after roll-a closed, got %v", dispatched)
+	}
+}
+
+func TestBlockerWakeupResourceLockMultipleLocksAndBlockedWorker(t *testing.T) {
+	t.Setenv("QUARTERMASTER_STATE_DIR", t.TempDir())
+	now := t0
+	cfg := testBlockerConfig()
+
+	holderA := Bead{ID: "holder-a", Status: StatusInProgress, Labels: []string{"lock:cluster-a"}}
+	holderB := Bead{ID: "holder-b", Status: StatusInProgress, Labels: []string{"lock:cluster-b"}}
+	waiting := Bead{
+		ID:     "task-blocked",
+		Title:  "Run cross-cluster sync",
+		Status: StatusBlocked,
+		Labels: []string{"lock:cluster-a", "lock:cluster-b"},
+	}
+	f := newFakeBlockerEnv(5, holderA, holderB, waiting)
+	agents := map[string]Agent{"task-blocked": {Name: "task-blocked", Status: "idle", PaneID: "w1:p5"}}
+	threads := []Thread{{Bead: waiting, Agent: &Agent{Name: "task-blocked", Status: "idle", PaneID: "w1:p5"}}}
+	st := TickerState{}
+
+	// Tick 1: baseline both locks held.
+	blockerWakeupPass(cfg, f.env(), &st, []Bead{holderA, holderB, waiting}, threads, agents, true, nil, nil, true, nil, nil, nil, nil, now)
+
+	// Tick 2: holder-a closes, but holder-b still holds lock:cluster-b -> must NOT wake yet!
+	holderA.Status = StatusClosed
+	f.beads["holder-a"] = holderA
+	now = now.Add(time.Minute)
+	blockerWakeupPass(cfg, f.env(), &st, []Bead{holderB, waiting}, threads, agents, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(f.wakes) != 0 || len(f.events) != 0 {
+		t.Fatalf("must not wake while lock:cluster-b is still held: wakes=%+v events=%+v", f.wakes, f.events)
+	}
+
+	// Tick 3: holder-b closes -> both locks clear, idle worker woken once!
+	holderB.Status = StatusClosed
+	f.beads["holder-b"] = holderB
+	now = now.Add(time.Minute)
+	blockerWakeupPass(cfg, f.env(), &st, []Bead{waiting}, threads, agents, true, nil, nil, true, nil, nil, nil, nil, now)
+	if len(f.wakes) != 1 || f.wakes[0].Bead != "task-blocked" || !strings.Contains(f.wakes[0].Text, "lock:cluster-b") {
+		t.Fatalf("expected worker wake once final lock cleared, got %+v", f.wakes)
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -257,5 +258,61 @@ func TestRolloutChainCLIIdempotentAndStatus(t *testing.T) {
 	}
 	if rows[0].Bead != "roll-10" || rows[0].Target != "dev" || rows[0].TargetClass != 5 || !rows[0].AutoAllowed || !slices.Equal(rows[0].BlockedBy, []string{"impl-10"}) {
 		t.Fatalf("unexpected status row: %+v", rows[0])
+	}
+}
+
+func TestDispatchResourceLockBlocksConcurrentAndAllowsForceOrRelease(t *testing.T) {
+	dir := fakeRoleTools(t)
+	cfg := hostsConfig()
+	cfg.Autonomy.Level = 5
+
+	// 1. Blocked while holder-1 (in_progress) holds lock:staging-cluster (even with --by TJ).
+	t.Setenv("FAKE_BEAD", `[{"id":"task-2","title":"Deploy staging schema","status":"open","labels":["lock:staging-cluster"]}]`)
+	t.Setenv("FAKE_BEADS_LIST", `[{"id":"holder-1","title":"Run staging upgrade","status":"in_progress","labels":["lock:staging-cluster"]}]`)
+	_, err := dispatch(cfg, newHerdr(), "task-2", DispatchOpts{By: "TJ"})
+	if !errors.Is(err, errResourceLocked) {
+		t.Fatalf("expected errResourceLocked, got %v", err)
+	}
+	for _, want := range []string{"task-2", "lock:staging-cluster", "holder-1", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+	if hasLine(logLines(t, dir, "bd"), "update task-2 --claim") {
+		t.Error("locked dispatch must not claim bead")
+	}
+	if hasLine(logLines(t, dir, "herdr"), "worktree create") || hasLine(logLines(t, dir, "herdr"), "agent start") {
+		t.Error("locked dispatch must not create worktree or start agent")
+	}
+
+	// 2. Native pi-rpc backend also fails closed on held lock:staging-cluster.
+	_, err = dispatch(cfg, newHerdr(), "task-2", DispatchOpts{Backend: rpcBackend, Kind: "pi", By: "TJ"})
+	if !errors.Is(err, errResourceLocked) || !strings.Contains(err.Error(), "holder-1") {
+		t.Fatalf("pi-rpc locked dispatch expected errResourceLocked naming holder-1, got %v", err)
+	}
+
+	// 3. Malformed lock: label fails closed even with --force.
+	t.Setenv("FAKE_BEAD", `[{"id":"task-bad","title":"Bad lock","status":"open","labels":["lock:"]}]`)
+	if _, err := dispatch(cfg, newHerdr(), "task-bad", DispatchOpts{Force: true, By: "TJ"}); err == nil || !strings.Contains(err.Error(), "empty lock:") {
+		t.Fatalf("malformed lock with --force should fail closed, got %v", err)
+	}
+
+	// 4. --force overrides a held lock and dispatches cleanly.
+	_ = os.Remove(filepath.Join(dir, "bd.log"))
+	_ = os.Remove(filepath.Join(dir, "herdr.log"))
+	t.Setenv("FAKE_BEAD", `[{"id":"task-2","title":"Deploy staging schema","status":"open","labels":["lock:staging-cluster"]}]`)
+	if _, err := dispatch(cfg, newHerdr(), "task-2", DispatchOpts{Force: true, By: "coordinator"}); err != nil {
+		t.Fatalf("dispatch --force should override held lock: %v", err)
+	}
+	if !hasLine(logLines(t, dir, "bd"), "update task-2 --claim") {
+		t.Error("forced dispatch should claim bead")
+	}
+
+	// 5. Once holder-1 closes (or removes the lock label), dispatch succeeds without --force.
+	_ = os.Remove(filepath.Join(dir, "bd.log"))
+	_ = os.Remove(filepath.Join(dir, "herdr.log"))
+	t.Setenv("FAKE_BEADS_LIST", `[{"id":"holder-1","title":"Run staging upgrade","status":"closed","labels":["lock:staging-cluster"]},{"id":"holder-2","title":"No longer locked","status":"in_progress","labels":[]}]`)
+	if _, err := dispatch(cfg, newHerdr(), "task-2", DispatchOpts{By: "coordinator"}); err != nil {
+		t.Fatalf("dispatch after lock release failed: %v", err)
 	}
 }
