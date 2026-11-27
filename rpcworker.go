@@ -464,6 +464,9 @@ func rpcServe(cfg Config, id string) error {
 		return err
 	}
 	defer lease.Close()
+	if err := rpcCleanupBarrier(id); err != nil {
+		return err
+	}
 	var w rpcWorker
 	if err = rpcLoad(filepath.Join(rpcDir(id), "worker.json"), &w); err != nil {
 		return err

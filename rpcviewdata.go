@@ -200,6 +200,8 @@ func rpcViewNormalize(raw []byte, source string, seq int64) (rpcViewEvent, bool)
 		e.At, e.EntryID, e.ParentID = v.Timestamp, v.ID, v.ParentID
 	}
 	switch v.Type {
+	case rpcRetentionGap:
+		e.Kind, e.Label = "gap", "older execution records removed by explicit retention; protected responses, saved sessions and receipts retained"
 	case "message", "message_end":
 		m := v.Message
 		switch m.Role {

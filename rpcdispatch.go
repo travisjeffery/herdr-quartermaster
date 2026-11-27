@@ -180,6 +180,9 @@ func dispatchRPC(cfg Config, h Herdr, id string, o DispatchOpts) (string, error)
 }
 
 func rpcStart(id string) error {
+	if err := rpcCleanupBarrier(id); err != nil {
+		return err
+	}
 	// A live supervisor is a reconnection, not a launch or another prompt.
 	if r, err := rpcClient(id, rpcRequest{Op: "status"}); err == nil && r.Status != nil {
 		return nil
@@ -237,6 +240,9 @@ func rpcResume(cfg Config, id, by string) (string, error) {
 	if b.Status == StatusClosed {
 		return "", errors.New("bead is closed")
 	}
+	if err = rpcCleanupBarrier(id); err != nil {
+		return "", err
+	}
 	auto, err := cfg.enforce(b, "resume", by)
 	if err != nil {
 		return "", err
@@ -277,7 +283,7 @@ func rpcAssistantText(raw []byte) string {
 // switching, arbitrary shell execution, or approval responses.
 func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 	if len(pos) < 2 {
-		return errors.New("usage: quartermaster rpc view|inspect|history|feed|status|output|events|receipt|tell|steer|fork|fork-status|cancel|stop|stop-graceful|resume <bead> [arguments]")
+		return errors.New("usage: quartermaster rpc view|inspect|history|feed|status|output|events|receipt|tell|steer|fork|fork-status|cancel|stop|stop-graceful|resume|retain|cleanup <bead> [arguments]")
 	}
 	op, id := pos[0], pos[1]
 	if !rpcIDRE.MatchString(id) {
@@ -343,6 +349,11 @@ func rpcCmd(cfg Config, pos []string, by string, out io.Writer) error {
 		}
 		// Only authoritative completed assistant messages, not duplicate deltas.
 		err = readRPCLog(f, func(raw []byte) error {
+			var gap rpcLogGap
+			if json.Unmarshal(raw, &gap) == nil && gap.Type == rpcRetentionGap {
+				_, err := fmt.Fprintf(out, "[GAP: retention removed %d records (%d bytes); saved session and receipts retained]\n", gap.Records, gap.Bytes)
+				return err
+			}
 			_, err := io.WriteString(out, rpcAssistantText(raw))
 			return err
 		})
