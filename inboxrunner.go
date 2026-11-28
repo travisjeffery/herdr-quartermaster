@@ -67,6 +67,8 @@ var inboxRunnerKnownKinds = map[string]bool{
 	string(EventReviewNeeded):   true,
 	string(EventReviewFeedback): true,
 	string(EventReviewPassed):   true,
+	string(EventCouncilDone):    true,
+	string(EventCouncilFailed):  true,
 	string(EventOrphanFinish):   true,
 	string(EventMerged):         true,
 	"closed":                    true,

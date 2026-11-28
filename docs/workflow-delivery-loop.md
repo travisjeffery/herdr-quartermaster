@@ -31,7 +31,10 @@ autonomy dial.
 
 Start with an implementer bead whose description states the design, scope
 boundaries (for parallel lanes), and 2–4 checkable bullets under
-`## Acceptance`:
+`## Acceptance`. For high-stakes or ambiguous designs, you can first run a
+multi-model planning council (`quartermaster council start <bead> --panel <name>`)
+to fan out independent read-only planning roles and synthesize a fact-checked
+canonical plan + file-disjoint bead DAG; see [docs/council.md](council.md).
 
 ```sh
 bd create "Add token-bucket rate limiter" -t task -p 2 -d "$(cat <<'EOF'

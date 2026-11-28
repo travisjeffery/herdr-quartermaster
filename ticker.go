@@ -105,6 +105,7 @@ type Ticker struct {
 	orphanEnv      *orphanFinishEnv
 	blockerEnv     *blockerWakeEnv
 	ciRerunEnv     *ciRerunEnv
+	councilEnv     *councilEnv
 	inboxRunnerEnv *inboxRunnerEnv
 	inboxRunnerCtx context.Context
 	inboxRunnerWG  *sync.WaitGroup
@@ -671,6 +672,7 @@ func (t Ticker) once(st *TickerState) error {
 	}
 	t.checkBlockers(st, allBeads, threads, agents, agentsComplete, freshPRs, knownPRs, ghRefreshed, promptedThisTick, relaunch, watchOutcomes, now)
 	t.checkReviewLoops(threads, now)
+	t.reconcileCouncils(now)
 	t.advanceWorkflows(st, threads, now)
 	t.processJobs(st, threads, agents, now)
 	piCoordStatus := t.nudgeCoordinator(st, agents, now)

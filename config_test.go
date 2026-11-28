@@ -378,3 +378,187 @@ func TestMatchPathGlob(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadConfigCouncilsValidation(t *testing.T) {
+	writeCfg := func(t *testing.T, body string) {
+		t.Helper()
+		dir := t.TempDir()
+		t.Setenv("QUARTERMASTER_CONFIG_DIR", dir)
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("defaults empty and loads cleanly", func(t *testing.T) {
+		writeCfg(t, "repo = \"/tmp/repo\"\n")
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig failed: %v", err)
+		}
+		if len(cfg.Councils) != 0 {
+			t.Fatalf("Councils = %v, want empty", cfg.Councils)
+		}
+	})
+
+	t.Run("valid panel with custom and built-in roles and defaults loads cleanly", func(t *testing.T) {
+		writeCfg(t, `
+repo = "/tmp/repo"
+
+[roles.planner-a]
+worktree = false
+agent = "pi"
+model = "provider/model-a"
+brief = "investigator"
+exclude_tools = ["edit", "write"]
+
+[roles.planner-b]
+worktree = false
+agent = "pi"
+model = "provider/model-b"
+brief = "investigator"
+exclude_tools = ["edit", "write"]
+
+[roles.planner-chair]
+worktree = false
+agent = "pi"
+model = "provider/model-chair"
+brief = "investigator"
+exclude_tools = ["edit", "write"]
+
+[councils.default]
+members = ["planner-a", "planner-b", "investigator"]
+chair = "planner-chair"
+
+[councils.fast]
+members = ["planner-a", "planner-b"]
+chair = "planner-a"
+anonymize = false
+min_quorum = 1
+timeout_minutes = 10
+auto_cleanup = false
+`)
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig failed: %v", err)
+		}
+		def, ok := cfg.Councils["default"]
+		if !ok {
+			t.Fatal("missing default council")
+		}
+		if !def.anonymizeEnabled() {
+			t.Fatal("default anonymize should be true")
+		}
+		if !def.autoCleanupEnabled() {
+			t.Fatal("default auto_cleanup should be true")
+		}
+		if got := def.effectiveMinQuorum(); got != 3 {
+			t.Fatalf("effectiveMinQuorum() = %d, want 3", got)
+		}
+		if got := def.effectiveTimeoutMinutes(); got != 20 {
+			t.Fatalf("effectiveTimeoutMinutes() = %d, want 20", got)
+		}
+
+		fast, ok := cfg.Councils["fast"]
+		if !ok {
+			t.Fatal("missing fast council")
+		}
+		if fast.anonymizeEnabled() {
+			t.Fatal("fast anonymize should be false")
+		}
+		if fast.autoCleanupEnabled() {
+			t.Fatal("fast auto_cleanup should be false")
+		}
+		if got := fast.effectiveMinQuorum(); got != 1 {
+			t.Fatalf("fast effectiveMinQuorum() = %d, want 1", got)
+		}
+		if got := fast.effectiveTimeoutMinutes(); got != 10 {
+			t.Fatalf("fast effectiveTimeoutMinutes() = %d, want 10", got)
+		}
+	})
+
+	rolesHeader := `
+repo = "/tmp/repo"
+
+[roles.planner-a]
+worktree = false
+brief = "investigator"
+
+[roles.planner-b]
+worktree = false
+brief = "investigator"
+
+[roles.planner-chair]
+worktree = false
+brief = "investigator"
+`
+
+	invalid := map[string]struct {
+		toml string
+		want string
+	}{
+		"invalid council name": {
+			toml: rolesHeader + "\n[councils.\"Bad Name\"]\nmembers = [\"planner-a\", \"planner-b\"]\nchair = \"planner-chair\"\n",
+			want: "invalid council name",
+		},
+		"missing members": {
+			toml: rolesHeader + "\n[councils.default]\nchair = \"planner-chair\"\n",
+			want: "at least 2 unique roles",
+		},
+		"single member": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\"]\nchair = \"planner-chair\"\n",
+			want: "at least 2 unique roles",
+		},
+		"duplicate members": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\", \"planner-a\"]\nchair = \"planner-chair\"\n",
+			want: "duplicate member role",
+		},
+		"empty member role": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\", \"\"]\nchair = \"planner-chair\"\n",
+			want: "must be non-empty",
+		},
+		"whitespace member role": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\", \" planner-b \"]\nchair = \"planner-chair\"\n",
+			want: "surrounding whitespace",
+		},
+		"unknown member role": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\", \"does-not-exist\"]\nchair = \"planner-chair\"\n",
+			want: "unknown role",
+		},
+		"missing chair": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\", \"planner-b\"]\n",
+			want: "chair role is required",
+		},
+		"unknown chair role": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\", \"planner-b\"]\nchair = \"mystery-chair\"\n",
+			want: "unknown role",
+		},
+		"explicit zero min_quorum": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\", \"planner-b\"]\nchair = \"planner-chair\"\nmin_quorum = 0\n",
+			want: "min_quorum",
+		},
+		"negative min_quorum": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\", \"planner-b\"]\nchair = \"planner-chair\"\nmin_quorum = -1\n",
+			want: "min_quorum",
+		},
+		"min_quorum exceeds member count": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\", \"planner-b\"]\nchair = \"planner-chair\"\nmin_quorum = 3\n",
+			want: "min_quorum",
+		},
+		"explicit zero timeout_minutes": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\", \"planner-b\"]\nchair = \"planner-chair\"\ntimeout_minutes = 0\n",
+			want: "timeout_minutes",
+		},
+		"negative timeout_minutes": {
+			toml: rolesHeader + "\n[councils.default]\nmembers = [\"planner-a\", \"planner-b\"]\nchair = \"planner-chair\"\ntimeout_minutes = -5\n",
+			want: "timeout_minutes",
+		},
+	}
+	for name, tc := range invalid {
+		t.Run("reject/"+name, func(t *testing.T) {
+			writeCfg(t, tc.toml)
+			if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("loadConfig() err = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}

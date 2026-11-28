@@ -306,7 +306,14 @@ func (c Config) resolveRoleForBead(b Bead, explicit string) (EffectiveRole, erro
 	if name == "" {
 		name = roleImplementer
 	}
-	return c.resolveRole(name)
+	eff, err := c.resolveRole(name)
+	if err != nil {
+		return EffectiveRole{}, err
+	}
+	if isCouncilHelperBead(b) {
+		eff.Worktree = false
+	}
+	return eff, nil
 }
 
 // setRoleLabel persists role:<name> on the bead for non-default roles and
@@ -721,7 +728,11 @@ func loadRoleInstructions(role EffectiveRole) (string, error) {
 // implementer role with worktree=true and no role-specific instructions, it
 // returns the exact existing brief() output for full backward compatibility.
 func briefForRole(b Bead, role EffectiveRole, branch, workdir, repoRef, linear, globalInstructions, roleInstructions string) string {
-	switch role.Brief {
+	briefKind := role.Brief
+	if isCouncilHelperBead(b) && briefKind == roleImplementer {
+		briefKind = roleInvestigator
+	}
+	switch briefKind {
 	case roleReviewer:
 		return reviewerBrief(b, role, branch, workdir, repoRef, linear, globalInstructions, roleInstructions)
 	case roleInvestigator:

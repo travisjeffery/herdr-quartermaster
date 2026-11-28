@@ -186,6 +186,7 @@ type contextThread struct {
 	Role          string     `json:"role,omitempty"`
 	RolloutTarget string     `json:"rollout_target,omitempty"`
 	ReviewLoop    string     `json:"review_loop,omitempty"`
+	Council       string     `json:"council,omitempty"`
 	State         string     `json:"state,omitempty"`
 	Agent         string     `json:"agent,omitempty"`
 	Title         string     `json:"title,omitempty"`
@@ -638,6 +639,7 @@ func buildContextThread(cfg Config, t Thread, g Group, noAgentKind string, compa
 		ct.RolloutTarget = target
 	}
 	ct.ReviewLoop = reviewLoopContextLine(t.Bead.ID)
+	ct.Council = councilContextLine(t.Bead.ID)
 	ct.State = stateLine(t)
 	agent := "no agent"
 	if t.Agent != nil {
@@ -1083,6 +1085,9 @@ func renderThreadsText(doc *contextDoc) string {
 		}
 		if t.ReviewLoop != "" {
 			fmt.Fprintf(&s, "  review: %s\n", t.ReviewLoop)
+		}
+		if t.Council != "" {
+			fmt.Fprintf(&s, "  council: %s\n", t.Council)
 		}
 		if t.Watches != "" {
 			fmt.Fprintf(&s, "  watches: %s\n", t.Watches)

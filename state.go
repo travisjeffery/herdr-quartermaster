@@ -290,6 +290,8 @@ const (
 	EventReviewNeeded    EventKind = "review_needed"
 	EventReviewFeedback  EventKind = "review_feedback"
 	EventReviewPassed    EventKind = "review_passed"
+	EventCouncilDone     EventKind = "council_done"
+	EventCouncilFailed   EventKind = "council_failed"
 )
 
 type Event struct {
